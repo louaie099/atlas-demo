@@ -89,6 +89,13 @@ describe("computeEmployeeDaySummary", () => {
     expect(summary.shiftCode).toBeNull();
   });
 
+  it("returns not_rostered (distinct from off) when no weekly_shifts entry exists for the day at all — e.g. a freshly-created employee", () => {
+    const employee = makeEmployee({ weekly_shifts: [] });
+    const summary = computeEmployeeDaySummary(employee, "Wednesday", [], [], []);
+    expect(summary.status).toBe("not_rostered");
+    expect(summary.shiftCode).toBeNull();
+  });
+
   it("returns on_duty with the RAM flight listed as a duty for a normal working day with a RAM assignment", () => {
     const employee = makeEmployee({ id: "sara" });
     const assignments: Assignment[] = [

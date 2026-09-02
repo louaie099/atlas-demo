@@ -52,6 +52,12 @@ export function recommendResolution(
   const candidate = allEmployees.find((e) => {
     if (e.id === conflict.employee.id || e.is_duty_officer) return false;
     if (!e.skills.includes(requiredRole)) return false;
+    // An employee with no roster/shift assigned yet (see migration 0007 —
+    // Employee.shift_start/shift_end are now nullable, since a freshly
+    // created employee has a workforce profile but no plan) cannot be
+    // evaluated as a resolution candidate — there's no shift to check
+    // against.
+    if (e.shift_start === null || e.shift_end === null) return false;
 
     const shiftStartMin = timeToMinutes(e.shift_start);
     const shiftEndMin = timeToMinutes(e.shift_end);

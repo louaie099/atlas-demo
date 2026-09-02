@@ -16,7 +16,7 @@ interface DayDuty {
 interface DaySummary {
   dayOfWeek: string;
   shiftCode: string | null;
-  status: "off" | "committed" | "transit" | "on_duty";
+  status: "off" | "not_rostered" | "committed" | "transit" | "on_duty";
   duties: DayDuty[];
   foreignCommitment: { airline: string; window: { start: string; end: string } } | null;
 }
@@ -26,6 +26,7 @@ type Tab = "overview" | "qualifications" | "schedule" | "history";
 const statusLabel: Record<string, string> = {
   on_duty: "On Duty",
   off: "Off",
+  not_rostered: "Not Rostered",
   transit: "Transit",
   committed: "Committed",
 };
@@ -120,8 +121,19 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
                 <Row label="Employee ID" value={employee.id} />
                 <Row label="Employer" value="RAM Handling ACE" />
                 <Row label="Default Team" value={<TeamBadge name={employee.assignment} />} />
-                <Row label="Current Shift" value={employee.shift_code ?? `${employee.shift_start}–${employee.shift_end} (custom)`} />
-                <Row label="Working Hours Today" value={`${employee.shift_start}–${employee.shift_end}`} />
+                <Row
+                  label="Current Shift"
+                  value={
+                    employee.shift_code ??
+                    (employee.shift_start && employee.shift_end
+                      ? `${employee.shift_start}–${employee.shift_end} (custom)`
+                      : "Not yet rostered")
+                  }
+                />
+                <Row
+                  label="Working Hours Today"
+                  value={employee.shift_start && employee.shift_end ? `${employee.shift_start}–${employee.shift_end}` : "—"}
+                />
                 <Row
                   label="Current Status"
                   value={
@@ -130,8 +142,11 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
                     </Badge>
                   }
                 />
-                <Row label="Weekly Hours" value={`${employee.weekly_hours}h`} />
-                <Row label="Rest Before Shift" value={`${employee.rest_before_shift_hours}h`} />
+                <Row label="Weekly Hours" value={employee.weekly_hours !== null ? `${employee.weekly_hours}h` : "Not yet planned"} />
+                <Row
+                  label="Rest Before Shift"
+                  value={employee.rest_before_shift_hours !== null ? `${employee.rest_before_shift_hours}h` : "—"}
+                />
                 {employee.foreign_company_authorizations.length > 0 && (
                   <Row label="Foreign Authorizations" value={employee.foreign_company_authorizations.join(", ")} />
                 )}
@@ -167,6 +182,9 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
                     </p>
                   </div>
                 )}
+                {employee.skills.length === 0 && employee.foreign_company_authorizations.length === 0 && (
+                  <p className="text-sm text-muted">No qualifications recorded yet.</p>
+                )}
               </div>
             )}
 
@@ -182,7 +200,7 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
                       }`}
                     >
                       <div className="font-medium text-ink">{d.dayOfWeek.slice(0, 3)}</div>
-                      <div className="text-muted">{d.shiftCode ?? "OFF"}</div>
+                      <div className="text-muted">{d.shiftCode ?? (d.status === "not_rostered" ? "—" : "OFF")}</div>
                       <div className="text-muted">{d.duties.length || "—"}</div>
                     </button>
                   ))}
@@ -192,24 +210,27 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
                   <div className="border border-border rounded-xl2 p-3 flex flex-col gap-2">
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-ink">{selectedDaySummary.dayOfWeek}</span>
-                      <Badge tone={selectedDaySummary.status === "off" ? "neutral" : "good"}>
+                      <Badge tone={selectedDaySummary.status === "on_duty" || selectedDaySummary.status === "committed" ? "good" : "neutral"}>
                         {statusLabel[selectedDaySummary.status]}
                       </Badge>
                     </div>
 
                     {selectedDaySummary.status === "off" ? (
                       <p className="text-sm text-muted">Off — no shift scheduled.</p>
+                    ) : selectedDaySummary.status === "not_rostered" ? (
+                      <p className="text-sm text-muted">Not yet rostered for this day — Weekly Planning hasn't assigned a shift.</p>
                     ) : (
                       <>
                         <p className="text-sm text-muted">
-                          Shift start ({employee.shift_start}) → {selectedDaySummary.duties.length === 0 ? "no duties assigned yet" : ""}
+                          Shift start ({employee.shift_start ?? "—"}) →{" "}
+                          {selectedDaySummary.duties.length === 0 ? "no duties assigned yet" : ""}
                         </p>
                         {selectedDaySummary.duties.map((duty, i) => (
                           <p key={i} className="text-sm text-ink">
                             → {duty.scheduledDeparture} {duty.flightNumber} ({duty.airline}) · {duty.role}
                           </p>
                         ))}
-                        <p className="text-sm text-muted">→ Shift end ({employee.shift_end})</p>
+                        <p className="text-sm text-muted">→ Shift end ({employee.shift_end ?? "—"})</p>
                         <DayTimelineBar day={selectedDaySummary} />
                       </>
                     )}

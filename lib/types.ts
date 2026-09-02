@@ -15,13 +15,16 @@ export interface WeeklyShiftEntry {
 export interface Employee {
   id: string;
   name: string;
-  skills: string[]; // CAPABILITY — what this employee is trained/authorized to perform on a flight task (Boarding, Gate, Check-in, Arrivals)
+  skills: string[]; // CAPABILITY — what this employee is trained/authorized to perform on a flight task (Boarding, Gate, Check-in, etc.)
   assignment: string; // CURRENT PLACEMENT — where this employee is actually working: an internal RAM service (see teams.ts) or a foreign company name (see company-config.ts). Distinct from foreign_company_authorizations, which is capability, not current placement.
-  shift_code: string | null; // authoritative code from lib/shift-templates.ts; null only for scenario-critical legacy cases (see seed-data.ts comments)
-  shift_start: string; // "HH:mm" — derived from shift_code where one exists
-  shift_end: string; // "HH:mm"
-  rest_before_shift_hours: number;
-  weekly_hours: number;
+  shift_code: string | null; // authoritative code from lib/shift-templates.ts; null only for scenario-critical legacy cases (see seed-data.ts comments) OR a newly-created employee with no roster yet
+  // Planning state, not identity — derived from Weekly Planning/roster
+  // generation, never entered at employee creation. All four are null
+  // for a freshly-created employee until a roster assigns them a shift.
+  shift_start: string | null; // "HH:mm"
+  shift_end: string | null; // "HH:mm"
+  rest_before_shift_hours: number | null;
+  weekly_hours: number | null;
   is_duty_officer: boolean;
   off_days: string[]; // e.g. ["Thursday"] — days this employee is not working this week
   foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're TRAINED/AUTHORIZED to work (capability). Does NOT mean currently placed there — that's what `assignment` represents. Being authorized never removes RAM availability outside an actual protected window (see foreign-company-window.ts).

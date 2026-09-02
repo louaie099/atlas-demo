@@ -1,8 +1,11 @@
+import { CONFIGURED_COMPANIES } from "./company-config";
+
 /**
  * SKILL vs ASSIGNMENT is the core distinction:
  * - Skill (Employee.skills) = a flight-task capability the employee is
- *   trained to perform: Boarding, Gate, Check-in, Arrivals. See the SKILLS
- *   catalog below.
+ *   trained to perform (Boarding, Gate, Check-in, etc. — see
+ *   lib/skill-groups.ts's ADDABLE_QUALIFICATION_GROUPS for the confirmed
+ *   vocabulary).
  * - Assignment (Employee.assignment) = where the employee is CURRENTLY
  *   placed for weekly planning: an internal RAM service (this list) or a
  *   foreign company name (see company-config.ts). An employee's assignment
@@ -41,18 +44,6 @@ export const TEAMS = [
 export type Team = (typeof TEAMS)[number];
 
 /**
- * The core flight-task skill catalog, as confirmed. Other qualifiers that
- * predate this catalog (Weight Control, Business Class, Care Point, Ramp
- * Team) remain in use in existing data — some load-bearing for the
- * scripted scenario (Amina Fassi's Care Point skill is what makes her the
- * correct resolution candidate in the AT201 conflict) — but are not part
- * of this confirmed list. Left as-is pending clarification rather than
- * silently reclassified or removed.
- */
-export const SKILLS = ["Boarding", "Gate", "Check-in", "Arrivals"] as const;
-export type Skill = (typeof SKILLS)[number];
-
-/**
  * Foreign-company work is deliberately NOT a permanent team — but it CAN
  * be an employee's current assignment for the week (Employee.assignment
  * equals a company name from company-config.ts), exactly like an internal
@@ -85,3 +76,14 @@ export function isFixedPlanningTeam(assignment: string): boolean {
 export function isTransitTeam(assignment: string): boolean {
   return assignment === "Transit";
 }
+
+/**
+ * The single, centralized list of operational placements an employee can
+ * be assigned to — internal RAM teams and foreign companies together,
+ * flat, exactly as an operator thinks about workforce groups (Employees
+ * filtering and Add Employee both use this same list, so the two never
+ * drift apart). Internally, TEAMS vs. company names are still distinct
+ * concepts (see company-config.ts) — this list just presents them as one
+ * understandable set of choices.
+ */
+export const OPERATIONAL_PLACEMENTS = [...TEAMS, ...CONFIGURED_COMPANIES];

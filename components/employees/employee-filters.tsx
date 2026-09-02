@@ -1,5 +1,4 @@
-import { TEAMS } from "@/lib/teams";
-import { CONFIGURED_COMPANIES } from "@/lib/company-config";
+import { OPERATIONAL_PLACEMENTS } from "@/lib/teams";
 import { SHIFT_CODES } from "@/lib/shift-templates";
 
 export interface EmployeeFilterState {
@@ -9,11 +8,6 @@ export interface EmployeeFilterState {
   shiftToday: string;
   status: string;
 }
-
-// Flat, operational grouping list — internal teams and foreign companies
-// selectable side by side, exactly as the operator thinks about them. No
-// "is this a team or a company" distinction surfaced here.
-const TEAM_AND_COMPANY_OPTIONS = [...TEAMS, ...CONFIGURED_COMPANIES];
 
 const SHIFT_CODE_OPTIONS = Object.keys(SHIFT_CODES);
 
@@ -40,7 +34,7 @@ export function EmployeeFilters({
         onChange={(e) => onChange({ ...filters, team: e.target.value })}
       >
         <option value="">All teams</option>
-        {TEAM_AND_COMPANY_OPTIONS.map((t) => (
+        {OPERATIONAL_PLACEMENTS.map((t) => (
           <option key={t} value={t}>
             {t}
           </option>
@@ -79,6 +73,7 @@ export function EmployeeFilters({
         <option value="">Any status</option>
         <option value="on_duty">On Duty</option>
         <option value="off">Off</option>
+        <option value="not_rostered">Not Rostered</option>
         <option value="committed">Committed (foreign)</option>
         <option value="transit">Transit</option>
       </select>

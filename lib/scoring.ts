@@ -6,6 +6,9 @@ export interface TimeWindow {
   end: string; // "HH:mm"
 }
 
+// An employee with a real, roster-assigned shift for scoring purposes.
+type RosteredEmployee = Employee & { shift_start: string; shift_end: string; rest_before_shift_hours: number; weekly_hours: number };
+
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
@@ -13,6 +16,10 @@ function timeToMinutes(t: string): number {
 
 function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
   return timeToMinutes(a.start) < timeToMinutes(b.end) && timeToMinutes(b.start) < timeToMinutes(a.end);
+}
+
+function hasRosterAssigned(e: Employee): e is RosteredEmployee {
+  return e.shift_start !== null && e.shift_end !== null && e.rest_before_shift_hours !== null && e.weekly_hours !== null;
 }
 
 /**
@@ -24,6 +31,11 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
  * Exclusions happen before any scoring, and are not negotiable via
  * reasoning/flagging — these employees are never candidates, not even
  * flagged ones:
+ *  - No roster/shift assigned yet (shift_start/shift_end/rest/weekly_hours
+ *    are null) — a freshly-created employee has a workforce profile but
+ *    no planning state until Weekly Planning assigns them a shift. There
+ *    is nothing to evaluate rest/fairness/extension against, so they
+ *    cannot be a candidate, flagged or otherwise, until they're rostered.
  *  - Fixed-planning teams (Leaders, Duty Officers, Caisse/BCB) follow
  *    specialized planning outside general ACE allocation.
  *  - Transit agents are committed to Transit for their full shift and are
@@ -52,7 +64,8 @@ export function scoreCandidates(
   config: Config,
   occupiedWindows: Record<string, TimeWindow[]> = {}
 ): CandidateResult[] {
-  const eligiblePool = employees.filter((e) => {
+  const eligiblePool = employees.filter((e): e is RosteredEmployee => {
+    if (!hasRosterAssigned(e)) return false;
     if (e.is_duty_officer) return false;
     if (isFixedPlanningTeam(e.assignment)) return false;
     if (isTransitTeam(e.assignment) && role !== "Transit") return false;

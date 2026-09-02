@@ -5,7 +5,7 @@ import { getTeamColor } from "@/lib/team-colors";
 
 interface EnrichedEmployee extends Employee {
   today: {
-    status: "off" | "committed" | "transit" | "on_duty";
+    status: "off" | "not_rostered" | "committed" | "transit" | "on_duty";
     shiftCode: string | null;
     foreignCommitment: { airline: string } | null;
   };
@@ -14,6 +14,7 @@ interface EnrichedEmployee extends Employee {
 const statusLabel: Record<string, string> = {
   on_duty: "On Duty",
   off: "Off",
+  not_rostered: "Not Rostered",
   transit: "Transit",
   committed: "Committed",
 };
@@ -21,6 +22,7 @@ const statusLabel: Record<string, string> = {
 const statusTone: Record<string, "good" | "neutral" | "warn"> = {
   on_duty: "good",
   off: "neutral",
+  not_rostered: "neutral",
   transit: "warn",
   committed: "warn",
 };
@@ -62,7 +64,7 @@ export function EmployeeTable({
                 <TeamBadge name={e.assignment} />
               </td>
               <td className="px-4 py-3 whitespace-nowrap text-muted">
-                {e.today.shiftCode ?? (e.today.status === "off" ? "—" : e.shift_code ?? "custom")}
+                {e.today.shiftCode ?? (e.today.status === "not_rostered" ? "Not rostered" : "—")}
               </td>
               <td className="px-4 py-3">
                 <div className="flex flex-wrap gap-1">
@@ -90,7 +92,11 @@ export function EmployeeTable({
                 </Badge>
               </td>
               <td className="px-4 py-3 whitespace-nowrap">
-                <Badge tone={e.weekly_hours >= 35 ? "warn" : "neutral"}>{e.weekly_hours}h</Badge>
+                {e.weekly_hours === null ? (
+                  <span className="text-muted">—</span>
+                ) : (
+                  <Badge tone={e.weekly_hours >= 35 ? "warn" : "neutral"}>{e.weekly_hours}h</Badge>
+                )}
               </td>
             </tr>
           ))}

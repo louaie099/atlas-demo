@@ -24,3 +24,19 @@ export function groupSkills(skills: string[]): { group: string; skills: string[]
 
   return groups;
 }
+
+/**
+ * The confirmed, curated qualification vocabulary offered when CREATING a
+ * new employee — deliberately narrower than SKILL_GROUPS above, which
+ * still includes legacy qualifiers (Arrivals, Ramp Team, Business Class)
+ * kept only because existing employees' data depends on them (e.g. Amina
+ * Fassi's Care Point skill, Sara Bennis's Business Class). New employees
+ * should only ever be given qualifications from this list — Arrivals and
+ * Ramp Team are explicitly excluded here since they were never confirmed
+ * as real ATLAS qualifications, just MVP-era placeholders.
+ */
+export const ADDABLE_QUALIFICATION_GROUPS: { group: string; skills: string[] }[] = [
+  { group: "Core", skills: ["Check-in", "Weight Control"] },
+  { group: "Airside", skills: ["Boarding", "Gate", "Care Point"] },
+  { group: "Specialized", skills: ["Profiling", "Mesure", "Transit", "Caisse/BCB", "Service Plus"] },
+];

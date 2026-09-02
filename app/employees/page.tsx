@@ -11,7 +11,7 @@ import { QualificationMatrix } from "@/components/employees/qualification-matrix
 
 interface EnrichedEmployee extends Employee {
   today: {
-    status: "off" | "committed" | "transit" | "on_duty";
+    status: "off" | "not_rostered" | "committed" | "transit" | "on_duty";
     shiftCode: string | null;
     foreignCommitment: { airline: string } | null;
   };

@@ -46,6 +46,20 @@ function slugify(name: string): string {
     .replace(/(^-|-$)/g, "");
 }
 
+/**
+ * Creates an employee's WORKFORCE PROFILE only — who they are, what
+ * they're qualified/authorized to do, and where they're currently placed.
+ * Deliberately does NOT accept or invent shift_start, shift_end,
+ * rest_before_shift_hours, or weekly_hours: those are planning state that
+ * belongs to Weekly Planning/roster generation, not employee creation.
+ * They're inserted as null (see migration 0007) — this employee has no
+ * roster yet, which is honest, not a placeholder to work around.
+ *
+ * Also does not create any Assignment or weekly_shifts entry, even if
+ * `assignment` is a foreign company — a real flight commitment is only
+ * ever generated from that company's actual scheduled flights (see
+ * lib/foreign-shift-planning.ts), never fabricated at creation time.
+ */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
   const body = await req.json();
@@ -54,16 +68,13 @@ export async function POST(req: Request) {
     name,
     skills,
     assignment = "General T1 Pool",
-    shift_start,
-    shift_end,
-    rest_before_shift_hours,
-    weekly_hours,
+    foreign_company_authorizations = [],
     is_duty_officer = false,
   } = body;
 
-  if (!name || !Array.isArray(skills) || skills.length === 0 || !shift_start || !shift_end) {
+  if (!name || !Array.isArray(skills) || skills.length === 0 || !assignment) {
     return NextResponse.json(
-      { error: "name, skills (non-empty array), shift_start, and shift_end are required" },
+      { error: "name, skills (non-empty array), and assignment are required" },
       { status: 400 }
     );
   }
@@ -82,10 +93,12 @@ export async function POST(req: Request) {
       name,
       skills,
       assignment,
-      shift_start,
-      shift_end,
-      rest_before_shift_hours: Number(rest_before_shift_hours) || 0,
-      weekly_hours: Number(weekly_hours) || 0,
+      foreign_company_authorizations,
+      shift_code: null,
+      shift_start: null,
+      shift_end: null,
+      rest_before_shift_hours: null,
+      weekly_hours: null,
       is_duty_officer: Boolean(is_duty_officer),
     })
     .select()
