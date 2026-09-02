@@ -1,16 +1,37 @@
 /**
- * TEAM vs QUALIFICATION is a deliberate distinction, not a naming choice:
- * - Qualification (Employee.roles) = what an employee is capable/authorized
- *   to perform. Can hold several simultaneously.
- * - Team (Employee.default_team) = where they normally belong for weekly
- *   planning. An employee can be Profiling-qualified while their default
- *   team is General T1 Pool — the qualification doesn't change their team.
+ * SKILL vs ASSIGNMENT is the core distinction:
+ * - Skill (Employee.skills) = a flight-task capability the employee is
+ *   trained to perform: Boarding, Gate, Check-in, Arrivals. See the SKILLS
+ *   catalog below.
+ * - Assignment (Employee.assignment) = where the employee is CURRENTLY
+ *   placed for weekly planning: an internal RAM service (this list) or a
+ *   foreign company name (see company-config.ts). An employee's assignment
+ *   can differ from what they're skilled at — e.g. someone Boarding-skilled
+ *   can be currently assigned to Profiling, and their Boarding skill simply
+ *   isn't in active use that week.
+ *
+ * Internal RAM services, with the operational descriptions provided:
+ *  - General T1 Pool: general/unassigned — the default ACE pool, no
+ *    specialized placement.
+ *  - Transit: agents handling anything related to passengers transitioning
+ *    through CMN. Committed for the full shift once clocked in (see
+ *    isTransitTeam below) — no partial availability.
+ *  - Profiling: document verification for transitioning passengers.
+ *  - Mesure: inspecting carry-on baggage at the gate. Distinct from Weight
+ *    Control (normal baggage-weight checking in T1).
+ *  - Baggage Claim: baggage claim area — handles baggage claim and baggage
+ *    loss matters.
+ *  - Service Plus: T1-based premium/VIP/business-class/lounge activity.
+ *  - Caisse/BCB: the payment desk.
+ *  - Leaders / Duty Officers: specialized roles with fixed JR/NT-type
+ *    planning (see shift-templates.ts) — never general ACE allocation.
  */
 export const TEAMS = [
   "General T1 Pool",
   "Transit",
   "Profiling",
   "Mesure",
+  "Baggage Claim",
   "Leaders",
   "Duty Officers",
   "Caisse/BCB",
@@ -20,13 +41,26 @@ export const TEAMS = [
 export type Team = (typeof TEAMS)[number];
 
 /**
- * Foreign-company work is deliberately NOT a team. An ACE's foreign-company
- * authorization (Employee.foreign_company_authorizations) is layered on
- * top of their normal team and availability — they work La RAM whenever
- * they're outside a protected foreign-company commitment window (see
- * foreign-company-window.ts). Modeling it as a team would wrongly imply
- * permanent unavailability to RAM, which contradicts how this actually
- * works.
+ * The core flight-task skill catalog, as confirmed. Other qualifiers that
+ * predate this catalog (Weight Control, Business Class, Care Point, Ramp
+ * Team) remain in use in existing data — some load-bearing for the
+ * scripted scenario (Amina Fassi's Care Point skill is what makes her the
+ * correct resolution candidate in the AT201 conflict) — but are not part
+ * of this confirmed list. Left as-is pending clarification rather than
+ * silently reclassified or removed.
+ */
+export const SKILLS = ["Boarding", "Gate", "Check-in", "Arrivals"] as const;
+export type Skill = (typeof SKILLS)[number];
+
+/**
+ * Foreign-company work is deliberately NOT a permanent team — but it CAN
+ * be an employee's current assignment for the week (Employee.assignment
+ * equals a company name from company-config.ts), exactly like an internal
+ * service assignment. What makes it non-permanent is operational, not
+ * structural: outside a specific flight's protected window (see
+ * foreign-company-window.ts), that employee is still available to RAM.
+ * Being *assigned* there doesn't blanket-exclude them the way Transit or a
+ * fixed-planning team does.
  */
 
 /**
@@ -38,8 +72,8 @@ export type Team = (typeof TEAMS)[number];
  */
 export const FIXED_PLANNING_TEAMS: Team[] = ["Leaders", "Duty Officers", "Caisse/BCB"];
 
-export function isFixedPlanningTeam(team: string): boolean {
-  return (FIXED_PLANNING_TEAMS as string[]).includes(team);
+export function isFixedPlanningTeam(assignment: string): boolean {
+  return (FIXED_PLANNING_TEAMS as string[]).includes(assignment);
 }
 
 /**
@@ -48,6 +82,6 @@ export function isFixedPlanningTeam(team: string): boolean {
  * candidates for any role other than Transit itself, for the duration of
  * their shift — there is no partial availability.
  */
-export function isTransitTeam(team: string): boolean {
-  return team === "Transit";
+export function isTransitTeam(assignment: string): boolean {
+  return assignment === "Transit";
 }

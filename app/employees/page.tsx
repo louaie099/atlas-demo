@@ -1,81 +1,114 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Employee } from "@/lib/types";
-import { Card, Badge } from "@/components/ui";
 import { AddEmployeeForm } from "@/components/add-employee-form";
+import { WorkforceSummaryLine } from "@/components/employees/workforce-summary-line";
+import { EmployeeFilters, EmployeeFilterState } from "@/components/employees/employee-filters";
+import { EmployeeTable } from "@/components/employees/employee-table";
+import { EmployeeDrawer } from "@/components/employees/employee-drawer";
+import { QualificationMatrix } from "@/components/employees/qualification-matrix";
+import { CONFIGURED_COMPANIES } from "@/lib/company-config";
+
+interface EnrichedEmployee extends Employee {
+  today: {
+    status: "off" | "committed" | "transit" | "on_duty";
+    shiftCode: string | null;
+    foreignCommitment: { airline: string } | null;
+  };
+}
+
+type ViewTab = "workforce" | "matrix";
 
 export default function EmployeesPage() {
-  const [employees, setEmployees] = useState<Employee[] | null>(null);
+  const [view, setView] = useState<ViewTab>("workforce");
+  const [employees, setEmployees] = useState<EnrichedEmployee[] | null>(null);
+  const [demoToday, setDemoToday] = useState<string>("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [filters, setFilters] = useState<EmployeeFilterState>({ search: "", team: "", skill: "", status: "" });
 
   function loadEmployees() {
     fetch("/api/employees")
       .then((r) => r.json())
-      .then((data) => setEmployees(data.employees ?? []));
+      .then((data) => {
+        setEmployees(data.employees ?? []);
+        setDemoToday(data.demoToday ?? "");
+      });
   }
 
   useEffect(loadEmployees, []);
 
+  const allSkills = useMemo(
+    () => Array.from(new Set((employees ?? []).flatMap((e) => e.skills))).sort(),
+    [employees]
+  );
+
+  const filtered = useMemo(() => {
+    if (!employees) return [];
+    return employees.filter((e) => {
+      if (filters.search && !e.name.toLowerCase().includes(filters.search.toLowerCase())) return false;
+      if (filters.team) {
+        if (filters.team === "__foreign__") {
+          if (!CONFIGURED_COMPANIES.includes(e.assignment)) return false;
+        } else if (e.assignment !== filters.team) {
+          return false;
+        }
+      }
+      if (filters.skill && !e.skills.includes(filters.skill)) return false;
+      if (filters.status && e.today.status !== filters.status) return false;
+      return true;
+    });
+  }, [employees, filters]);
+
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-ink">Employees</h1>
-          <p className="text-muted mt-1">
-            The underlying facts behind every Atlas recommendation — add staff to extend the
-            roster.
-          </p>
-        </div>
+    <div className="flex flex-col gap-5">
+      <div>
+        <h1 className="text-2xl font-semibold text-ink">Employees</h1>
+        <p className="text-muted mt-1">
+          Workforce, qualifications, team assignments and availability
+          {demoToday && <> — showing status for {demoToday}</>}
+        </p>
       </div>
 
-      <AddEmployeeForm onAdded={loadEmployees} />
+      <div className="flex gap-1 bg-white border border-border rounded-xl2 p-1 self-start">
+        <button
+          onClick={() => setView("workforce")}
+          className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+            view === "workforce" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+          }`}
+        >
+          Employees
+        </button>
+        <button
+          onClick={() => setView("matrix")}
+          className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+            view === "matrix" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+          }`}
+        >
+          Qualification Matrix
+        </button>
+      </div>
 
-      <Card className="p-0 overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase text-muted border-b border-border">
-              <th className="px-4 py-3">Name</th>
-              <th className="px-4 py-3">Roles</th>
-              <th className="px-4 py-3">Shift</th>
-              <th className="px-4 py-3">Rest</th>
-              <th className="px-4 py-3">Weekly Hours</th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees?.map((e) => (
-              <tr key={e.id} className="border-b border-border last:border-0">
-                <td className="px-4 py-3 font-medium text-ink whitespace-nowrap">
-                  <div className="flex items-center gap-2">
-                    {e.name}
-                    {e.is_duty_officer && <Badge tone="brand">Duty Officer</Badge>}
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex flex-wrap gap-1">
-                    {e.roles.map((r) => (
-                      <span key={r} className="text-xs bg-gray-100 text-ink px-2 py-0.5 rounded-full">
-                        {r}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td className="px-4 py-3 whitespace-nowrap text-muted">
-                  {e.shift_start}–{e.shift_end}
-                </td>
-                <td className="px-4 py-3 whitespace-nowrap">
-                  <Badge tone={e.rest_before_shift_hours >= 10 ? "good" : "bad"}>
-                    {e.rest_before_shift_hours}h
-                  </Badge>
-                </td>
-                <td className="px-4 py-3 whitespace-nowrap">
-                  <Badge tone={e.weekly_hours >= 35 ? "warn" : "neutral"}>{e.weekly_hours}h</Badge>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {employees === null && <p className="text-sm text-muted p-4">Loading…</p>}
-      </Card>
+      {view === "workforce" && (
+        <>
+          {employees && <WorkforceSummaryLine employees={employees} />}
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {employees && <EmployeeFilters filters={filters} onChange={setFilters} allSkills={allSkills} />}
+            <AddEmployeeForm onAdded={loadEmployees} />
+          </div>
+
+          {employees === null ? (
+            <p className="text-sm text-muted">Loading…</p>
+          ) : (
+            <EmployeeTable employees={filtered} onSelect={setSelectedId} />
+          )}
+        </>
+      )}
+
+      {view === "matrix" && employees && <QualificationMatrix employees={employees} />}
+
+      {selectedId && <EmployeeDrawer employeeId={selectedId} onClose={() => setSelectedId(null)} />}
     </div>
   );
 }

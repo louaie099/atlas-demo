@@ -15,8 +15,8 @@ export interface WeeklyShiftEntry {
 export interface Employee {
   id: string;
   name: string;
-  roles: string[]; // QUALIFICATIONS — what this employee is capable/authorized to perform
-  default_team: string; // TEAM — where they normally belong for weekly planning (see teams.ts)
+  skills: string[]; // CAPABILITY — what this employee is trained/authorized to perform on a flight task (Boarding, Gate, Check-in, Arrivals)
+  assignment: string; // CURRENT PLACEMENT — where this employee is actually working: an internal RAM service (see teams.ts) or a foreign company name (see company-config.ts). Distinct from foreign_company_authorizations, which is capability, not current placement.
   shift_code: string | null; // authoritative code from lib/shift-templates.ts; null only for scenario-critical legacy cases (see seed-data.ts comments)
   shift_start: string; // "HH:mm" — derived from shift_code where one exists
   shift_end: string; // "HH:mm"
@@ -24,7 +24,7 @@ export interface Employee {
   weekly_hours: number;
   is_duty_officer: boolean;
   off_days: string[]; // e.g. ["Thursday"] — days this employee is not working this week
-  foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're authorized to work; does not affect RAM availability outside protected windows
+  foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're TRAINED/AUTHORIZED to work (capability). Does NOT mean currently placed there — that's what `assignment` represents. Being authorized never removes RAM availability outside an actual protected window (see foreign-company-window.ts).
   // Foundation for day-by-day weekly planning: one entry per day of the
   // current week, each with its own shift code or "off" status. Currently
   // populated uniformly from shift_code/off_days above (today's Find Agent

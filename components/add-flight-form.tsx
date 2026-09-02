@@ -10,7 +10,7 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
   const [route, setRoute] = useState("");
   const [aircraft, setAircraft] = useState("Boeing 737-800");
   const [departure, setDeparture] = useState("10:00");
-  const [role, setRole] = useState<"Boarding" | "Check-in/ACE">("Boarding");
+  const [role, setRole] = useState<"Boarding" | "Check-in">("Boarding");
   const [boardingBaseline, setBoardingBaseline] = useState(3);
   const [bookingPressure, setBookingPressure] = useState<"normal" | "elevated">("normal");
   const [submitting, setSubmitting] = useState(false);
@@ -120,10 +120,10 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
           <select
             className="border border-border rounded-lg px-3 py-2"
             value={role}
-            onChange={(e) => setRole(e.target.value as "Boarding" | "Check-in/ACE")}
+            onChange={(e) => setRole(e.target.value as "Boarding" | "Check-in")}
           >
             <option value="Boarding">Boarding (fixed rule)</option>
-            <option value="Check-in/ACE">Check-in/ACE (demand forecast)</option>
+            <option value="Check-in">Check-in (demand forecast)</option>
           </select>
         </label>
 
@@ -154,7 +154,7 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
 
       <p className="text-xs text-muted">
         The staffing requirement is calculated automatically using the same Planning Engine logic
-        as the rest of the demo — Boarding is always a fixed rule, Check-in/ACE responds to booking
+        as the rest of the demo — Boarding is always a fixed rule, Check-in responds to booking
         pressure. Nothing here is hand-entered as a final number.
       </p>
 

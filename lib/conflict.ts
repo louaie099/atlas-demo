@@ -51,7 +51,7 @@ export function recommendResolution(
 
   const candidate = allEmployees.find((e) => {
     if (e.id === conflict.employee.id || e.is_duty_officer) return false;
-    if (!e.roles.includes(requiredRole)) return false;
+    if (!e.skills.includes(requiredRole)) return false;
 
     const shiftStartMin = timeToMinutes(e.shift_start);
     const shiftEndMin = timeToMinutes(e.shift_end);

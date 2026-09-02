@@ -26,7 +26,7 @@ function slugify(s: string): string {
  * Creates a flight and its staffing requirement in one call. The requirement
  * is always computed by the same Planning Engine logic used at seed time —
  * never hand-entered — so a flight added from the UI follows the same rule
- * as one added at seed: Boarding is a fixed rule, Check-in/ACE is the only
+ * as one added at seed: Boarding is a fixed rule, Check-in is the only
  * role that responds to booking pressure. This keeps the "not a generic
  * overbooking multiplier" architectural constraint intact even for
  * interface-created data, not just the seeded scenario.
@@ -45,7 +45,7 @@ export async function POST(req: Request) {
     boarding_window_start = null,
     boarding_window_end = null,
     booking_pressure = "normal",
-    role, // "Boarding" | "Check-in/ACE" — which requirement to generate
+    role, // "Boarding" | "Check-in" — which requirement to generate
     boarding_baseline, // only used when role === "Boarding"
   } = body;
 
@@ -56,9 +56,9 @@ export async function POST(req: Request) {
     );
   }
 
-  if (role !== "Boarding" && role !== "Check-in/ACE") {
+  if (role !== "Boarding" && role !== "Check-in") {
     return NextResponse.json(
-      { error: 'role must be "Boarding" or "Check-in/ACE" — no other roles have Planning Engine logic defined yet' },
+      { error: 'role must be "Boarding" or "Check-in" — no other roles have Planning Engine logic defined yet' },
       { status: 400 }
     );
   }

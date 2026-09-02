@@ -22,9 +22,15 @@ const COMPANY_STAFFING_CONFIG: Record<string, { role: string; headcount: number;
   "Qatar Airways": { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 60 },
   Emirates: { role: "Ramp Team", headcount: 3, assignmentWindowMinutes: 60 },
   Etihad: { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 45 },
+  "Gulf Air": { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 45 },
+  "Air France": { role: "Ramp Team", headcount: 3, assignmentWindowMinutes: 60 },
   // Turkish Airlines deliberately absent — demonstrates the
   // "needs configuration" path for an unconfigured carrier.
 };
+
+// Exported for UI/test use — the list of currently-configured foreign
+// carriers. Turkish Airlines deliberately absent, per above.
+export const CONFIGURED_COMPANIES = Object.keys(COMPANY_STAFFING_CONFIG);
 
 export function classifyCompanyRequirement(
   flight: Flight

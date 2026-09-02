@@ -1,7 +1,7 @@
 import { Flight, Config, StaffingRequirement } from "./types";
 
 /**
- * Planning Engine demand-forecast logic for Terminal 1 Check-in/ACE.
+ * Planning Engine demand-forecast logic for Terminal 1 Check-in.
  * Deliberately scoped to this one role — there is no generic overbooking
  * multiplier applied across roles. Extending demand-forecasting to another
  * role means writing another explicit function, not parameterizing this one.
@@ -17,7 +17,7 @@ export function computeCheckinRequirement(
   if (flight.booking_pressure === "elevated") {
     const additional = config.overbooking_checkin_reinforcement;
     return {
-      role: "Check-in/ACE",
+      role: "Check-in",
       baseline_requirement: baseline,
       additional_requirement: additional,
       total_requirement: baseline + additional,
@@ -28,7 +28,7 @@ export function computeCheckinRequirement(
   }
 
   return {
-    role: "Check-in/ACE",
+    role: "Check-in",
     baseline_requirement: baseline,
     additional_requirement: 0,
     total_requirement: baseline,

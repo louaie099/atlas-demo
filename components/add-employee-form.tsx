@@ -2,22 +2,29 @@
 
 import { useState } from "react";
 import { Button, Card } from "./ui";
+import { TEAMS } from "@/lib/teams";
 
-const AVAILABLE_ROLES = [
+// Core confirmed skills plus a few pre-existing qualifiers that predate
+// the confirmed catalog (kept available since some are load-bearing
+// elsewhere in the demo — e.g. Care Point, Business Class).
+const AVAILABLE_SKILLS = [
   "Boarding",
-  "Check-in/ACE",
-  "Transit",
+  "Gate",
+  "Check-in",
+  "Arrivals",
   "Business Class",
-  "Profiling",
   "Care Point",
   "Ramp Team",
-  "Duty Officer",
 ];
+
+const FOREIGN_COMPANY = "__foreign__";
 
 export function AddEmployeeForm({ onAdded }: { onAdded: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [roles, setRoles] = useState<string[]>([]);
+  const [skills, setSkills] = useState<string[]>([]);
+  const [assignmentChoice, setAssignmentChoice] = useState<string>("General T1 Pool");
+  const [customCompany, setCustomCompany] = useState("");
   const [shiftStart, setShiftStart] = useState("06:00");
   const [shiftEnd, setShiftEnd] = useState("14:00");
   const [rest, setRest] = useState(11);
@@ -25,14 +32,19 @@ export function AddEmployeeForm({ onAdded }: { onAdded: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleRole(role: string) {
-    setRoles((prev) => (prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]));
+  function toggleSkill(skill: string) {
+    setSkills((prev) => (prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]));
   }
 
   async function handleSubmit() {
     setError(null);
-    if (!name.trim() || roles.length === 0) {
-      setError("Name and at least one role are required.");
+    const assignment = assignmentChoice === FOREIGN_COMPANY ? customCompany.trim() : assignmentChoice;
+    if (!name.trim() || skills.length === 0) {
+      setError("Name and at least one skill are required.");
+      return;
+    }
+    if (assignmentChoice === FOREIGN_COMPANY && !customCompany.trim()) {
+      setError("Enter the foreign company name for this assignment.");
       return;
     }
     setSubmitting(true);
@@ -42,12 +54,13 @@ export function AddEmployeeForm({ onAdded }: { onAdded: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          roles,
+          skills,
+          assignment,
           shift_start: shiftStart,
           shift_end: shiftEnd,
           rest_before_shift_hours: rest,
           weekly_hours: weeklyHours,
-          is_duty_officer: roles.includes("Duty Officer"),
+          is_duty_officer: assignment === "Duty Officers",
         }),
       });
       const data = await res.json();
@@ -56,7 +69,9 @@ export function AddEmployeeForm({ onAdded }: { onAdded: () => void }) {
         return;
       }
       setName("");
-      setRoles([]);
+      setSkills([]);
+      setAssignmentChoice("General T1 Pool");
+      setCustomCompany("");
       onAdded();
       setOpen(false);
     } finally {
@@ -90,24 +105,52 @@ export function AddEmployeeForm({ onAdded }: { onAdded: () => void }) {
         </label>
 
         <div className="flex flex-col gap-1 text-sm">
-          <span className="text-muted">Roles</span>
+          <span className="text-muted">Skills — what they can do</span>
           <div className="flex flex-wrap gap-2">
-            {AVAILABLE_ROLES.map((role) => (
+            {AVAILABLE_SKILLS.map((skill) => (
               <button
-                key={role}
+                key={skill}
                 type="button"
-                onClick={() => toggleRole(role)}
+                onClick={() => toggleSkill(skill)}
                 className={`text-xs px-2.5 py-1 rounded-full border ${
-                  roles.includes(role)
+                  skills.includes(skill)
                     ? "bg-brand-50 border-brand-500 text-brand-700"
                     : "border-border text-muted"
                 }`}
               >
-                {role}
+                {skill}
               </button>
             ))}
           </div>
         </div>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Assignment — where they're currently placed</span>
+          <select
+            className="border border-border rounded-lg px-3 py-2"
+            value={assignmentChoice}
+            onChange={(e) => setAssignmentChoice(e.target.value)}
+          >
+            {TEAMS.map((team) => (
+              <option key={team} value={team}>
+                {team}
+              </option>
+            ))}
+            <option value={FOREIGN_COMPANY}>Foreign company (specify below)…</option>
+          </select>
+        </label>
+
+        {assignmentChoice === FOREIGN_COMPANY && (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-muted">Foreign company name</span>
+            <input
+              className="border border-border rounded-lg px-3 py-2"
+              value={customCompany}
+              onChange={(e) => setCustomCompany(e.target.value)}
+              placeholder="e.g. Emirates"
+            />
+          </label>
+        )}
 
         <label className="flex flex-col gap-1 text-sm">
           <span className="text-muted">Shift start</span>

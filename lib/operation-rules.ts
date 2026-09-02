@@ -4,7 +4,7 @@ import { Flight, StaffingRequirement } from "./types";
  * RAM (Atlas-managed) Boarding staffing rule table. Baseline headcount is
  * driven by aircraft type + destination category — never by booking
  * pressure (that's demand-forecast.ts's job, and it only ever applies to
- * Check-in/ACE per the existing architectural constraint).
+ * Check-in per the existing architectural constraint).
  *
  * This table is intentionally explicit and small. A flight whose
  * (aircraft, destinationCategory) pair isn't listed here returns null —

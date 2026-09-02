@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { scoreCandidates } from "@/lib/scoring";
+import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CONFIG } from "@/lib/seed-data";
-import { Employee, Assignment, Flight } from "@/lib/types";
+import { getEmployeeForeignCommitments } from "@/lib/foreign-company-window";
+import { Employee, Assignment, Flight, StaffingRequirement } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -49,23 +50,54 @@ export async function GET(
   const { data: employees, error: empErr } = await supabase.from("employees").select("*");
   if (empErr) return NextResponse.json({ error: empErr.message }, { status: 500 });
 
-  const { data: assignments, error: assignErr } = await supabase
-    .from("assignments")
-    .select("*")
-    .eq("staffing_requirement_id", requirement.id);
-  if (assignErr) return NextResponse.json({ error: assignErr.message }, { status: 500 });
+  // Fetch ALL assignments/requirements/flights, not just this requirement's
+  // — computing an employee's protected commitments for this date requires
+  // seeing every assignment they hold across the whole schedule, not only
+  // the one being evaluated right now.
+  const [{ data: allAssignments, error: assignErr }, { data: allRequirements, error: allReqErr }, { data: allFlights, error: allFlightErr }] =
+    await Promise.all([
+      supabase.from("assignments").select("*"),
+      supabase.from("staffing_requirements").select("*"),
+      supabase.from("flights").select("*"),
+    ]);
+  if (assignErr || allReqErr || allFlightErr) {
+    return NextResponse.json({ error: (assignErr || allReqErr || allFlightErr)?.message }, { status: 500 });
+  }
 
-  const alreadyAssignedIds = new Set((assignments as Assignment[]).map((a) => a.employee_id));
+  const requirementAssignments = (allAssignments as Assignment[]).filter(
+    (a) => a.staffing_requirement_id === requirement.id
+  );
+  const alreadyAssignedIds = new Set(requirementAssignments.map((a) => a.employee_id));
   const candidatePool = (employees as Employee[]).filter((e) => !alreadyAssignedIds.has(e.id));
 
-  // Use the flight's real boarding window when it has one. Otherwise (e.g.
-  // Check-in/ACE, which has no boarding window field) approximate the
-  // operational window end as 15 minutes before departure — a simplification
-  // noted here rather than silently assumed.
-  const windowEnd: string = (flight as Flight).boarding_window_end
-    ?? subtractMinutes((flight as Flight).scheduled_departure, 15);
+  const targetFlight = flight as Flight;
 
-  const candidates = scoreCandidates(requirement.role, windowEnd, candidatePool, CONFIG);
+  // Use the flight's real boarding window when it has one. Otherwise (e.g.
+  // Check-in, which has no boarding window field) approximate the
+  // operational window as 45–15 minutes before departure — a
+  // simplification noted here rather than silently assumed.
+  const windowStart: string = targetFlight.boarding_window_start ?? subtractMinutes(targetFlight.scheduled_departure, 45);
+  const windowEnd: string = targetFlight.boarding_window_end ?? subtractMinutes(targetFlight.scheduled_departure, 15);
+  const window: TimeWindow = { start: windowStart, end: windowEnd };
+
+  // For each candidate, compute their real protected foreign-company
+  // commitments on THIS SPECIFIC DATE (the target flight's day) — never
+  // a blanket exclusion based on persistent company assignment alone.
+  const occupiedWindows: Record<string, TimeWindow[]> = {};
+  for (const employee of candidatePool) {
+    const commitments = getEmployeeForeignCommitments(
+      employee.id,
+      allAssignments as Assignment[],
+      allRequirements as StaffingRequirement[],
+      allFlights as Flight[]
+    ).filter((c) => c.dayOfWeek === targetFlight.day_of_week);
+
+    if (commitments.length > 0) {
+      occupiedWindows[employee.id] = commitments.map((c) => c.window);
+    }
+  }
+
+  const candidates = scoreCandidates(requirement.role, window, candidatePool, CONFIG, occupiedWindows);
 
   return NextResponse.json({ candidates });
 }

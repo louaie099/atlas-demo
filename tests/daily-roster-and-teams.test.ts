@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { EMPLOYEES, DAYS_WITH_DATA } from "../lib/seed-data";
 import { TEAMS } from "../lib/teams";
+import { CONFIGURED_COMPANIES } from "../lib/company-config";
 
 describe("weekly_shifts — day-by-day variation", () => {
   it("every employee has exactly one weekly_shifts entry per day with data", () => {
@@ -39,20 +40,31 @@ describe("Foreign-Company Pool is not a team", () => {
     expect(TEAMS as readonly string[]).not.toContain("Foreign-Company Pool");
   });
 
-  it("no employee has 'Foreign-Company Pool' as their default_team", () => {
-    expect(EMPLOYEES.every((e) => e.default_team !== "Foreign-Company Pool")).toBe(true);
+  it("no employee has 'Foreign-Company Pool' as their assignment", () => {
+    expect(EMPLOYEES.every((e) => e.assignment !== "Foreign-Company Pool")).toBe(true);
   });
+});
 
-  it("every employee's default_team is a real team from TEAMS", () => {
-    expect(EMPLOYEES.every((e) => (TEAMS as readonly string[]).includes(e.default_team))).toBe(true);
-  });
-
-  it("employees can hold foreign-company authorizations while keeping a normal RAM team", () => {
-    const authorized = EMPLOYEES.filter((e) => e.foreign_company_authorizations.length > 0);
-    expect(authorized.length).toBeGreaterThan(0);
-    for (const e of authorized) {
-      expect(e.default_team).not.toBe("Foreign-Company Pool");
-      expect(TEAMS as readonly string[]).toContain(e.default_team);
+describe("assignment is either a real internal team or a configured foreign company", () => {
+  it("every employee's assignment is one or the other — never an arbitrary string", () => {
+    for (const e of EMPLOYEES) {
+      const isTeam = (TEAMS as readonly string[]).includes(e.assignment);
+      const isCompany = CONFIGURED_COMPANIES.includes(e.assignment);
+      expect(isTeam || isCompany).toBe(true);
     }
+  });
+
+  it("at least one employee is genuinely ASSIGNED to a foreign company (not just authorized)", () => {
+    const assignedToForeignCompany = EMPLOYEES.filter((e) => CONFIGURED_COMPANIES.includes(e.assignment));
+    expect(assignedToForeignCompany.length).toBeGreaterThan(0);
+  });
+
+  it("employees can hold foreign-company authorizations while currently assigned elsewhere — authorization is not the same as assignment", () => {
+    const authorizedButNotAssignedThere = EMPLOYEES.filter(
+      (e) =>
+        e.foreign_company_authorizations.length > 0 &&
+        !e.foreign_company_authorizations.includes(e.assignment)
+    );
+    expect(authorizedButNotAssignedThere.length).toBeGreaterThan(0);
   });
 });

@@ -5,17 +5,19 @@ import {
   FLIGHTS,
   INITIAL_AT201_ASSIGNEES,
   INITIAL_PLANNED_DUTY,
+  DAYS_WITH_DATA,
 } from "./seed-data";
 import { computeCheckinRequirement } from "./demand-forecast";
 import { classifyRamBoardingRequirement, missingOperationRuleRequirement } from "./operation-rules";
-import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "./company-config";
+import { classifyCompanyRequirement, missingCompanyConfigRequirement, CONFIGURED_COMPANIES } from "./company-config";
+import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { Flight, StaffingRequirement } from "./types";
 
 /**
  * Classifies a single flight into its staffing requirement(s), using the
  * same rule modules the rest of the app uses — never a special case here.
  * RAM/atlas_managed flights go through operation-rules.ts (Boarding) or
- * demand-forecast.ts (Check-in/ACE, AT535 only, by design). Self-managed
+ * demand-forecast.ts (Check-in, AT535 only, by design). Self-managed
  * (foreign carrier) flights go through company-config.ts. A flight with
  * no matching rule/config comes back with needs_configuration: true —
  * never a guessed number.
@@ -25,7 +27,7 @@ function classifyFlight(flight: Flight): Omit<StaffingRequirement, "id" | "fligh
     return classifyCompanyRequirement(flight) ?? missingCompanyConfigRequirement(flight);
   }
 
-  // atlas_managed: AT535 is the one demand-forecast (Check-in/ACE) case in
+  // atlas_managed: AT535 is the one demand-forecast (Check-in) case in
   // the seed data; every other RAM flight goes through the Boarding
   // operation-rule table.
   if (flight.id === "at535") {
@@ -73,7 +75,38 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     employee_id: employeeId,
   }));
 
-  const { error: assignErr } = await supabase.from("assignments").insert(initialAssignments);
+  // Employees whose current `assignment` is a foreign company get a real
+  // Assignment for EVERY flight that company actually operates on each
+  // day — derived from the flight schedule itself, never fabricated, and
+  // capable of multiple same-company flights on one date (each gets its
+  // own Assignment row, tied to its own requirement). Days with no flight
+  // for that company get no Assignment row at all — the employee simply
+  // follows their normal fallback shift that day (already reflected in
+  // seed-data.ts's applyForeignCompanyRoster).
+  const foreignAssignmentEmployees = EMPLOYEES.filter((e) => CONFIGURED_COMPANIES.includes(e.assignment));
+  const foreignCommitmentAssignments: { id: string; staffing_requirement_id: string; employee_id: string }[] = [];
+
+  for (const emp of foreignAssignmentEmployees) {
+    for (const day of DAYS_WITH_DATA) {
+      const plan = planForeignCompanyDay(emp.assignment, day, FLIGHTS);
+      if (!plan || !plan.shiftCode) continue; // no flight that day, or no compatible shift — no commitment to record
+
+      for (const { flight } of plan.windows) {
+        const requirement = requirements.find((r) => r.flight_id === flight.id && !r.needs_configuration);
+        if (!requirement) continue;
+
+        foreignCommitmentAssignments.push({
+          id: `assign-foreign-${emp.id}-${flight.id}`,
+          staffing_requirement_id: requirement.id,
+          employee_id: emp.id,
+        });
+      }
+    }
+  }
+
+  const { error: assignErr } = await supabase
+    .from("assignments")
+    .insert([...initialAssignments, ...foreignCommitmentAssignments]);
   if (assignErr) throw new Error(`Seeding assignments failed: ${assignErr.message}`);
 
   const { error: dutyErr } = await supabase.from("planned_duties").insert([
@@ -91,7 +124,7 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     {
       id: "audit-1",
       step_number: 1,
-      description: `Weekly plan validated — AT535 Check-in/ACE requirement computed: baseline ${at535Requirement.baseline_requirement} + overbooking reinforcement ${at535Requirement.additional_requirement} = ${at535Requirement.total_requirement} (gap: ${at535Requirement.total_requirement - 4})`,
+      description: `Weekly plan validated — AT535 Check-in requirement computed: baseline ${at535Requirement.baseline_requirement} + overbooking reinforcement ${at535Requirement.additional_requirement} = ${at535Requirement.total_requirement} (gap: ${at535Requirement.total_requirement - 4})`,
     },
     {
       id: "audit-2",

@@ -1,41 +1,68 @@
 import { Employee, Config, CandidateResult } from "./types";
 import { isFixedPlanningTeam, isTransitTeam } from "./teams";
 
+export interface TimeWindow {
+  start: string; // "HH:mm"
+  end: string; // "HH:mm"
+}
+
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
 }
 
+function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
+  return timeToMinutes(a.start) < timeToMinutes(b.end) && timeToMinutes(b.start) < timeToMinutes(a.end);
+}
+
 /**
  * Ranks candidates for a staffing requirement by role. Role-agnostic —
- * used for Boarding (fixed-rule), Check-in/ACE (demand-forecast), and
+ * used for Boarding (fixed-rule), Check-in (demand-forecast), and
  * foreign-company (company-config) gaps alike. Pure function: no I/O,
  * fully unit-testable.
  *
- * Two structural exclusions happen before any scoring, and are not
- * negotiable via reasoning/flagging — these employees are never
- * candidates, not even flagged ones:
+ * Exclusions happen before any scoring, and are not negotiable via
+ * reasoning/flagging — these employees are never candidates, not even
+ * flagged ones:
  *  - Fixed-planning teams (Leaders, Duty Officers, Caisse/BCB) follow
  *    specialized planning outside general ACE allocation.
  *  - Transit agents are committed to Transit for their full shift and are
  *    never available for any other role while on that team.
+ *  - An employee with a protected foreign-company commitment (from a real,
+ *    generated flight commitment for THIS specific date — see
+ *    occupiedWindows below) whose window overlaps the requirement's own
+ *    operational window. This is date/time-specific: the same employee
+ *    remains eligible for a requirement outside that window, even on the
+ *    same day, and remains eligible on other days entirely. Persistent
+ *    foreign-company assignment/authorization alone never excludes
+ *    anyone — only an actual overlapping commitment does.
+ *
+ * @param window The target requirement's own operational time window
+ *   (e.g. a Boarding window, or an approximated Check-in window).
+ * @param occupiedWindows Per-employee list of protected commitment windows
+ *   for the SAME DATE as `window`, keyed by employee id. Typically derived
+ *   from getEmployeeForeignCommitments(), filtered to the relevant day, by
+ *   the caller — this function stays pure and doesn't fetch or compute
+ *   commitments itself.
  */
 export function scoreCandidates(
   role: string,
-  windowEnd: string,
+  window: TimeWindow,
   employees: Employee[],
-  config: Config
+  config: Config,
+  occupiedWindows: Record<string, TimeWindow[]> = {}
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e) => {
     if (e.is_duty_officer) return false;
-    if (isFixedPlanningTeam(e.default_team)) return false;
-    if (isTransitTeam(e.default_team) && role !== "Transit") return false;
-    return e.roles.includes(role);
+    if (isFixedPlanningTeam(e.assignment)) return false;
+    if (isTransitTeam(e.assignment) && role !== "Transit") return false;
+    if ((occupiedWindows[e.id] ?? []).some((occupied) => windowsOverlap(occupied, window))) return false;
+    return e.skills.includes(role);
   });
 
   const results: CandidateResult[] = eligiblePool.map((employee) => {
     const shiftEndMin = timeToMinutes(employee.shift_end);
-    const windowEndMin = timeToMinutes(windowEnd);
+    const windowEndMin = timeToMinutes(window.end);
     const extensionNeeded = shiftEndMin < windowEndMin;
     const nearCeiling = employee.weekly_hours >= config.fairness_ceiling_hours - 5;
     const rested = employee.rest_before_shift_hours >= config.minimum_rest_hours;
