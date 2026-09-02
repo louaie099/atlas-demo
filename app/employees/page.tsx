@@ -8,7 +8,6 @@ import { EmployeeFilters, EmployeeFilterState } from "@/components/employees/emp
 import { EmployeeTable } from "@/components/employees/employee-table";
 import { EmployeeDrawer } from "@/components/employees/employee-drawer";
 import { QualificationMatrix } from "@/components/employees/qualification-matrix";
-import { CONFIGURED_COMPANIES } from "@/lib/company-config";
 
 interface EnrichedEmployee extends Employee {
   today: {
@@ -25,7 +24,13 @@ export default function EmployeesPage() {
   const [employees, setEmployees] = useState<EnrichedEmployee[] | null>(null);
   const [demoToday, setDemoToday] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [filters, setFilters] = useState<EmployeeFilterState>({ search: "", team: "", skill: "", status: "" });
+  const [filters, setFilters] = useState<EmployeeFilterState>({
+    search: "",
+    team: "",
+    skill: "",
+    shiftToday: "",
+    status: "",
+  });
 
   function loadEmployees() {
     fetch("/api/employees")
@@ -47,14 +52,23 @@ export default function EmployeesPage() {
     if (!employees) return [];
     return employees.filter((e) => {
       if (filters.search && !e.name.toLowerCase().includes(filters.search.toLowerCase())) return false;
-      if (filters.team) {
-        if (filters.team === "__foreign__") {
-          if (!CONFIGURED_COMPANIES.includes(e.assignment)) return false;
-        } else if (e.assignment !== filters.team) {
+      // Team filter is flat now — an internal team and a foreign company
+      // are selected the same way, matching how the operator actually
+      // groups the workforce. No "is this a team or a company" branch.
+      if (filters.team && e.assignment !== filters.team) return false;
+      if (filters.skill && !e.skills.includes(filters.skill)) return false;
+      // Shift Today filters against the employee's ACTUAL daily roster
+      // entry for the currently displayed day (e.today.shiftCode), never
+      // the static/fallback shift_code field — this is what makes it
+      // correct once Weekly Planning lets the operator change which day
+      // is "today".
+      if (filters.shiftToday) {
+        if (filters.shiftToday === "OFF") {
+          if (e.today.status !== "off") return false;
+        } else if (e.today.shiftCode !== filters.shiftToday) {
           return false;
         }
       }
-      if (filters.skill && !e.skills.includes(filters.skill)) return false;
       if (filters.status && e.today.status !== filters.status) return false;
       return true;
     });

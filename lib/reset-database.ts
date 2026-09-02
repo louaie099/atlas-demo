@@ -88,6 +88,14 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
 
   for (const emp of foreignAssignmentEmployees) {
     for (const day of DAYS_WITH_DATA) {
+      // Real bug fix: if the employee is OFF that day (per their own
+      // weekly_shifts, which seed-data.ts's applyForeignCompanyRoster
+      // already leaves untouched on OFF days), skip entirely — a day off
+      // must not be silently overridden by a fabricated company
+      // commitment. Previously this loop ignored off-status altogether.
+      const dayEntry = emp.weekly_shifts.find((s) => s.day_of_week === day);
+      if (dayEntry?.status === "off") continue;
+
       const plan = planForeignCompanyDay(emp.assignment, day, FLIGHTS);
       if (!plan || !plan.shiftCode) continue; // no flight that day, or no compatible shift — no commitment to record
 

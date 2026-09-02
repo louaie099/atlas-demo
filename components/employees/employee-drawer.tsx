@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Employee, AuditLogEntry } from "@/lib/types";
 import { Badge, Button } from "@/components/ui";
 import { groupSkills } from "@/lib/skill-groups";
+import { TeamBadge } from "@/components/team-badge";
 
 interface DayDuty {
   flightNumber: string;
@@ -118,7 +119,7 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
               <div className="flex flex-col gap-3 text-sm">
                 <Row label="Employee ID" value={employee.id} />
                 <Row label="Employer" value="RAM Handling ACE" />
-                <Row label="Default Team" value={employee.assignment} />
+                <Row label="Default Team" value={<TeamBadge name={employee.assignment} />} />
                 <Row label="Current Shift" value={employee.shift_code ?? `${employee.shift_start}–${employee.shift_end} (custom)`} />
                 <Row label="Working Hours Today" value={`${employee.shift_start}–${employee.shift_end}`} />
                 <Row

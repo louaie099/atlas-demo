@@ -1,5 +1,7 @@
 import { Employee } from "@/lib/types";
 import { Badge } from "@/components/ui";
+import { TeamBadge } from "@/components/team-badge";
+import { getTeamColor } from "@/lib/team-colors";
 
 interface EnrichedEmployee extends Employee {
   today: {
@@ -56,7 +58,9 @@ export function EmployeeTable({
                   {e.is_duty_officer && <Badge tone="brand">Duty Officer</Badge>}
                 </div>
               </td>
-              <td className="px-4 py-3 whitespace-nowrap text-muted">{e.assignment}</td>
+              <td className="px-4 py-3 whitespace-nowrap">
+                <TeamBadge name={e.assignment} />
+              </td>
               <td className="px-4 py-3 whitespace-nowrap text-muted">
                 {e.today.shiftCode ?? (e.today.status === "off" ? "—" : e.shift_code ?? "custom")}
               </td>
@@ -72,9 +76,17 @@ export function EmployeeTable({
               </td>
               <td className="px-4 py-3 whitespace-nowrap">
                 <Badge tone={statusTone[e.today.status]}>
-                  {e.today.status === "committed" && e.today.foreignCommitment
-                    ? `Committed · ${e.today.foreignCommitment.airline}`
-                    : statusLabel[e.today.status]}
+                  {e.today.status === "committed" && e.today.foreignCommitment ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: getTeamColor(e.today.foreignCommitment.airline) }}
+                      />
+                      Committed · {e.today.foreignCommitment.airline}
+                    </span>
+                  ) : (
+                    statusLabel[e.today.status]
+                  )}
                 </Badge>
               </td>
               <td className="px-4 py-3 whitespace-nowrap">
