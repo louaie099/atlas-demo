@@ -3,24 +3,32 @@
 import { useEffect, useState } from "react";
 import { Employee } from "@/lib/types";
 import { Card, Badge } from "@/components/ui";
+import { AddEmployeeForm } from "@/components/add-employee-form";
 
 export default function EmployeesPage() {
   const [employees, setEmployees] = useState<Employee[] | null>(null);
 
-  useEffect(() => {
+  function loadEmployees() {
     fetch("/api/employees")
       .then((r) => r.json())
       .then((data) => setEmployees(data.employees ?? []));
-  }, []);
+  }
+
+  useEffect(loadEmployees, []);
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-ink">Employees</h1>
-        <p className="text-muted mt-1">
-          Read-only directory — the underlying facts behind every Atlas recommendation.
-        </p>
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-ink">Employees</h1>
+          <p className="text-muted mt-1">
+            The underlying facts behind every Atlas recommendation — add staff to extend the
+            roster.
+          </p>
+        </div>
       </div>
+
+      <AddEmployeeForm onAdded={loadEmployees} />
 
       <Card className="p-0 overflow-x-auto">
         <table className="w-full text-sm">

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { RosterRequirementView } from "@/lib/types";
 import { RosterCard } from "@/components/roster-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
+import { AddFlightForm } from "@/components/add-flight-form";
 
 export default function PlanningPage() {
   const [roster, setRoster] = useState<RosterRequirementView[] | null>(null);
@@ -28,6 +29,8 @@ export default function PlanningPage() {
       </div>
 
       {roster === null && <p className="text-sm text-muted">Loading roster…</p>}
+
+      <AddFlightForm onAdded={loadRoster} />
 
       <div className="grid sm:grid-cols-2 gap-4">
         {roster?.map((view) => (
