@@ -74,13 +74,23 @@ export async function POST(req: Request) {
     flight_number,
     airline,
     route,
+    origin: null,
+    destination: null,
     aircraft,
+    equipment_code: null,
+    registration: null,
+    callsign: null,
+    terminal: "T1",
     scheduled_departure,
+    scheduled_arrival: null,
     gate,
     boarding_window_start,
     boarding_window_end,
     status: "scheduled",
     booking_pressure,
+    day_of_week: "Wednesday", // only the current demo week has data; see WeekNav
+    operator_type: "atlas_managed", // this form only supports Boarding/Check-in roles, both RAM-operated
+    destination_category: null, // manual-baseline path doesn't use the operation rule table
   };
 
   const { error: flightErr } = await supabase.from("flights").insert(flight);
@@ -94,7 +104,8 @@ export async function POST(req: Request) {
           additional_requirement: 0,
           total_requirement: Number(boarding_baseline) || 3,
           source: "fixed_rule" as const,
-          reasoning: `${Number(boarding_baseline) || 3} Boarding agents required per ${aircraft} configuration.`,
+          reasoning: `${Number(boarding_baseline) || 3} Boarding agents required per ${aircraft} configuration (manually specified).`,
+          needs_configuration: false,
         }
       : computeCheckinRequirement(flight, CONFIG);
 

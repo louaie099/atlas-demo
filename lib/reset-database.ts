@@ -6,7 +6,34 @@ import {
   INITIAL_AT201_ASSIGNEES,
   INITIAL_PLANNED_DUTY,
 } from "./seed-data";
-import { computeBoardingRequirement, computeCheckinRequirement } from "./demand-forecast";
+import { computeCheckinRequirement } from "./demand-forecast";
+import { classifyRamBoardingRequirement, missingOperationRuleRequirement } from "./operation-rules";
+import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "./company-config";
+import { Flight, StaffingRequirement } from "./types";
+
+/**
+ * Classifies a single flight into its staffing requirement(s), using the
+ * same rule modules the rest of the app uses — never a special case here.
+ * RAM/atlas_managed flights go through operation-rules.ts (Boarding) or
+ * demand-forecast.ts (Check-in/ACE, AT535 only, by design). Self-managed
+ * (foreign carrier) flights go through company-config.ts. A flight with
+ * no matching rule/config comes back with needs_configuration: true —
+ * never a guessed number.
+ */
+function classifyFlight(flight: Flight): Omit<StaffingRequirement, "id" | "flight_id"> {
+  if (flight.operator_type === "self_managed") {
+    return classifyCompanyRequirement(flight) ?? missingCompanyConfigRequirement(flight);
+  }
+
+  // atlas_managed: AT535 is the one demand-forecast (Check-in/ACE) case in
+  // the seed data; every other RAM flight goes through the Boarding
+  // operation-rule table.
+  if (flight.id === "at535") {
+    return computeCheckinRequirement(flight, CONFIG);
+  }
+
+  return classifyRamBoardingRequirement(flight) ?? missingOperationRuleRequirement(flight);
+}
 
 /**
  * Wipes and re-seeds every table from lib/seed-data.ts. Used by both the
@@ -28,23 +55,21 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   const { error: flightErr } = await supabase.from("flights").insert(FLIGHTS);
   if (flightErr) throw new Error(`Seeding flights failed: ${flightErr.message}`);
 
-  const at201 = FLIGHTS.find((f) => f.id === "at201")!;
-  const at535 = FLIGHTS.find((f) => f.id === "at535")!;
-
-  const boardingReq = computeBoardingRequirement(at201);
-  const checkinReq = computeCheckinRequirement(at535, CONFIG);
-
-  const requirements = [
-    { id: "req-at201-boarding", flight_id: at201.id, ...boardingReq },
-    { id: "req-at535-checkin", flight_id: at535.id, ...checkinReq },
-  ];
+  const requirements = FLIGHTS.map((flight) => {
+    const classified = classifyFlight(flight);
+    const requirementId = `req-${flight.id}-${classified.role.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    return { id: requirementId, flight_id: flight.id, ...classified };
+  });
 
   const { error: reqErr } = await supabase.from("staffing_requirements").insert(requirements);
   if (reqErr) throw new Error(`Seeding staffing requirements failed: ${reqErr.message}`);
 
+  const at201Requirement = requirements.find((r) => r.flight_id === "at201")!;
+  const at535Requirement = requirements.find((r) => r.flight_id === "at535")!;
+
   const initialAssignments = INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
     id: `assign-at201-${i}`,
-    staffing_requirement_id: "req-at201-boarding",
+    staffing_requirement_id: at201Requirement.id,
     employee_id: employeeId,
   }));
 
@@ -62,17 +87,29 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   ]);
   if (dutyErr) throw new Error(`Seeding planned duties failed: ${dutyErr.message}`);
 
-  const { error: auditErr } = await supabase.from("audit_log_entries").insert([
+  const auditEntries = [
     {
       id: "audit-1",
       step_number: 1,
-      description: `Weekly plan validated — AT535 Check-in/ACE requirement computed: baseline ${checkinReq.baseline_requirement} + overbooking reinforcement ${checkinReq.additional_requirement} = ${checkinReq.total_requirement} (gap: ${checkinReq.total_requirement - 4})`,
+      description: `Weekly plan validated — AT535 Check-in/ACE requirement computed: baseline ${at535Requirement.baseline_requirement} + overbooking reinforcement ${at535Requirement.additional_requirement} = ${at535Requirement.total_requirement} (gap: ${at535Requirement.total_requirement - 4})`,
     },
     {
       id: "audit-2",
       step_number: 2,
-      description: `Weekly plan validated — AT201 Boarding gap detected (${INITIAL_AT201_ASSIGNEES.length}/${boardingReq.total_requirement}, fixed rule)`,
+      description: `Weekly plan validated — AT201 Boarding gap detected (${INITIAL_AT201_ASSIGNEES.length}/${at201Requirement.total_requirement}, operation rule)`,
     },
-  ]);
+  ];
+
+  const needsConfigFlights = requirements.filter((r) => r.needs_configuration);
+  needsConfigFlights.forEach((r, i) => {
+    const flight = FLIGHTS.find((f) => f.id === r.flight_id)!;
+    auditEntries.push({
+      id: `audit-config-${i}`,
+      step_number: 3 + i,
+      description: `Weekly plan validation — ${flight.flight_number} (${flight.airline}) requires configuration before it can be staffed: ${r.reasoning}`,
+    });
+  });
+
+  const { error: auditErr } = await supabase.from("audit_log_entries").insert(auditEntries);
   if (auditErr) throw new Error(`Seeding audit log failed: ${auditErr.message}`);
 }

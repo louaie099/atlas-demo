@@ -1,4 +1,5 @@
 import { Employee, Config, CandidateResult } from "./types";
+import { isFixedPlanningTeam, isTransitTeam } from "./teams";
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
@@ -7,8 +8,17 @@ function timeToMinutes(t: string): number {
 
 /**
  * Ranks candidates for a staffing requirement by role. Role-agnostic —
- * used for both Boarding (fixed-rule) and Check-in/ACE (demand-forecast)
- * gaps. Pure function: no I/O, fully unit-testable.
+ * used for Boarding (fixed-rule), Check-in/ACE (demand-forecast), and
+ * foreign-company (company-config) gaps alike. Pure function: no I/O,
+ * fully unit-testable.
+ *
+ * Two structural exclusions happen before any scoring, and are not
+ * negotiable via reasoning/flagging — these employees are never
+ * candidates, not even flagged ones:
+ *  - Fixed-planning teams (Leaders, Duty Officers, Caisse/BCB) follow
+ *    specialized planning outside general ACE allocation.
+ *  - Transit agents are committed to Transit for their full shift and are
+ *    never available for any other role while on that team.
  */
 export function scoreCandidates(
   role: string,
@@ -16,9 +26,14 @@ export function scoreCandidates(
   employees: Employee[],
   config: Config
 ): CandidateResult[] {
-  const qualified = employees.filter((e) => e.roles.includes(role) && !e.is_duty_officer);
+  const eligiblePool = employees.filter((e) => {
+    if (e.is_duty_officer) return false;
+    if (isFixedPlanningTeam(e.default_team)) return false;
+    if (isTransitTeam(e.default_team) && role !== "Transit") return false;
+    return e.roles.includes(role);
+  });
 
-  const results: CandidateResult[] = qualified.map((employee) => {
+  const results: CandidateResult[] = eligiblePool.map((employee) => {
     const shiftEndMin = timeToMinutes(employee.shift_end);
     const windowEndMin = timeToMinutes(windowEnd);
     const extensionNeeded = shiftEndMin < windowEndMin;

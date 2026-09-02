@@ -10,6 +10,7 @@ const AVAILABLE_ROLES = [
   "Business Class",
   "Profiling",
   "Care Point",
+  "Ramp Team",
   "Duty Officer",
 ];
 

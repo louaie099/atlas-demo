@@ -23,6 +23,7 @@ export function computeCheckinRequirement(
       total_requirement: baseline + additional,
       source: "demand_forecast",
       reasoning: `Elevated booking/overbooking pressure detected for ${flight.flight_number}. Normal Terminal 1 Check-in requirement: ${baseline}. Additional reinforcement: +${additional}.`,
+      needs_configuration: false,
     };
   }
 
@@ -33,23 +34,28 @@ export function computeCheckinRequirement(
     total_requirement: baseline,
     source: "demand_forecast",
     reasoning: `Normal booking levels — baseline Check-in requirement: ${baseline}.`,
+    needs_configuration: false,
   };
 }
 
 /**
- * Fixed-rule staffing requirement for Boarding. Separate code path from
- * demand forecasting — Boarding does not respond to booking pressure.
+ * Fixed-rule staffing requirement for Boarding, with a manually-specified
+ * baseline. Used only by the "Add Flight" UI form, where a planner enters
+ * a one-off baseline directly rather than relying on the RAM operation
+ * rule table (see operation-rules.ts) — that table drives the seeded RAM
+ * flights (AT201, AT880) instead.
  */
 export function computeBoardingRequirement(
-  flight: Flight
+  flight: Flight,
+  baseline = 3
 ): Omit<StaffingRequirement, "id" | "flight_id"> {
-  const baseline = 3; // per Boeing 737-800 configuration, this operator's rule
   return {
     role: "Boarding",
     baseline_requirement: baseline,
     additional_requirement: 0,
     total_requirement: baseline,
     source: "fixed_rule",
-    reasoning: `${baseline} Boarding agents required per ${flight.aircraft} configuration.`,
+    reasoning: `${baseline} Boarding agents required per ${flight.aircraft} configuration (manually specified).`,
+    needs_configuration: false,
   };
 }

@@ -8,13 +8,23 @@ const delayedAT201: Flight = {
   flight_number: "AT201",
   airline: "Royal Air Maroc",
   route: "CMN → CDG",
+  origin: "CMN",
+  destination: "CDG",
   aircraft: "Boeing 737-800",
+  equipment_code: null,
+  registration: null,
+  callsign: null,
+  terminal: "T1",
   scheduled_departure: "15:15",
+  scheduled_arrival: null,
   gate: "B12",
   boarding_window_start: "14:35",
   boarding_window_end: "15:05",
   status: "delayed",
   booking_pressure: "normal",
+  day_of_week: "Wednesday",
+  operator_type: "atlas_managed",
+  destination_category: "Europe/Schengen",
 };
 
 const nadiaDuty: PlannedDuty = {

@@ -1,9 +1,28 @@
 import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { Employee, Flight, StaffingRequirement, Assignment, RosterRequirementView } from "@/lib/types";
-
 export const dynamic = "force-dynamic";
+
+import {
+  Employee,
+  Flight,
+  StaffingRequirement,
+  Assignment,
+  RosterRequirementView,
+  RequirementCoverageStatus,
+} from "@/lib/types";
+
+function computeCoverageStatus(
+  requirement: StaffingRequirement,
+  gap: number
+): RequirementCoverageStatus {
+  if (requirement.needs_configuration) return "needs_configuration";
+  if (gap > 0) return "gap";
+  return "covered";
+  // "conflict" is computed at the Live Operations layer (see
+  // /api/simulate-delay) once an operational event actually creates one —
+  // it never applies to a static, undisturbed weekly plan.
+}
 
 export async function GET() {
   const supabase = getSupabaseServerClient();
@@ -35,12 +54,23 @@ export async function GET() {
       .map((id: string) => employeesById.get(id))
       .filter((e: Employee | undefined): e is Employee => Boolean(e));
 
+    const gap = req.needs_configuration ? 0 : req.total_requirement - assignedEmployees.length;
+
     return {
       requirement: req,
       flight,
       assignedEmployees,
-      gap: req.total_requirement - assignedEmployees.length,
+      gap,
+      coverageStatus: computeCoverageStatus(req, gap),
     };
+  });
+
+  // Sort by day then departure time so Flight Coverage reads as a real schedule.
+  views.sort((a, b) => {
+    if (a.flight.day_of_week !== b.flight.day_of_week) {
+      return a.flight.day_of_week.localeCompare(b.flight.day_of_week);
+    }
+    return a.flight.scheduled_departure.localeCompare(b.flight.scheduled_departure);
   });
 
   return NextResponse.json({ roster: views });
