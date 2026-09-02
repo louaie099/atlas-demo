@@ -7,35 +7,9 @@ import {
   INITIAL_PLANNED_DUTY,
   DAYS_WITH_DATA,
 } from "./seed-data";
-import { computeCheckinRequirement } from "./demand-forecast";
-import { classifyRamBoardingRequirement, missingOperationRuleRequirement } from "./operation-rules";
-import { classifyCompanyRequirement, missingCompanyConfigRequirement, CONFIGURED_COMPANIES } from "./company-config";
+import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
-import { Flight, StaffingRequirement } from "./types";
-
-/**
- * Classifies a single flight into its staffing requirement(s), using the
- * same rule modules the rest of the app uses — never a special case here.
- * RAM/atlas_managed flights go through operation-rules.ts (Boarding) or
- * demand-forecast.ts (Check-in, AT535 only, by design). Self-managed
- * (foreign carrier) flights go through company-config.ts. A flight with
- * no matching rule/config comes back with needs_configuration: true —
- * never a guessed number.
- */
-function classifyFlight(flight: Flight): Omit<StaffingRequirement, "id" | "flight_id"> {
-  if (flight.operator_type === "self_managed") {
-    return classifyCompanyRequirement(flight) ?? missingCompanyConfigRequirement(flight);
-  }
-
-  // atlas_managed: AT535 is the one demand-forecast (Check-in) case in
-  // the seed data; every other RAM flight goes through the Boarding
-  // operation-rule table.
-  if (flight.id === "at535") {
-    return computeCheckinRequirement(flight, CONFIG);
-  }
-
-  return classifyRamBoardingRequirement(flight) ?? missingOperationRuleRequirement(flight);
-}
+import { computeWeeklyStaffingRequirements } from "./planning/weekly-requirements";
 
 /**
  * Wipes and re-seeds every table from lib/seed-data.ts. Used by both the
@@ -57,11 +31,7 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   const { error: flightErr } = await supabase.from("flights").insert(FLIGHTS);
   if (flightErr) throw new Error(`Seeding flights failed: ${flightErr.message}`);
 
-  const requirements = FLIGHTS.map((flight) => {
-    const classified = classifyFlight(flight);
-    const requirementId = `req-${flight.id}-${classified.role.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-    return { id: requirementId, flight_id: flight.id, ...classified };
-  });
+  const requirements = computeWeeklyStaffingRequirements(FLIGHTS, CONFIG);
 
   const { error: reqErr } = await supabase.from("staffing_requirements").insert(requirements);
   if (reqErr) throw new Error(`Seeding staffing requirements failed: ${reqErr.message}`);

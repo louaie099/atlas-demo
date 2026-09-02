@@ -4,18 +4,10 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CONFIG } from "@/lib/seed-data";
 import { getEmployeeForeignCommitments } from "@/lib/foreign-company-window";
+import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { Employee, Assignment, Flight, StaffingRequirement } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
-
-function subtractMinutes(time: string, minutes: number): string {
-  const [h, m] = time.split(":").map(Number);
-  const total = h * 60 + m - minutes;
-  const wrapped = ((total % 1440) + 1440) % 1440;
-  const hh = Math.floor(wrapped / 60);
-  const mm = wrapped % 60;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-}
 
 export async function GET(
   _req: Request,
@@ -72,13 +64,7 @@ export async function GET(
 
   const targetFlight = flight as Flight;
 
-  // Use the flight's real boarding window when it has one. Otherwise (e.g.
-  // Check-in, which has no boarding window field) approximate the
-  // operational window as 45–15 minutes before departure — a
-  // simplification noted here rather than silently assumed.
-  const windowStart: string = targetFlight.boarding_window_start ?? subtractMinutes(targetFlight.scheduled_departure, 45);
-  const windowEnd: string = targetFlight.boarding_window_end ?? subtractMinutes(targetFlight.scheduled_departure, 15);
-  const window: TimeWindow = { start: windowStart, end: windowEnd };
+  const window: TimeWindow = getRequirementWindow(requirement, targetFlight);
 
   // For each candidate, compute their real protected foreign-company
   // commitments on THIS SPECIFIC DATE (the target flight's day) — never
