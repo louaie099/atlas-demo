@@ -3,6 +3,7 @@ import { Badge, Button, Card } from "./ui";
 
 const statusTone = {
   covered: "good",
+  proposed: "warn",
   gap: "bad",
   conflict: "bad",
   needs_configuration: "warn",
@@ -10,6 +11,7 @@ const statusTone = {
 
 const statusLabel = {
   covered: "Covered",
+  proposed: "Proposed (draft)",
   gap: "Gap",
   conflict: "Conflict",
   needs_configuration: "Needs Configuration",
@@ -22,7 +24,7 @@ export function FlightCoverageCard({
   view: RosterRequirementView;
   onFindAgent: (requirementId: string) => void;
 }) {
-  const { requirement, flight, assignedEmployees, coverageStatus } = view;
+  const { requirement, flight, assignedEmployees, proposedEmployees, coverageStatus } = view;
 
   return (
     <Card className="flex flex-col gap-3">
@@ -50,7 +52,8 @@ export function FlightCoverageCard({
         {!requirement.needs_configuration && (
           <span className="text-muted">
             {" "}
-            — {assignedEmployees.length}/{requirement.total_requirement} assigned
+            — {assignedEmployees.length + proposedEmployees.length}/{requirement.total_requirement}
+            {proposedEmployees.length > 0 && ` (${assignedEmployees.length} confirmed + ${proposedEmployees.length} proposed)`}
             {requirement.source === "demand_forecast" &&
               ` (baseline ${requirement.baseline_requirement} + reinforcement ${requirement.additional_requirement})`}
           </span>
@@ -65,7 +68,14 @@ export function FlightCoverageCard({
               {e.name}
             </span>
           ))}
-          {assignedEmployees.length === 0 && <span className="text-xs text-muted">No one assigned yet</span>}
+          {proposedEmployees.map((e) => (
+            <span key={e.id} className="text-xs bg-warn-50 text-warn-700 px-2.5 py-1 rounded-full border border-warn-500/30">
+              {e.name} (proposed)
+            </span>
+          ))}
+          {assignedEmployees.length === 0 && proposedEmployees.length === 0 && (
+            <span className="text-xs text-muted">No one assigned yet</span>
+          )}
         </div>
       )}
 

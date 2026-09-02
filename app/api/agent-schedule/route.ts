@@ -3,8 +3,16 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { Employee, Flight, StaffingRequirement, Assignment, AgentScheduleEntry } from "@/lib/types";
+import { buildWeeklyPlanView } from "@/lib/planning/weekly-plan-view";
+import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL } from "@/lib/seed-data";
+import { Employee, Flight, StaffingRequirement, Assignment } from "@/lib/types";
 
+/**
+ * Thin wrapper over the shared buildWeeklyPlanView() — same builder
+ * /api/planning/weekly-view uses — so this route's view-construction
+ * logic can't drift from the Weekly Planning page's. Kept as its own
+ * endpoint for any standalone consumer of just the Agent Schedule view.
+ */
 export async function GET() {
   const supabase = getSupabaseServerClient();
 
@@ -23,34 +31,15 @@ export async function GET() {
     );
   }
 
-  const requirementsById = new Map<string, StaffingRequirement>((requirements ?? []).map((r) => [r.id, r]));
-  const flightsById = new Map<string, Flight>((flights ?? []).map((f) => [f.id, f]));
-
-  const schedule: AgentScheduleEntry[] = (employees as Employee[])
-    .filter((e) => !e.is_duty_officer)
-    .map((employee) => {
-      const duties = (assignments as Assignment[])
-        .filter((a) => a.employee_id === employee.id)
-        .map((a) => {
-          const requirement = requirementsById.get(a.staffing_requirement_id);
-          const flight = requirement ? flightsById.get(requirement.flight_id) : undefined;
-          if (!requirement || !flight) return null;
-          return {
-            flightNumber: flight.flight_number,
-            role: requirement.role,
-            dayOfWeek: flight.day_of_week,
-          };
-        })
-        .filter((d): d is { flightNumber: string; role: string; dayOfWeek: string } => Boolean(d));
-
-      return {
-        employee,
-        dayOff: employee.off_days.length > 0,
-        duties,
-      };
-    });
-
-  schedule.sort((a, b) => a.employee.name.localeCompare(b.employee.name));
+  const { schedule } = buildWeeklyPlanView(
+    flights as Flight[],
+    employees as Employee[],
+    assignments as Assignment[],
+    requirements as StaffingRequirement[],
+    CONFIG,
+    DAYS_WITH_DATA,
+    CURRENT_WEEK_LABEL
+  );
 
   return NextResponse.json({ schedule });
 }

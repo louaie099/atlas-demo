@@ -26,13 +26,21 @@ export function AgentScheduleTable({ schedule }: { schedule: AgentScheduleEntry[
                 </Badge>
               </td>
               <td className="px-4 py-3">
-                {entry.duties.length === 0 ? (
+                {entry.duties.length === 0 && entry.proposedDuties.length === 0 ? (
                   <span className="text-muted">No duties assigned yet</span>
                 ) : (
                   <div className="flex flex-wrap gap-1.5">
                     {entry.duties.map((d, i) => (
-                      <span key={i} className="text-xs bg-gray-100 text-ink px-2 py-0.5 rounded-full">
+                      <span key={`confirmed-${i}`} className="text-xs bg-gray-100 text-ink px-2 py-0.5 rounded-full">
                         {d.dayOfWeek} · {d.flightNumber} · {d.role}
+                      </span>
+                    ))}
+                    {entry.proposedDuties.map((d, i) => (
+                      <span
+                        key={`proposed-${i}`}
+                        className="text-xs bg-warn-50 text-warn-700 px-2 py-0.5 rounded-full border border-warn-500/30"
+                      >
+                        {d.dayOfWeek} · {d.flightNumber} · {d.role} (proposed)
                       </span>
                     ))}
                   </div>

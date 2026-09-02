@@ -4,7 +4,7 @@ export type FlightStatus = "scheduled" | "delayed";
 export type CandidateStatus = "recommended" | "flagged";
 export type PlannedDutyStatus = "planned" | "reassigned";
 export type OperatorType = "atlas_managed" | "self_managed";
-export type RequirementCoverageStatus = "covered" | "gap" | "conflict" | "needs_configuration";
+export type RequirementCoverageStatus = "covered" | "proposed" | "gap" | "conflict" | "needs_configuration";
 
 export interface WeeklyShiftEntry {
   day_of_week: string;
@@ -106,8 +106,9 @@ export interface CandidateResult {
 export interface RosterRequirementView {
   requirement: StaffingRequirement;
   flight: Flight;
-  assignedEmployees: Employee[];
-  gap: number;
+  assignedEmployees: Employee[]; // CONFIRMED — real Assignment rows
+  proposedEmployees: Employee[]; // PROPOSED — from the engine's generated draft plan, not yet confirmed
+  gap: number; // still unmet even counting proposals
   coverageStatus: RequirementCoverageStatus;
 }
 
@@ -134,5 +135,10 @@ export interface Config {
 export interface AgentScheduleEntry {
   employee: Employee;
   dayOff: boolean;
+  // CONFIRMED — real Assignment rows.
   duties: { flightNumber: string; role: string; dayOfWeek: string }[];
+  // PROPOSED — from the engine's generated draft plan (generateDraftWeeklyPlan),
+  // not yet confirmed. Kept honestly separate, same pattern as
+  // RosterRequirementView.proposedEmployees — never silently merged into `duties`.
+  proposedDuties: { flightNumber: string; role: string; dayOfWeek: string }[];
 }

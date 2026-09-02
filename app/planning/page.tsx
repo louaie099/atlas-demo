@@ -25,21 +25,22 @@ export default function PlanningPage() {
       ? "Week of Mon, Sep 1 2026"
       : `Week of Mon, Sep ${1 + weekOffset * 7} 2026`;
 
-  function loadRoster() {
-    fetch("/api/roster")
+  // Single fetch, single computed plan: Flight Coverage, the summary bar
+  // (derived from `roster` below), and Agent Schedule all come from the
+  // same /api/planning/weekly-view response — one generateDraftWeeklyPlan()
+  // run per load, not two independent ones that could read the database
+  // at slightly different moments and silently disagree.
+  function loadWeeklyPlan() {
+    fetch("/api/planning/weekly-view")
       .then((r) => r.json())
-      .then((data) => setRoster(data.roster ?? []));
-  }
-
-  function loadSchedule() {
-    fetch("/api/agent-schedule")
-      .then((r) => r.json())
-      .then((data) => setSchedule(data.schedule ?? []));
+      .then((data) => {
+        setRoster(data.roster ?? []);
+        setSchedule(data.schedule ?? []);
+      });
   }
 
   useEffect(() => {
-    loadRoster();
-    loadSchedule();
+    loadWeeklyPlan();
   }, []);
 
   const daysWithData = Array.from(new Set((roster ?? []).map((v) => v.flight.day_of_week)));
@@ -92,7 +93,7 @@ export default function PlanningPage() {
 
           {tab === "coverage" && (
             <div className="flex flex-col gap-6">
-              <AddFlightForm onAdded={loadRoster} />
+              <AddFlightForm onAdded={loadWeeklyPlan} />
 
               {roster === null && <p className="text-sm text-muted">Loading flights…</p>}
 
@@ -128,10 +129,7 @@ export default function PlanningPage() {
         <FindAgentSheet
           requirementId={openRequirementId}
           onClose={() => setOpenRequirementId(null)}
-          onAssigned={() => {
-            loadRoster();
-            loadSchedule();
-          }}
+          onAssigned={loadWeeklyPlan}
         />
       )}
     </div>
