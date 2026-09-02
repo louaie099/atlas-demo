@@ -51,6 +51,7 @@ export function recommendResolution(
 
   const candidate = allEmployees.find((e) => {
     if (e.id === conflict.employee.id || e.is_duty_officer) return false;
+    if (!e.active) return false;
     if (!e.skills.includes(requiredRole)) return false;
     // An employee with no roster/shift assigned yet (see migration 0007 —
     // Employee.shift_start/shift_end are now nullable, since a freshly

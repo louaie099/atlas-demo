@@ -47,6 +47,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "youssef-el-amrani",
@@ -60,6 +61,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "nadia-ziani",
@@ -73,6 +75,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "karim-idrissi",
@@ -93,6 +96,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "amina-fassi",
@@ -106,6 +110,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "mohammed-alaoui",
@@ -120,6 +125,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: true,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "hicham-bouzid",
@@ -133,6 +139,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
   {
     id: "rania-toumi",
@@ -146,6 +153,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
   },
 ];
 
@@ -180,6 +188,7 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     is_duty_officer: false,
     off_days: ["Thursday"],
     foreign_company_authorizations: [],
+    active: true,
   },
 ];
 

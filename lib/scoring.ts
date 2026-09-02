@@ -65,6 +65,7 @@ export function scoreCandidates(
   occupiedWindows: Record<string, TimeWindow[]> = {}
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e): e is RosteredEmployee => {
+    if (!e.active) return false;
     if (!hasRosterAssigned(e)) return false;
     if (e.is_duty_officer) return false;
     if (isFixedPlanningTeam(e.assignment)) return false;

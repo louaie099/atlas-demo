@@ -16,6 +16,7 @@ function makeEmployee(overrides: Partial<Employee>): Employee {
     is_duty_officer: false,
     off_days: [],
     foreign_company_authorizations: [],
+    active: true,
     weekly_shifts: [{ day_of_week: "Wednesday", shift_code: "MT01", status: "working" }],
     ...overrides,
   };

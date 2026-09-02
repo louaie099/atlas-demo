@@ -5,6 +5,9 @@ import { Employee, AuditLogEntry } from "@/lib/types";
 import { Badge, Button } from "@/components/ui";
 import { groupSkills } from "@/lib/skill-groups";
 import { TeamBadge } from "@/components/team-badge";
+import { EmployeeProfileForm } from "@/components/employee-profile-form";
+import { useRole } from "@/components/role-context";
+import { canManageEmployees } from "@/lib/roles";
 
 interface DayDuty {
   flightNumber: string;
@@ -70,22 +73,26 @@ function DayTimelineBar({ day }: { day: DaySummary }) {
 }
 
 export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; onClose: () => void }) {
+  const { role } = useRole();
   const [tab, setTab] = useState<Tab>("overview");
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [weeklySchedule, setWeeklySchedule] = useState<DaySummary[] | null>(null);
   const [history, setHistory] = useState<AuditLogEntry[] | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
-  useEffect(() => {
+  function loadEmployee() {
     fetch(`/api/employees/${employeeId}`)
       .then((r) => r.json())
       .then((data) => {
         setEmployee(data.employee);
         setWeeklySchedule(data.weeklySchedule ?? []);
         setHistory(data.history ?? []);
-        setSelectedDay(data.weeklySchedule?.[0]?.dayOfWeek ?? null);
+        setSelectedDay((prev) => prev ?? data.weeklySchedule?.[0]?.dayOfWeek ?? null);
       });
-  }, [employeeId]);
+  }
+
+  useEffect(loadEmployee, [employeeId]);
 
   const selectedDaySummary = weeklySchedule?.find((d) => d.dayOfWeek === selectedDay);
 
@@ -95,10 +102,32 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
       <div className="relative w-full sm:max-w-lg h-full bg-surface shadow-softer border-l border-border overflow-y-auto p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-ink">{employee?.name ?? "Loading…"}</h2>
-          <Button variant="ghost" onClick={onClose}>
-            Close
-          </Button>
+          <div className="flex items-center gap-2">
+            {employee && (
+              <span title={canManageEmployees(role) ? undefined : "Administrator permission required to edit employees"}>
+                <Button
+                  variant="secondary"
+                  onClick={() => canManageEmployees(role) && setEditing(true)}
+                  disabled={!canManageEmployees(role)}
+                >
+                  Edit Employee
+                </Button>
+              </span>
+            )}
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+          </div>
         </div>
+
+        {editing && employee && (
+          <EmployeeProfileForm
+            mode="edit"
+            initialEmployee={employee}
+            onClose={() => setEditing(false)}
+            onSaved={loadEmployee}
+          />
+        )}
 
         {employee && (
           <>
@@ -119,6 +148,10 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
             {tab === "overview" && (
               <div className="flex flex-col gap-3 text-sm">
                 <Row label="Employee ID" value={employee.id} />
+                <Row
+                  label="Workforce Status"
+                  value={<Badge tone={employee.active ? "good" : "bad"}>{employee.active ? "Active" : "Inactive"}</Badge>}
+                />
                 <Row label="Employer" value="RAM Handling ACE" />
                 <Row label="Default Team" value={<TeamBadge name={employee.assignment} />} />
                 <Row

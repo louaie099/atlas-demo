@@ -144,6 +144,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
         is_duty_officer: spec.assignment === "Duty Officers",
         off_days,
         foreign_company_authorizations: spec.foreign_company_authorizations ?? [],
+        active: true,
       });
       i++;
     }

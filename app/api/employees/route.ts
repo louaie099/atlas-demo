@@ -4,6 +4,7 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { computeEmployeeDaySummary } from "@/lib/employee-status";
 import { DEMO_TODAY } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight } from "@/lib/types";
+import { ROLE_HEADER, getRoleFromHeader, canManageEmployees } from "@/lib/roles";
 
 export const dynamic = "force-dynamic";
 
@@ -59,8 +60,22 @@ function slugify(name: string): string {
  * `assignment` is a foreign company — a real flight commitment is only
  * ever generated from that company's actual scheduled flights (see
  * lib/foreign-shift-planning.ts), never fabricated at creation time.
+ *
+ * PERMISSION ENFORCEMENT: only Administrators may create employees (see
+ * lib/roles.ts). This is checked HERE, server-side — the frontend also
+ * hides/disables the Add Employee control for non-admins, but that's a UX
+ * courtesy, not the actual security boundary. A request without a valid
+ * Administrator role header is rejected regardless of what the UI showed.
  */
 export async function POST(req: Request) {
+  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  if (!canManageEmployees(role)) {
+    return NextResponse.json(
+      { error: "Administrator permission required to create employees." },
+      { status: 403 }
+    );
+  }
+
   const supabase = getSupabaseServerClient();
   const body = await req.json();
 
@@ -100,6 +115,7 @@ export async function POST(req: Request) {
       rest_before_shift_hours: null,
       weekly_hours: null,
       is_duty_officer: Boolean(is_duty_officer),
+      active: true,
     })
     .select()
     .single();

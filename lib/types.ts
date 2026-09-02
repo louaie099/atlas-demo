@@ -28,6 +28,7 @@ export interface Employee {
   is_duty_officer: boolean;
   off_days: string[]; // e.g. ["Thursday"] — days this employee is not working this week
   foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're TRAINED/AUTHORIZED to work (capability). Does NOT mean currently placed there — that's what `assignment` represents. Being authorized never removes RAM availability outside an actual protected window (see foreign-company-window.ts).
+  active: boolean; // workforce status — editable only by Administrators (see lib/roles.ts). An inactive employee is never a scoring candidate.
   // Foundation for day-by-day weekly planning: one entry per day of the
   // current week, each with its own shift code or "off" status. Currently
   // populated uniformly from shift_code/off_days above (today's Find Agent

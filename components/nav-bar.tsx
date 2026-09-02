@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ResetDemoButton } from "./reset-demo-button";
+import { useRole } from "./role-context";
+import { ROLES, ROLE_LABELS, UserRole } from "@/lib/roles";
 
 const links = [
   { href: "/", label: "Dashboard" },
@@ -11,6 +13,26 @@ const links = [
   { href: "/employees", label: "Employees" },
   { href: "/audit", label: "Audit Trail" },
 ];
+
+function RoleSwitcher() {
+  const { role, setRole } = useRole();
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-muted">
+      Viewing as
+      <select
+        value={role}
+        onChange={(e) => setRole(e.target.value as UserRole)}
+        className="border border-border rounded-lg px-2 py-1 text-xs text-ink bg-white"
+      >
+        {ROLES.map((r) => (
+          <option key={r} value={r}>
+            {ROLE_LABELS[r]}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export function NavBar() {
   const pathname = usePathname();
@@ -23,7 +45,8 @@ export function NavBar() {
             Atlas <span className="text-brand-600">·</span>{" "}
             <span className="text-muted font-normal text-sm">CMN Operations</span>
           </span>
-          <div className="sm:hidden">
+          <div className="sm:hidden flex items-center gap-2">
+            <RoleSwitcher />
             <ResetDemoButton />
           </div>
         </div>
@@ -45,7 +68,8 @@ export function NavBar() {
           })}
         </nav>
 
-        <div className="hidden sm:block">
+        <div className="hidden sm:flex items-center gap-3">
+          <RoleSwitcher />
           <ResetDemoButton />
         </div>
       </div>
