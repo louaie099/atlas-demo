@@ -1,9 +1,10 @@
-import { Employee, Flight, Config, WeeklyShiftEntry } from "./types";
+﻿import { Employee, Flight, Config, WeeklyShiftEntry } from "./types";
 import { generateEmployees } from "./employee-generator";
 import { generateWeeklyFlights } from "./flight-generator";
 import { getShiftTimesAs, buildUniformWeeklySchedule } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
+import { buildStaggeredOffDays, offDaysCountForShift } from "./roster-generation";
 
 export const CONFIG: Config = {
   minimum_rest_hours: 10,
@@ -12,28 +13,16 @@ export const CONFIG: Config = {
   overbooking_checkin_reinforcement: 2,
 };
 
-// Only this week currently has scheduled flights seeded. Week navigation in
-// the UI is built to support other weeks, but no other week's data exists
-// yet — an honest empty state, not fabricated flights.
 export const CURRENT_WEEK_LABEL = "Week of Mon, Sep 1 2026";
 export const DAYS_WITH_DATA = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-// The only day with real flight data (AT201/AT535 and the generated
-// week's Wednesday instances). Workforce-view "today" concepts anchor to
-// this rather than the real wall-clock date, since the demo's populated
-// week is fixed, not live.
 export const DEMO_TODAY = "Wednesday";
 
-// The 8 scripted employees below are protected — rest_before_shift_hours
-// and weekly_hours must not change, since 02-scenario-script.md and the
-// test suite depend on exact values (Nadia's 11h rest, Karim's 38h weekly
-// hours, etc.). Shift times are sourced from the authoritative shift
-// catalog (lib/shift-templates.ts) wherever a real code produces the same
-// tested behavior. Karim is the one deliberate exception — see his comment.
-// Nadia's roles previously included "Transit" — removed here, since Transit
-// is an assignment (where she'd be placed), not a skill (what she can do);
-// this was exactly the confusion the skill/assignment split corrects.
-// weekly_shifts is added centrally below, not per-employee here.
+const SCRIPTED_OFF_DAY_POOL = DAYS_WITH_DATA.filter((d) => d !== DEMO_TODAY);
+function scriptedOffDays(shiftCode: string, employeeIndex: number): string[] {
+  return buildStaggeredOffDays(employeeIndex, offDaysCountForShift(shiftCode, CONFIG.fairness_ceiling_hours), SCRIPTED_OFF_DAY_POOL);
+}
+
 export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
   {
     id: "sara-bennis",
@@ -45,7 +34,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 24,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("AP01", 0),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -59,7 +48,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 26,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("AP02", 1),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -73,7 +62,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 22,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("NR02", 2),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -82,19 +71,13 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     name: "Karim Idrissi",
     skills: ["Boarding"],
     assignment: "General T1 Pool",
-    // Deliberate exception: no authoritative code ends before 14:20
-    // (AT201's boarding window end) — every morning code (MT01/MT02) runs
-    // until 14:45. Forcing Karim onto one would silently remove the
-    // "unplanned shift extension" reasoning the scripted scenario and
-    // tests depend on. Kept as a custom, non-catalog shift instead of
-    // forcing a mismatched real code.
     shift_code: null,
     shift_start: "06:00",
     shift_end: "14:00",
     rest_before_shift_hours: 10,
     weekly_hours: 38,
     is_duty_officer: false,
-    off_days: [],
+    off_days: ["Saturday", "Sunday"],
     foreign_company_authorizations: [],
     active: true,
   },
@@ -108,7 +91,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 13,
     weekly_hours: 20,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("AP01", 3),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -117,13 +100,12 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     name: "Mohammed Alaoui",
     skills: ["Boarding"],
     assignment: "Duty Officers",
-    // JR01 — matches "Leaders/Duty Officers use fixed JR/NT-type planning."
     shift_code: "JR01",
     ...getShiftTimesAs("JR01"),
     rest_before_shift_hours: 12,
     weekly_hours: 30,
     is_duty_officer: true,
-    off_days: [],
+    off_days: scriptedOffDays("JR01", 4),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -137,7 +119,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 30,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("MT01", 5),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -151,28 +133,20 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 18,
     is_duty_officer: false,
-    off_days: [],
+    off_days: scriptedOffDays("MT02", 6),
     foreign_company_authorizations: [],
     active: true,
   },
 ];
 
-// Concrete proof that daily roster entries genuinely vary day-to-day, not
-// just structurally. Skill is deliberately one no current
-// StaffingRequirement queries (Gate) — this avoids this employee appearing
-// in a live Find Agent list for AT201/AT535 while scoring.ts is still
-// day-unaware (that's future Weekly Planning engine work, not this step).
-// Wednesday is intentionally kept as a normal working day, matching what
-// the flat shift_start/shift_end fields say, so nothing about today's
-// single-day behavior is affected.
 const ROTATING_SHIFT_PATTERN_A: { day: string; code: string | null }[] = [
   { day: "Monday", code: "MT01" },
   { day: "Tuesday", code: "MT01" },
   { day: "Wednesday", code: "MT01" },
   { day: "Thursday", code: "OFF" },
   { day: "Friday", code: "AP01" },
-  { day: "Saturday", code: "AP01" },
-  { day: "Sunday", code: "JR01" },
+  { day: "Saturday", code: "OFF" },
+  { day: "Sunday", code: "OFF" },
 ];
 
 export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
@@ -181,7 +155,7 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     name: "Amine Sqalli",
     skills: ["Gate"],
     assignment: "General T1 Pool",
-    shift_code: "MT01", // matches Wednesday's entry in the pattern below
+    shift_code: "MT01",
     ...getShiftTimesAs("MT01"),
     rest_before_shift_hours: 11,
     weekly_hours: 24,
@@ -192,14 +166,12 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
   },
 ];
 
-// AT201 and AT535 are protected — hand-authored, exact values depended on
-// by 02-scenario-script.md and the test suite. Never touched by generation.
 export const SCRIPTED_FLIGHTS: Flight[] = [
   {
     id: "at201",
     flight_number: "AT201",
     airline: "Royal Air Maroc",
-    route: "CMN → CDG",
+    route: "CMN -> CDG",
     origin: "CMN",
     destination: "CDG",
     aircraft: "Boeing 737-800",
@@ -222,7 +194,7 @@ export const SCRIPTED_FLIGHTS: Flight[] = [
     id: "at535",
     flight_number: "AT535",
     airline: "Royal Air Maroc",
-    route: "CMN → ORY",
+    route: "CMN -> ORY",
     origin: "CMN",
     destination: "ORY",
     aircraft: "Boeing 737-800",
@@ -243,29 +215,16 @@ export const SCRIPTED_FLIGHTS: Flight[] = [
   },
 ];
 
-// The full week's remaining flights (all days), generated from coherent
-// recurring templates. Built BEFORE EMPLOYEES below, since foreign-company
-// employees' weekly shifts are now derived FROM the flight schedule, not
-// the other way around.
 export const FLIGHTS: Flight[] = [...SCRIPTED_FLIGHTS, ...generateWeeklyFlights()];
 
-/**
- * For an employee currently assigned to a foreign company, the company's
- * flight schedule drives their shift on each day — not a fixed weekly
- * pattern with a flight bolted on afterward. For each day: if that
- * company has a flight, select the RAM shift that covers the required
- * protected window (see foreign-shift-planning.ts) and use it for that
- * day; if the company has no flight that day, keep the employee's normal
- * fallback shift untouched — no fake commitment is invented.
- */
 function applyForeignCompanyRoster(employee: Employee): Employee {
   if (!CONFIGURED_COMPANIES.includes(employee.assignment)) return employee;
 
   const weekly_shifts: WeeklyShiftEntry[] = employee.weekly_shifts.map((entry) => {
-    if (entry.status === "off") return entry; // OFF days are untouched by company scheduling
+    if (entry.status === "off") return entry;
 
     const plan = planForeignCompanyDay(employee.assignment, entry.day_of_week, FLIGHTS);
-    if (!plan || !plan.shiftCode) return entry; // no company flight that day, or no compatible shift found — fall back, don't invent
+    if (!plan || !plan.shiftCode) return entry;
 
     return { ...entry, shift_code: plan.shiftCode, status: "working" };
   });
@@ -273,11 +232,6 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
   return { ...employee, weekly_shifts };
 }
 
-// Full workforce: the 8 protected scripted employees, the generated pool
-// (~38 more, including the foreign-assignment examples), and the
-// rotating-shift example, reaching approximately 47 total. Foreign-company
-// assigned employees' weekly_shifts are then adjusted to match their
-// company's actual flight schedule.
 export const EMPLOYEES: Employee[] = [
   ...SCRIPTED_EMPLOYEES.map((e) => ({
     ...e,
@@ -300,14 +254,10 @@ export const EMPLOYEES: Employee[] = [
   })),
 ].map(applyForeignCompanyRoster);
 
-// Baseline Check-in staffing already covering AT535's 4-person baseline,
-// represented as a count only (not individually named — not candidates).
 export const AT535_BASELINE_ALREADY_STAFFED = 4;
 
-// AT201's two initially-assigned Boarding agents.
 export const INITIAL_AT201_ASSIGNEES = ["sara-bennis", "youssef-el-amrani"];
 
-// Nadia's pre-planned duty that creates the live-ops conflict once AT201 is delayed.
 export const INITIAL_PLANNED_DUTY = {
   employee_id: "nadia-ziani",
   task: "Care Point rotation",
