@@ -1,6 +1,7 @@
 import { Flight } from "./types";
 import { SHIFT_CODES } from "./shift-templates";
 import { computeForeignCompanyProtectedWindow } from "./foreign-company-window";
+import { restHoursBetween } from "./roster-generation";
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
@@ -28,12 +29,28 @@ function minutesToTime(mins: number): string {
  * a documented limitation for overnight company flights, not silently
  * guessed. Returns null (never a fabricated shift) if no catalog code is
  * compatible.
+ *
+ * Optional cross-day rest awareness: when `adjacentShiftEnd` (the end
+ * time of the employee's actual shift on the immediately preceding
+ * calendar day) and `minimumRestHours` are both given, a candidate is
+ * only eligible if it also leaves at least that much rest since that
+ * prior shift — evaluated with the exact same rest definition used
+ * everywhere else (`restHoursBetween`, lib/roster-generation.ts). Ranking
+ * among the REMAINING eligible candidates is unchanged (closest fit, then
+ * shortest duration) — this never relaxes the rest rule to get a
+ * "better" fit; it only ever narrows the candidate pool. Returns null —
+ * never a shift that knowingly breaks rest — if no candidate qualifies.
  */
-export function selectCompatibleShiftCode(windowStart: string, windowEnd: string): string | null {
+export function selectCompatibleShiftCode(
+  windowStart: string,
+  windowEnd: string,
+  adjacentShiftEnd?: string | null,
+  minimumRestHours?: number
+): string | null {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
 
-  const candidates = Object.entries(SHIFT_CODES)
+  let candidates = Object.entries(SHIFT_CODES)
     .map(([code, { entree, sortie }]) => ({
       code,
       entreeMin: timeToMinutes(entree),
@@ -41,6 +58,12 @@ export function selectCompatibleShiftCode(windowStart: string, windowEnd: string
     }))
     .filter((c) => c.sortieMin > c.entreeMin) // exclude overnight-wrapping codes from this matcher
     .filter((c) => c.entreeMin <= windowStartMin && c.sortieMin >= windowEndMin);
+
+  if (adjacentShiftEnd != null && minimumRestHours != null) {
+    candidates = candidates.filter(
+      (c) => restHoursBetween(adjacentShiftEnd, minutesToTime(c.entreeMin)) >= minimumRestHours
+    );
+  }
 
   if (candidates.length === 0) return null;
 
@@ -87,8 +110,21 @@ export interface ForeignDayPlan {
  * operation), and the compatible shift for that combined span.
  *
  * Returns null — never a fake plan — if there's no flight that day.
+ *
+ * `adjacentShiftEnd`/`minimumRestHours` (optional): same cross-day rest
+ * awareness as selectCompatibleShiftCode, threaded through so a caller
+ * building a sequential weekly roster (see seed-data.ts's
+ * applyForeignCompanyRoster) can pick a shift that both covers the
+ * protected window AND respects the employee's rest since their previous
+ * day — never one that only satisfies coverage.
  */
-export function planForeignCompanyDay(company: string, dayOfWeek: string, flights: Flight[]): ForeignDayPlan | null {
+export function planForeignCompanyDay(
+  company: string,
+  dayOfWeek: string,
+  flights: Flight[],
+  adjacentShiftEnd?: string | null,
+  minimumRestHours?: number
+): ForeignDayPlan | null {
   const dayFlights = findCompanyFlightsOnDay(company, dayOfWeek, flights);
   if (dayFlights.length === 0) return null;
 
@@ -101,7 +137,7 @@ export function planForeignCompanyDay(company: string, dayOfWeek: string, flight
   const combinedEndMin = Math.max(...windows.map((w) => timeToMinutes(w.window.end)));
   const combinedWindow = { start: minutesToTime(combinedStartMin), end: minutesToTime(combinedEndMin) };
 
-  const shiftCode = selectCompatibleShiftCode(combinedWindow.start, combinedWindow.end);
+  const shiftCode = selectCompatibleShiftCode(combinedWindow.start, combinedWindow.end, adjacentShiftEnd, minimumRestHours);
 
   return { flights: dayFlights, windows, combinedWindow, shiftCode };
 }

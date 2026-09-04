@@ -1,5 +1,6 @@
 import { Employee, StaffingRequirement, Config } from "../types";
 import { getShiftTimesAs } from "../shift-templates";
+import { restHoursBetween } from "../roster-generation";
 
 export type PlanIssueType =
   | "needs_configuration"
@@ -58,10 +59,7 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
     const todayShift = getShiftTimesAs(today.shift_code);
     const tomorrowShift = getShiftTimesAs(tomorrow.shift_code);
 
-    const todayEndMin = timeToMinutes(todayShift.shift_end);
-    const tomorrowStartMin = timeToMinutes(tomorrowShift.shift_start) + 24 * 60; // next calendar day
-    const restMinutes = tomorrowStartMin - todayEndMin;
-    const restHours = restMinutes / 60;
+    const restHours = restHoursBetween(todayShift.shift_end, tomorrowShift.shift_start);
 
     if (restHours < config.minimum_rest_hours) {
       issues.push({

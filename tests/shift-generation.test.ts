@@ -91,7 +91,9 @@ describe("generateFlexiblePoolShifts", () => {
   });
 
   it("never fabricates a shift for a demand window no catalog code can cover", () => {
-    const flight = makeFlight({ boarding_window_start: "02:00", boarding_window_end: "03:00" }); // impossible window
+    // T-1h from a 03:00 departure = 02:00-03:00 — before every shift's
+    // earliest start (04:30), so no catalog code can cover it.
+    const flight = makeFlight({ scheduled_departure: "03:00" });
     const requirement = makeRequirement({ total_requirement: 1 });
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
     const employee = makeEmployee({ id: "e1", skills: ["Boarding"] });

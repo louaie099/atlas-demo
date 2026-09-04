@@ -40,7 +40,7 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
  * established commitment and is used as-is — generation never touches
  * these employees, so there's nothing to prioritize over.
  */
-function effectiveShiftForDay(
+export function effectiveShiftForDay(
   employee: Employee,
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]

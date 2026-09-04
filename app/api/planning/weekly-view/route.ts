@@ -10,7 +10,7 @@ import { Employee, Flight, StaffingRequirement, Assignment } from "@/lib/types";
 /**
  * The single endpoint behind the Weekly Planning page. Fetches ONE
  * snapshot of flights/employees/assignments/requirements and runs
- * generateDraftWeeklyPlan() exactly once (via buildWeeklyPlanView) —
+ * generateDraftWeeklyPlan() exactly once (via buildWeeklyPlanView) --
  * Flight Coverage (`roster`), Agent Schedule (`schedule`), and the
  * summary counts the page computes from `roster` all come from that one
  * computation. Replaces the page's previous two independent fetches to
@@ -55,5 +55,5 @@ export async function GET() {
     CURRENT_WEEK_LABEL
   );
 
-  return NextResponse.json({ roster, schedule, planIssueCount: draftPlan.issues.length });
+  return NextResponse.json({ roster, schedule, issues: draftPlan.issues, planIssueCount: draftPlan.issues.length });
 }

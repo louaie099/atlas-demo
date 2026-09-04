@@ -53,7 +53,9 @@ export function missingCompanyConfigRequirement(
   flight: Flight
 ): Omit<StaffingRequirement, "id" | "flight_id"> {
   return {
-    role: "Unconfigured",
+    // Not a real staffing role — this row claims "this carrier has no
+    // agreement configured at all", never a guessed headcount for one.
+    role: "Company Configuration",
     baseline_requirement: 0,
     additional_requirement: 0,
     total_requirement: 0,

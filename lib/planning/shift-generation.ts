@@ -2,6 +2,11 @@ import { Employee } from "../types";
 import { DailyDemand, peakDemandForRole, demandWindowForRole } from "./demand-aggregation";
 import { selectCompatibleShiftCode } from "../foreign-shift-planning";
 import { isFlexibleGeneralPool } from "./workforce-pools";
+import { getShiftTimesAs } from "../shift-templates";
+import { restHoursBetween } from "../roster-generation";
+
+/** An employee's effective shift on the immediately preceding day, or null if they were OFF/unrostered — undefined (not in the map) means "no prior-day data available" (e.g. the first day of the week), which is never treated as a rest violation. */
+export type PriorDayShiftMap = Map<string, { shift_start: string; shift_end: string } | null>;
 
 export interface GeneratedShiftAssignment {
   employeeId: string;
@@ -16,7 +21,14 @@ export interface GeneratedShiftAssignment {
  * (Stage 5) rather than flight-by-flight.
  *
  * This is a deliberate FIRST-PASS GREEDY HEURISTIC, not an optimizer:
- *  - Roles are processed in a fixed order (Boarding, Check-in, Gate).
+ *  - Roles are processed in a fixed order (Boarding, Check-in, Gate,
+ *    Profiling, Mesure) — Profiling/Mesure demand is now real (see
+ *    specialized-demand.ts), and this is what lets a General T1 employee
+ *    who happens to hold the Profiling/Mesure skill flex into covering it,
+ *    per the brief ("cross-qualified employees can provide additional
+ *    flexibility"). Employees whose PLACEMENT is Profiling/Mesure are
+ *    never in this pool at all (see workforce-pools.ts) — this is only
+ *    about General T1 employees with a matching skill.
  *  - Before pulling in a new employee for a role, it first checks whether
  *    employees ALREADY assigned a shift today (for an earlier-processed
  *    role) are also qualified for this role and their shift covers this
@@ -26,16 +38,30 @@ export interface GeneratedShiftAssignment {
  *  - Employees already OFF that day (per weekly_shifts) or not in the
  *    flexible pool are never considered.
  *  - Stops once a role's peak demand is met or there are no more
- *    qualified, available employees — it does NOT try to minimize total
- *    headcount, balance fairness across the week, or consider anything
- *    beyond this single day in isolation. A real optimizer would need to
- *    weigh all of that together; this doesn't claim to.
+ *    qualified, available, RESTED employees — it does NOT try to minimize
+ *    total headcount or balance fairness across the week. A real optimizer
+ *    would need to weigh all of that together; this doesn't claim to.
+ *
+ * Cross-day rest is now part of shift SELECTION, not just after-the-fact
+ * detection: `priorDayShift` carries each employee's effective shift on
+ * the immediately preceding day (built by the caller as it walks the week
+ * day by day). Before a candidate shift is handed to an employee, it must
+ * clear the same minimum-rest rule validation.ts already enforces
+ * (`restHoursBetween`, identical definition — see roster-generation.ts).
+ * An employee who would land below the minimum is simply skipped for that
+ * role/day: this is a real, honest coverage shortfall, surfaced later as
+ * an unfilled_duty by Stage 10 if nobody else can cover it — never an
+ * illegal roster silently created and only flagged afterward. Causality
+ * stays: today's operational demand determines the candidate shift; rest
+ * against yesterday's actual shift then filters WHO can take it.
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
   demand: DailyDemand,
   allEmployees: Employee[],
-  rolesToConsider: string[] = ["Boarding", "Check-in", "Gate"]
+  priorDayShift: PriorDayShiftMap = new Map(),
+  minimumRestHours = 0,
+  rolesToConsider: string[] = ["Boarding", "Check-in", "Gate", "Profiling", "Mesure"]
 ): GeneratedShiftAssignment[] {
   const flexiblePool = allEmployees.filter(isFlexibleGeneralPool);
 
@@ -50,6 +76,10 @@ export function generateFlexiblePoolShifts(
 
     const window = demandWindowForRole(demand, role);
     if (!window) continue;
+
+    const shiftCode = selectCompatibleShiftCode(window.start, window.end);
+    if (!shiftCode) continue; // no catalog shift covers this window at all — cannot roster anyone for it, not a fabricated one either
+    const { shift_start } = getShiftTimesAs(shiftCode);
 
     // Count how many already-assigned employees (from an earlier role)
     // are qualified for this role too — their existing shift already
@@ -73,8 +103,13 @@ export function generateFlexiblePoolShifts(
       if (assignments.has(employee.id)) continue; // already rostered today for another role, not re-counted here (handled above)
       if (!employee.skills.includes(role)) continue;
 
-      const shiftCode = selectCompatibleShiftCode(window.start, window.end);
-      if (!shiftCode) continue; // no catalog shift covers this window — cannot roster anyone for it, not a fabricated one either
+      // Never knowingly create a shift-to-shift transition shorter than
+      // the minimum rest rule, even though this shift otherwise fully
+      // covers today's demand window.
+      const priorShift = priorDayShift.get(employee.id);
+      if (priorShift && restHoursBetween(priorShift.shift_end, shift_start) < minimumRestHours) {
+        continue;
+      }
 
       assignments.set(employee.id, {
         employeeId: employee.id,

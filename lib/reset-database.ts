@@ -36,12 +36,18 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   const { error: reqErr } = await supabase.from("staffing_requirements").insert(requirements);
   if (reqErr) throw new Error(`Seeding staffing requirements failed: ${reqErr.message}`);
 
-  const at201Requirement = requirements.find((r) => r.flight_id === "at201")!;
-  const at535Requirement = requirements.find((r) => r.flight_id === "at535")!;
+  // AT201 now produces multiple concurrent requirements (Gate, Boarding,
+  // Profiling — Europe/Schengen, standard aircraft), not one — the
+  // scripted initial assignees are specifically Boarding agents, so find
+  // that role explicitly rather than the first requirement for the flight.
+  const at201BoardingRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Boarding")!;
+  const at201GateRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Gate")!;
+  const at201ProfilingRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Profiling")!;
+  const at535Requirement = requirements.find((r) => r.flight_id === "at535" && r.role === "Check-in")!;
 
   const initialAssignments = INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
     id: `assign-at201-${i}`,
-    staffing_requirement_id: at201Requirement.id,
+    staffing_requirement_id: at201BoardingRequirement.id,
     employee_id: employeeId,
   }));
 
@@ -107,7 +113,12 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     {
       id: "audit-2",
       step_number: 2,
-      description: `Weekly plan validated — AT201 Boarding gap detected (${INITIAL_AT201_ASSIGNEES.length}/${at201Requirement.total_requirement}, operation rule)`,
+      // AT201 (Europe/Schengen, standard aircraft) now has three concurrent
+      // RAM requirements — Gate, Boarding, Profiling — not one merged
+      // number. The scripted assignees cover Boarding only, so describe
+      // each role's actual initial coverage honestly rather than asserting
+      // a single "gap" that may not even be true for the role they cover.
+      description: `Weekly plan validated — AT201 initial coverage: Boarding ${INITIAL_AT201_ASSIGNEES.length}/${at201BoardingRequirement.total_requirement}, Gate 0/${at201GateRequirement.total_requirement}, Profiling 0/${at201ProfilingRequirement.total_requirement} (operation rule) — Gate and Profiling remain unfilled gaps.`,
     },
   ];
 

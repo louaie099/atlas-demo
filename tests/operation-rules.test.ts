@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { classifyRamBoardingRequirement, missingOperationRuleRequirement } from "../lib/operation-rules";
+import { classifyRamGateAndBoardingRequirements, missingOperationRuleRequirement } from "../lib/operation-rules";
+import { classifyProfilingRequirement, classifyMesureRequirement } from "../lib/planning/specialized-demand";
 import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "../lib/company-config";
 import { Flight } from "../lib/types";
 
@@ -30,36 +31,92 @@ function makeFlight(overrides: Partial<Flight>): Flight {
   };
 }
 
-describe("classifyRamBoardingRequirement", () => {
-  it("returns baseline 3 for Boeing 737-800 to Europe/Schengen (matches AT201)", () => {
-    const req = classifyRamBoardingRequirement(makeFlight({}));
-    expect(req?.baseline_requirement).toBe(3);
-    expect(req?.source).toBe("fixed_rule");
-    expect(req?.needs_configuration).toBe(false);
+describe("classifyRamGateAndBoardingRequirements", () => {
+  it("returns Gate x1 + Boarding x1 for a standard aircraft to Europe/Schengen", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(makeFlight({}));
+    expect(reqs).toHaveLength(2);
+    expect(reqs?.find((r) => r.role === "Gate")?.total_requirement).toBe(1);
+    expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(1);
+    expect(reqs?.every((r) => r.needs_configuration === false)).toBe(true);
   });
 
-  it("returns a different baseline for Boeing 787-9 Long-haul (matches AT880)", () => {
-    const req = classifyRamBoardingRequirement(
-      makeFlight({ aircraft: "Boeing 787-9", destination_category: "Long-haul" })
+  it("doubles both roles for a Dreamliner to the same category", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(
+      makeFlight({ aircraft: "Boeing 787-9", destination_category: "Europe/Schengen" })
     );
-    expect(req?.baseline_requirement).toBe(4);
+    expect(reqs?.find((r) => r.role === "Gate")?.total_requirement).toBe(2);
+    expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(2);
   });
 
-  it("returns null for an unconfigured aircraft/destination combination", () => {
-    const req = classifyRamBoardingRequirement(
-      makeFlight({ aircraft: "Airbus A320", destination_category: "Africa" })
+  it("returns Gate x1 + Boarding x1 (no Profiling role here) for a standard aircraft to Africa", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(makeFlight({ destination_category: "Africa" }));
+    expect(reqs?.find((r) => r.role === "Gate")?.total_requirement).toBe(1);
+    expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(1);
+  });
+
+  it("returns null for an unconfigured destination category", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(
+      makeFlight({ aircraft: "Airbus A320", destination_category: "Domestic" })
     );
-    expect(req).toBeNull();
+    expect(reqs).toBeNull();
   });
 });
 
 describe("missingOperationRuleRequirement", () => {
   it("never fabricates a number — total_requirement is always 0 and needs_configuration is true", () => {
-    const flight = makeFlight({ aircraft: "Airbus A320", destination_category: "Africa" });
+    const flight = makeFlight({ aircraft: "Airbus A320", destination_category: "Domestic" });
     const req = missingOperationRuleRequirement(flight);
     expect(req.total_requirement).toBe(0);
     expect(req.needs_configuration).toBe(true);
     expect(req.reasoning).toContain("No operation rule configured");
+  });
+});
+
+describe("classifyProfilingRequirement", () => {
+  it("returns a confirmed Profiling requirement for Europe/Schengen, matching the Gate/Boarding count", () => {
+    const req = classifyProfilingRequirement(makeFlight({}));
+    expect(req?.total_requirement).toBe(1);
+    expect(req?.needs_configuration).toBe(false);
+  });
+
+  it("doubles for a Dreamliner", () => {
+    const req = classifyProfilingRequirement(makeFlight({ aircraft: "Boeing 787-9" }));
+    expect(req?.total_requirement).toBe(2);
+  });
+
+  it("returns null for Africa — Profiling does not apply there, this is not a gap", () => {
+    const req = classifyProfilingRequirement(makeFlight({ destination_category: "Africa" }));
+    expect(req).toBeNull();
+  });
+
+  it("returns a confirmed Profiling requirement for UK/USA too", () => {
+    const req = classifyProfilingRequirement(makeFlight({ destination_category: "UK/USA" }));
+    expect(req?.total_requirement).toBe(1);
+    expect(req?.needs_configuration).toBe(false);
+  });
+
+  it("returns null when there's no established rule for the combination at all", () => {
+    const req = classifyProfilingRequirement(makeFlight({ destination_category: "Domestic" }));
+    expect(req).toBeNull();
+  });
+});
+
+describe("classifyMesureRequirement", () => {
+  it("never invents a Mesure headcount — UK/USA gets an explicit needs_configuration row, not a guessed number", () => {
+    const req = classifyMesureRequirement(makeFlight({ destination_category: "UK/USA" }));
+    expect(req?.role).toBe("Mesure");
+    expect(req?.total_requirement).toBe(0);
+    expect(req?.needs_configuration).toBe(true);
+  });
+
+  it("returns null for Europe/Schengen — Mesure does not apply there", () => {
+    const req = classifyMesureRequirement(makeFlight({ destination_category: "Europe/Schengen" }));
+    expect(req).toBeNull();
+  });
+
+  it("returns null for Africa — Mesure does not apply there", () => {
+    const req = classifyMesureRequirement(makeFlight({ destination_category: "Africa" }));
+    expect(req).toBeNull();
   });
 });
 

@@ -46,8 +46,10 @@ describe("generateDutiesForDay", () => {
   });
 
   it("never double-books an employee across two overlapping duties the same day", () => {
-    const flightA = makeFlight({ id: "a", boarding_window_start: "13:50", boarding_window_end: "14:20" });
-    const flightB = makeFlight({ id: "b", boarding_window_start: "14:00", boarding_window_end: "14:30" }); // overlaps A
+    // T-1h windows: flightA (14:00 departure) -> 13:00-14:00, flightB
+    // (14:30 departure) -> 13:30-14:30 — partial overlap, 13:30-14:00.
+    const flightA = makeFlight({ id: "a", scheduled_departure: "14:00" });
+    const flightB = makeFlight({ id: "b", scheduled_departure: "14:30" }); // overlaps A
     const reqA = makeRequirement({ id: "ra", flight_id: "a", total_requirement: 1 });
     const reqB = makeRequirement({ id: "rb", flight_id: "b", total_requirement: 1 });
 
@@ -113,7 +115,12 @@ describe("generateDutiesForDay", () => {
   });
 
   it("prioritizes a freshly GENERATED shift over a flexible-pool employee's stale static baseline — proving demand-driven generation actually takes effect, not silently bypassed", () => {
-    const flight = makeFlight({ boarding_window_start: "20:00", boarding_window_end: "20:30" }); // outside the employee's static baseline shift entirely
+    // A Boarding/fixed_rule requirement's window is now T-1h from departure
+    // (standard aircraft) — see requirement-window.ts — so drive it via
+    // scheduled_departure. 21:00 departure -> 20:00-21:00 window, which is
+    // OUTSIDE the employee's stale static baseline shift (MT01: 05:45-14:45)
+    // entirely — only the freshly generated shift (AP02) covers it.
+    const flight = makeFlight({ scheduled_departure: "21:00" });
     const requirement = makeRequirement({});
     // This employee's stale seed baseline (MT01: 05:45-14:45) does NOT
     // cover this window at all — only the freshly generated shift does.
@@ -126,7 +133,7 @@ describe("generateDutiesForDay", () => {
       weekly_shifts: [{ day_of_week: "Wednesday", shift_code: "MT01", status: "working" }],
     });
     const generatedShift = [
-      { employeeId: "flex-1", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: ["Boarding"] }, // 13:45-23:15, covers 20:00-20:30. Same-day (not overnight) — NT01/N8/AP03/AP04 are overnight and trip a separate, already-documented limitation (simple minute-diff math doesn't handle midnight-crossing shifts), which is not what this test is isolating.
+      { employeeId: "flex-1", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: ["Boarding"] }, // 13:45-23:15, covers the 20:00-21:00 window. Same-day (not overnight) — NT01/N8/AP03/AP04 are overnight and trip a separate, already-documented limitation (simple minute-diff math doesn't handle midnight-crossing shifts), which is not what this test is isolating.
     ];
 
     const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG);
