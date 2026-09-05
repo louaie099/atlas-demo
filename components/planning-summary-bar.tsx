@@ -39,13 +39,20 @@ export function PlanningSummaryBar({
     (i) => i.type === "rest_violation" || i.type === "weekly_hours_violation"
   ).length;
 
+  // Ordered by draft-plan priority, not raw category: Flights sets the scale,
+  // Proposed comes right after it because a full spread of ATLAS proposals IS
+  // the successful outcome of a draft generation -- not a fallback. Gaps and
+  // Needs Configuration (both "needs attention" buckets) follow, then Plan
+  // warnings. Confirmed is real and still shown, but pre-publish it's expected
+  // to be near-zero, so it's deliberately placed last rather than up front
+  // where a low number would misread as "the plan barely worked."
   const stats: { label: string; value: number; dot: string; hint?: string }[] = [
     { label: "Flights this week", value: flights, dot: "bg-gray-400" },
     { label: "Proposed by ATLAS", value: proposed, dot: "bg-brand-500", hint: "Draft coverage -- not yet published" },
-    { label: "Confirmed", value: covered, dot: "bg-good-500", hint: "Human-confirmed assignments" },
     { label: "Staffing gaps", value: gaps, dot: "bg-bad-500", hint: "Not enough valid people found" },
     { label: "Needs configuration", value: needsConfig, dot: "bg-warn-500", hint: "A rule or agreement isn't set up yet" },
     { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest or weekly-hours issues in the roster" },
+    { label: "Confirmed", value: covered, dot: "bg-good-500", hint: "Human-confirmed assignments" },
   ];
 
   return (

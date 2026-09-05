@@ -135,29 +135,35 @@ export default function PlanningPage() {
         <>
           {roster && <PlanningSummaryBar roster={roster} issues={issues} />}
 
-          <div className="flex gap-1 bg-white border border-border rounded-xl2 p-1 self-start">
-            <button
-              onClick={() => setTab("coverage")}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
-                tab === "coverage" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
-              }`}
-            >
-              Flight Coverage
-            </button>
-            <button
-              onClick={() => setTab("schedule")}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
-                tab === "schedule" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
-              }`}
-            >
-              Agent Schedule
-            </button>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex gap-1 bg-white border border-border rounded-xl2 p-1 self-start">
+              <button
+                onClick={() => setTab("coverage")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+                  tab === "coverage" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+                }`}
+              >
+                Flight Coverage
+              </button>
+              <button
+                onClick={() => setTab("schedule")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+                  tab === "schedule" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+                }`}
+              >
+                Agent Schedule
+              </button>
+            </div>
+
+            {/* Secondary action -- manual Add Flight lives next to the page/week
+                controls, not inside the flight list itself, so it never competes
+                with the operational program for visual weight (still just the
+                collapsed "+ Add Flight" button unless clicked open). */}
+            {tab === "coverage" && <AddFlightForm onAdded={loadWeeklyPlan} />}
           </div>
 
           {tab === "coverage" && (
             <div className="flex flex-col gap-6">
-              <AddFlightForm onAdded={loadWeeklyPlan} />
-
               {roster === null && <p className="text-sm text-muted">Loading flights...</p>}
 
               {daysWithData.map((day) => (
