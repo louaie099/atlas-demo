@@ -15,7 +15,7 @@ export default function DashboardPage() {
       .then((data) => setRoster(data.roster ?? []));
   }, []);
 
-  const openIssues = roster?.filter((v) => v.coverageStatus === "gap" || v.coverageStatus === "needs_configuration") ?? [];
+  const openIssues = roster?.filter((v) => v.coverageStatus === "gap") ?? [];
   const forecastDriven = roster?.filter((v) => v.requirement.source === "demand_forecast") ?? [];
 
   return (
@@ -48,9 +48,7 @@ export default function DashboardPage() {
                     {v.flight.flight_number} · {v.requirement.role}
                   </span>
                   <Badge tone="bad">
-                    {v.coverageStatus === "needs_configuration"
-                      ? "Needs Configuration"
-                      : `${v.assignedEmployees.length}/${v.requirement.total_requirement}`}
+                    {v.assignedEmployees.length}/{v.requirement.total_requirement}
                   </Badge>
                 </div>
                 <p className="text-sm text-muted mt-2">{v.requirement.reasoning}</p>

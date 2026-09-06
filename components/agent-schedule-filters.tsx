@@ -87,7 +87,7 @@ export function AgentScheduleFilters({
         <option value="">Any status</option>
         <option value="plan_warning">Has a plan warning</option>
         <option value="foreign_commitment">Has a foreign-company commitment</option>
-        <option value="proposed_duty">Has a proposed duty</option>
+        <option value="assigned_duty">Has an ATLAS-assigned duty</option>
       </select>
       {(filters.search || filters.team || filters.skill || filters.shift || filters.status) && (
         <button

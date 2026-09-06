@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { classifyRamGateAndBoardingRequirements, missingOperationRuleRequirement } from "../lib/operation-rules";
 import { classifyProfilingRequirement, classifyMesureRequirement } from "../lib/planning/specialized-demand";
-import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "../lib/company-config";
+import { classifyCompanyRequirement } from "../lib/company-config";
 import { Flight } from "../lib/types";
 
 function makeFlight(overrides: Partial<Flight>): Flight {
@@ -27,6 +27,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     day_of_week: "Wednesday",
     operator_type: "atlas_managed",
     destination_category: "Europe/Schengen",
+    booked_passengers: null, seat_capacity: null,
     ...overrides,
   };
 }
@@ -102,11 +103,22 @@ describe("classifyProfilingRequirement", () => {
 });
 
 describe("classifyMesureRequirement", () => {
-  it("never invents a Mesure headcount — UK/USA gets an explicit needs_configuration row, not a guessed number", () => {
+  it("UK/USA: confirmed Mesure headcount of 4, a real requirement — not needs_configuration any more", () => {
     const req = classifyMesureRequirement(makeFlight({ destination_category: "UK/USA" }));
     expect(req?.role).toBe("Mesure");
-    expect(req?.total_requirement).toBe(0);
-    expect(req?.needs_configuration).toBe(true);
+    expect(req?.total_requirement).toBe(4);
+    expect(req?.needs_configuration).toBe(false);
+  });
+
+  it("Canada: same confirmed Mesure headcount of 4", () => {
+    const req = classifyMesureRequirement(makeFlight({ destination_category: "Canada" }));
+    expect(req?.total_requirement).toBe(4);
+    expect(req?.needs_configuration).toBe(false);
+  });
+
+  it("Mesure headcount does NOT scale with aircraft class — Dreamliner to UK/USA is still 4, never 8", () => {
+    const req = classifyMesureRequirement(makeFlight({ destination_category: "UK/USA", aircraft: "Boeing 787-9" }));
+    expect(req?.total_requirement).toBe(4);
   });
 
   it("returns null for Europe/Schengen — Mesure does not apply there", () => {
@@ -137,11 +149,10 @@ describe("classifyCompanyRequirement", () => {
   });
 });
 
-describe("missingCompanyConfigRequirement", () => {
-  it("never fabricates a number for an unconfigured carrier", () => {
+describe("classifyFlightRequirements — unconfigured foreign carrier", () => {
+  it("produces NO requirement at all for an unconfigured carrier — the flight stays Flight-Schedule-only, never a fabricated needs_configuration row", () => {
     const flight = makeFlight({ airline: "Turkish Airlines", operator_type: "self_managed", destination_category: null });
-    const req = missingCompanyConfigRequirement(flight);
-    expect(req.total_requirement).toBe(0);
-    expect(req.needs_configuration).toBe(true);
+    const req = classifyCompanyRequirement(flight);
+    expect(req).toBeNull();
   });
 });

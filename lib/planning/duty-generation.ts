@@ -146,7 +146,14 @@ export function generateDutiesForDay(
       })
       .filter((e) => e !== null) as Employee[];
 
-    const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows);
+    // A company_config (foreign-carrier) requirement is never filled via a
+    // skill match -- there is no real "Company Team" flight-task skill,
+    // only real authorization for THIS specific company (see
+    // scoring.ts's requiredAuthorization param). Every other requirement
+    // (Gate/Boarding/Profiling/Mesure/Check-in) is untouched: role-based
+    // skill matching, exactly as before.
+    const requiredAuthorization = requirement.source === "company_config" ? flight.airline : undefined;
+    const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization);
     const recommended = results.filter((r) => r.status === "recommended");
 
     let filled = 0;

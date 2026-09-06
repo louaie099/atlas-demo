@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { AgentScheduleEntry, AgentDayEntry } from "@/lib/types";
 import { Badge } from "./ui";
 import { TeamBadge } from "./team-badge";
+import { ROSTER_COLORS, rosterCellTone } from "@/lib/roster-colors";
 import { AgentDayDetail } from "./agent-day-detail";
 import { AgentScheduleFilters, AgentScheduleFilterState, EMPTY_AGENT_SCHEDULE_FILTERS } from "./agent-schedule-filters";
 
@@ -22,17 +23,20 @@ const DAY_SHORT: Record<string, string> = {
  * single exclusive "day kind": a working day can carry a shift code AND a
  * foreign-company commitment AND one or more RAM duties AND a plan warning,
  * all at once -- each gets its own small indicator rather than one label
- * overwriting the others. Proposed duties get the same calm brand treatment
- * used in Flight Coverage (never rendered as a warning); a real plan
- * warning gets its own separate, honestly-colored indicator.
+ * overwriting the others. ATLAS-assigned duties get the same calm brand
+ * treatment used in Flight Coverage (never rendered as a warning, and
+ * never labeled "proposed" -- an ordinary generated duty is a normal
+ * assignment, not a pending recommendation); a real plan warning gets its
+ * own separate, honestly-colored indicator.
  */
 function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) {
   if (day.status === "off") {
+    const tone = ROSTER_COLORS.off;
     return (
       <button
         type="button"
         onClick={onClick}
-        className="w-full h-full min-w-[104px] px-2.5 py-2 text-center text-xs text-muted hover:bg-surface rounded-lg"
+        className={`w-full h-full min-w-[104px] px-2.5 py-2 text-center text-xs font-medium rounded-lg ${tone.bg} ${tone.text} hover:brightness-95`}
       >
         OFF
       </button>
@@ -40,19 +44,20 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
   }
 
   const confirmedCount = day.duties.filter((d) => d.status === "confirmed").length;
-  const proposedCount = day.duties.filter((d) => d.status === "proposed").length;
+  const assignedCount = day.duties.filter((d) => d.status === "assigned").length;
   const hasIssue = day.issues.length > 0;
+  const tone = rosterCellTone(day.shiftCode);
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="w-full h-full min-w-[104px] px-2.5 py-2 text-left hover:bg-surface rounded-lg flex flex-col gap-0.5"
+      className={`w-full h-full min-w-[104px] px-2.5 py-2 text-left rounded-lg flex flex-col gap-0.5 ${tone.bg} hover:brightness-95`}
     >
       <div className="flex items-center gap-1.5">
-        <span className="text-xs font-semibold text-ink">{day.shiftCode ?? "—"}</span>
+        <span className={`text-xs font-semibold ${tone.text}`}>{day.shiftCode ?? "—"}</span>
         {hasIssue && (
-          <span title="Plan warning this day" className="text-warn-700 text-xs leading-none">
+          <span title="Plan warning this day" className={`${ROSTER_COLORS.warning} text-xs leading-none`}>
             ⚠
           </span>
         )}
@@ -67,10 +72,13 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
           <TeamBadge name={day.foreignCommitments[0].airline} />
         </span>
       )}
-      {(confirmedCount > 0 || proposedCount > 0) && (
-        <span className={`text-[10.5px] leading-tight ${proposedCount > 0 ? "text-brand-700" : "text-good-700"}`}>
-          {confirmedCount + proposedCount} {confirmedCount + proposedCount === 1 ? "duty" : "duties"}
-          {proposedCount > 0 && confirmedCount > 0 ? ` (${proposedCount} proposed)` : proposedCount > 0 ? " (proposed)" : ""}
+      {(confirmedCount > 0 || assignedCount > 0) && (
+        <span className={`text-[10.5px] leading-tight ${assignedCount > 0 ? ROSTER_COLORS.assignedDuty : ROSTER_COLORS.confirmedDuty}`}>
+          {confirmedCount + assignedCount} {confirmedCount + assignedCount === 1 ? "duty" : "duties"}
+          {/* Both counts are real, current duties -- "confirmed" (backed by
+              a real Assignment row) is the notable exception worth calling
+              out; the ordinary ATLAS-assigned case needs no extra label. */}
+          {assignedCount > 0 && confirmedCount > 0 ? ` (${confirmedCount} confirmed)` : ""}
         </span>
       )}
     </button>
@@ -91,8 +99,11 @@ function AgentRow({
           <span className="text-sm font-medium text-ink truncate">{entry.employee.name}</span>
           <TeamBadge name={entry.employee.assignment} />
           {entry.weeklyIssues.length > 0 && (
-            <span title={entry.weeklyIssues.map((i) => i.description).join(" ")} className="text-[10.5px] text-warn-700">
-              ⚠ Weekly hours
+            <span title={entry.weeklyIssues.map((i) => i.description).join(" ")} className={`text-[10.5px] ${ROSTER_COLORS.warning}`}>
+              {/* Covers weekly_hours_violation AND consecutive_off_violation
+                  — both are week-level (no single dayOfWeek), so the label
+                  stays generic rather than naming only one of them. */}
+              ⚠ Weekly issue
             </span>
           )}
         </div>
@@ -135,8 +146,8 @@ export function AgentScheduleTable({ schedule }: { schedule: AgentScheduleEntry[
       if (filters.status === "foreign_commitment") {
         if (!entry.days.some((d) => d.foreignCommitments.length > 0)) return false;
       }
-      if (filters.status === "proposed_duty") {
-        if (!entry.days.some((d) => d.duties.some((duty) => duty.status === "proposed"))) return false;
+      if (filters.status === "assigned_duty") {
+        if (!entry.days.some((d) => d.duties.some((duty) => duty.status === "assigned"))) return false;
       }
       return true;
     });

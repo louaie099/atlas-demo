@@ -2,7 +2,7 @@ import { Flight, StaffingRequirement, Config } from "../types";
 import { computeCheckinRequirement } from "../demand-forecast";
 import { classifyRamGateAndBoardingRequirements, missingOperationRuleRequirement } from "../operation-rules";
 import { classifyProfilingRequirement, classifyMesureRequirement } from "./specialized-demand";
-import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "../company-config";
+import { classifyCompanyRequirement } from "../company-config";
 
 /**
  * Classifies a single flight into its staffing requirement(s), using the
@@ -19,16 +19,27 @@ import { classifyCompanyRequirement, missingCompanyConfigRequirement } from "../
  * Boarding) plus specialized-demand.ts (Profiling, and Mesure where
  * applicable), or demand-forecast.ts (Check-in — AT535 is the one
  * demand-forecast case in the seed data by design). Self-managed (foreign
- * carrier) flights go through company-config.ts. A flight with no
- * matching rule/config comes back with needs_configuration: true — never
- * a guessed number.
+ * carrier) flights go through company-config.ts.
+ *
+ * MANAGED vs SCHEDULED: a flight existing in the weekly schedule does not
+ * by itself mean ATLAS generates workforce coverage for it. A self-managed
+ * (foreign carrier) flight with no COMPANY_STAFFING_CONFIG entry is a real,
+ * scheduled flight that simply has no ATLAS staffing role at all — it
+ * returns an EMPTY requirement list, not a placeholder "needs
+ * configuration" row. Flight Schedule still shows it; Flight Coverage
+ * never does. A RAM/atlas_managed flight with no established operation
+ * rule is a different, genuinely internal case (ATLAS DOES operate the
+ * flight, but the rule for it isn't confirmed yet) — that one keeps its
+ * needs_configuration: true row, surfaced only as an administrative
+ * PlanIssue (see validation.ts), never as a routine Flight Coverage state.
  */
 export function classifyFlightRequirements(
   flight: Flight,
   config: Config
 ): Omit<StaffingRequirement, "id" | "flight_id">[] {
   if (flight.operator_type === "self_managed") {
-    return [classifyCompanyRequirement(flight) ?? missingCompanyConfigRequirement(flight)];
+    const companyRequirement = classifyCompanyRequirement(flight);
+    return companyRequirement ? [companyRequirement] : [];
   }
 
   if (flight.id === "at535") {

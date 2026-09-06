@@ -24,6 +24,8 @@ const foreignFlight: Flight = {
   day_of_week: "Wednesday",
   operator_type: "self_managed",
   destination_category: null,
+  booked_passengers: null,
+  seat_capacity: null,
 };
 
 const ramFlight: Flight = {

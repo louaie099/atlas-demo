@@ -31,6 +31,34 @@ interface FlightTemplate {
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
+/**
+ * Seat capacity by aircraft type — factual aircraft data, not a staffing
+ * input by itself (see Flight.seat_capacity's doc comment in lib/types.ts:
+ * passenger load is architecture-only, made available for future planning
+ * logic, not consumed by any staffing rule yet). An aircraft type absent
+ * here gets a null capacity rather than a guessed figure.
+ */
+const AIRCRAFT_SEAT_CAPACITY: Record<string, number> = {
+  "Boeing 737-800": 189,
+  "Airbus A320": 180,
+  "Airbus A321": 220,
+  "Airbus A350": 325,
+  "Boeing 777-300ER": 396,
+  "Boeing 787-9": 296,
+};
+
+/**
+ * A deterministic, illustrative booked-passenger figure derived from the
+ * template's own booking_pressure — never a random number, so re-running
+ * generation always produces the same demo data. This is demo data, same
+ * caveat as the rest of this file's TEMPLATES: not real booking figures.
+ */
+function bookedPassengersFor(capacity: number | null, bookingPressure: "normal" | "elevated"): number | null {
+  if (capacity === null) return null;
+  const loadFactor = bookingPressure === "elevated" ? 0.96 : 0.82;
+  return Math.round(capacity * loadFactor);
+}
+
 const TEMPLATES: FlightTemplate[] = [
   { flightNumber: "AT100", airline: "Royal Air Maroc", origin: "CMN", destination: "MAD", aircraft: "Boeing 737-800", departure: "07:15", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
   { flightNumber: "AT302", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "08:00", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
@@ -72,6 +100,7 @@ export function generateWeeklyFlights(): Flight[] {
   const flights: Flight[] = [];
 
   for (const t of TEMPLATES) {
+    const seatCapacity = AIRCRAFT_SEAT_CAPACITY[t.aircraft] ?? null;
     for (const day of t.daysOfWeek) {
       const id = `${t.flightNumber.toLowerCase()}-${day.toLowerCase()}`;
       flights.push({
@@ -101,6 +130,8 @@ export function generateWeeklyFlights(): Flight[] {
         // flights get their category computed from the real destination,
         // never hand-typed.
         destination_category: t.operatorType === "self_managed" ? null : classifyDestinationOperationally(t.destination),
+        seat_capacity: seatCapacity,
+        booked_passengers: bookedPassengersFor(seatCapacity, t.bookingPressure),
       });
     }
   }

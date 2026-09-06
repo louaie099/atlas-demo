@@ -4,7 +4,19 @@ export type FlightStatus = "scheduled" | "delayed";
 export type CandidateStatus = "recommended" | "flagged";
 export type PlannedDutyStatus = "planned" | "reassigned";
 export type OperatorType = "atlas_managed" | "self_managed";
-export type RequirementCoverageStatus = "covered" | "proposed" | "gap" | "conflict" | "needs_configuration";
+// Collapsed from the earlier "covered" | "proposed" | "needs_configuration"
+// set. Ordinary generated staffing is now a plain ASSIGNMENT the moment the
+// draft plan covers the requirement -- whether the specific employee comes
+// from a real Assignment row or from the engine's own draft duty no longer
+// changes how it reads in Flight Coverage; "proposed"/recommendation
+// language is reserved for exceptional cases (renfort, live-conflict
+// reassignment), which this static weekly-plan status does not represent.
+// "needs_configuration" is no longer a coverage status at all -- a
+// genuinely unconfigured internal RAM rule surfaces only as a PlanIssue
+// (see lib/planning/validation.ts), never as a per-flight coverage state,
+// and an unconfigured foreign carrier now produces no requirement (and so
+// no coverage row) whatsoever -- see lib/planning/weekly-requirements.ts.
+export type RequirementCoverageStatus = "assigned" | "gap" | "conflict";
 
 export interface WeeklyShiftEntry {
   day_of_week: string;
@@ -59,7 +71,13 @@ export interface Flight {
   booking_pressure: BookingPressure;
   day_of_week: string; // e.g. "Wednesday" — which day of the selected week
   operator_type: OperatorType; // atlas_managed (RAM/own ops) vs self_managed (foreign carrier)
-  destination_category: string | null; // e.g. "Europe/Schengen", "Long-haul" — RAM flights only
+  destination_category: string | null; // e.g. "Europe/Schengen", "UK/USA" — RAM flights only
+  // Passenger load — architecture only for now (see lib/flight-generator.ts).
+  // Available to planning logic and to the Flight Schedule detail view, but
+  // no staffing rule reads it yet; a rule would need to be explicitly
+  // confirmed and configured before load ever changes a headcount.
+  booked_passengers: number | null;
+  seat_capacity: number | null;
 }
 
 export interface StaffingRequirement {
@@ -107,9 +125,19 @@ export interface RosterRequirementView {
   requirement: StaffingRequirement;
   flight: Flight;
   assignedEmployees: Employee[]; // CONFIRMED — real Assignment rows
-  proposedEmployees: Employee[]; // PROPOSED — from the engine's generated draft plan, not yet confirmed
-  gap: number; // still unmet even counting proposals
+  proposedEmployees: Employee[]; // ATLAS-assigned — from the engine's generated draft plan; a normal draft-plan assignment, not an exceptional recommendation (see RequirementCoverageStatus)
+  gap: number; // still unmet even counting the engine's own draft assignments
   coverageStatus: RequirementCoverageStatus;
+  // Display label for the compact coverage chip/detail heading — the
+  // requirement's own role (Gate/Boarding/Profiling/Mesure/Check-in) for
+  // RAM flights, or "{Airline} Team" for a company_config (foreign-carrier)
+  // requirement. `requirement.role` for a company_config requirement is
+  // the neutral internal identifier "Company Team" (see company-config.ts)
+  // — it carries no scoring weight (eligibility there is real company
+  // authorization, not a skill match — see lib/scoring.ts's
+  // requiredAuthorization parameter), it's just a label. coverageLabel is
+  // the friendlier one actually shown in Flight Coverage.
+  coverageLabel: string;
 }
 
 export interface ConflictInfo {
@@ -153,15 +181,17 @@ export interface AgentScheduleEntry {
   weeklyIssues: import("./planning/validation").PlanIssue[];
 }
 
-// A single flight duty on a specific day, tagged with the same
-// proposed/confirmed distinction established in Flight Coverage
-// (RosterRequirementView) — never silently merged into one status.
+// A single flight duty on a specific day. "confirmed" = backed by a real
+// Assignment row; "assigned" = ATLAS's own draft-plan assignment, not yet
+// backed by one. Both are normal, current duties for this employee — this
+// is no longer a proposed/confirmed (recommendation/approval) distinction,
+// just a record of where the duty currently lives in the publish pipeline.
 export interface AgentScheduleDuty {
   flightId: string;
   flightNumber: string;
   role: string;
   window: { start: string; end: string };
-  status: "confirmed" | "proposed";
+  status: "confirmed" | "assigned";
 }
 
 // One day of an employee's generated week. Deliberately NOT a single

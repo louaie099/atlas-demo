@@ -21,6 +21,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     scheduled_arrival: null, gate: null, boarding_window_start: "13:50", boarding_window_end: "14:20",
     status: "scheduled", booking_pressure: "normal", day_of_week: "Wednesday",
     operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+    booked_passengers: null, seat_capacity: null,
     ...overrides,
   };
 }

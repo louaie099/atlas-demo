@@ -46,15 +46,17 @@ export function computeCoverageStatus(
   confirmedCount: number,
   proposedCount: number
 ): RequirementCoverageStatus {
-  if (requirement.needs_configuration) return "needs_configuration";
+  // needs_configuration requirements never reach this function — buildRosterViews
+  // filters them out before computing coverage (see below); a genuine internal
+  // RAM configuration gap is surfaced only as an administrative PlanIssue.
   const total = confirmedCount + proposedCount;
-  if (total >= requirement.total_requirement) {
-    // Fully covered by real, confirmed assignments alone → covered.
-    // Covered only with the help of the engine's proposals → proposed,
-    // an honestly distinct state — it's what the draft plan suggests,
-    // not yet a human-confirmed assignment.
-    return confirmedCount >= requirement.total_requirement ? "covered" : "proposed";
-  }
+  // Fully staffed by the draft plan — whether via a real, confirmed
+  // Assignment row or the engine's own draft-plan duty no longer matters
+  // for this status: both ARE the plan's assignment, not a pending
+  // recommendation. "Proposed"/recommendation language is reserved for
+  // exceptional cases (renfort, a live-operational reassignment) — see
+  // lib/types.ts's RequirementCoverageStatus doc comment.
+  if (total >= requirement.total_requirement) return "assigned";
   return "gap";
   // "conflict" is computed at the Live Operations layer (see
   // /api/simulate-delay) once an operational event actually creates one —
@@ -71,7 +73,16 @@ function buildRosterViews(
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
   const employeesById = new Map<string, Employee>(employees.map((e) => [e.id, e]));
 
-  const views: RosterRequirementView[] = requirements.map((req) => {
+  // A needs_configuration requirement (a genuine internal RAM gap — no
+  // classified destination, or no matrix rule for this aircraft/category)
+  // never becomes a Flight Coverage row at all — it's surfaced only as an
+  // administrative PlanIssue (see validation.ts), never a routine
+  // operational staffing state. An unmanaged foreign carrier never even
+  // reaches this point: classifyFlightRequirements produces zero
+  // requirement rows for it in the first place (see weekly-requirements.ts).
+  const routineRequirements = requirements.filter((r) => !r.needs_configuration);
+
+  const views: RosterRequirementView[] = routineRequirements.map((req) => {
     const flight = flightsById.get(req.flight_id)!;
 
     const confirmedIds = assignments
@@ -88,9 +99,15 @@ function buildRosterViews(
       .map((id) => employeesById.get(id))
       .filter((e): e is Employee => Boolean(e));
 
-    const gap = req.needs_configuration
-      ? 0
-      : Math.max(0, req.total_requirement - assignedEmployees.length - proposedEmployees.length);
+    const gap = Math.max(0, req.total_requirement - assignedEmployees.length - proposedEmployees.length);
+
+    // Company-config (foreign-carrier) requirements display as "{Airline}
+    // Team" — never the generic internal skill tag "Ramp Team", which
+    // reads like a RAM/airport ramp-handling function these ACE/passenger-
+    // service employees don't actually perform. requirement.role itself is
+    // untouched (it still has to equal the Employee.skills entry scoring
+    // matches against) — this is a display-only label.
+    const coverageLabel = req.source === "company_config" ? `${flight.airline} Team` : req.role;
 
     return {
       requirement: req,
@@ -99,6 +116,7 @@ function buildRosterViews(
       proposedEmployees,
       gap,
       coverageStatus: computeCoverageStatus(req, assignedEmployees.length, proposedEmployees.length),
+      coverageLabel,
     };
   });
 
@@ -226,7 +244,7 @@ function buildAgentScheduleEntries(
             flightNumber: flight.flight_number,
             role: d.role,
             window: d.window,
-            status: "proposed",
+            status: "assigned",
           });
         }
 

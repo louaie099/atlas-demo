@@ -5,6 +5,7 @@ import { companyOperatingDays } from "./flight-generator";
 import { getCompanyRequiredAgents } from "./company-config";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { deriveTeamRotation, DemandDay, RotationInfeasibleError } from "./rotation-feasibility";
+import { FixedCycleDefinition, JR_NT_OFF_OFF_CYCLE, offDaysForDisplayedWeek } from "./fixed-cycle-rotation";
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -93,11 +94,18 @@ interface GenSpec {
  *    Baggage Claim isn't in any of them) — these employees are given
  *    "Weight Control" as the closest defensible baseline qualification,
  *    documented here rather than inventing a new skill category.
- *  - "Ramp Team" is kept ONLY for foreign-company-assigned employees —
- *    not a stray legacy skill, but the literal StaffingRequirement role
- *    name used by company-config.ts. Removing it would make these
- *    employees structurally unable to ever be found for their own
- *    company's flights.
+ *  - "Ramp Team" has been RETIRED as an employee skill entirely. It used
+ *    to be a manufactured qualification whose only purpose was making
+ *    scoreCandidates' generic skill filter match a foreign-company
+ *    requirement — semantically wrong, since these are ACE passenger-
+ *    service employees on a foreign airline's own operation, not airport
+ *    ramp workers, and "having the Ramp Team skill" never meant "actually
+ *    authorized for this specific company." Eligibility for a company_config
+ *    requirement is now decided by the employee's real
+ *    `foreign_company_authorizations` (see scoring.ts's
+ *    requiredAuthorization parameter) — a real, pre-existing concept that
+ *    was already being set correctly on every FOREIGN_GROUPS entry below,
+ *    just never actually read by scoring. No skill stands in for it.
  */
 const CATEGORIES: GenSpec[] = [
   // ---- General T1 Pool (~96) — the flexible, unrestricted RAM ACE pool ----
@@ -116,12 +124,9 @@ const CATEGORIES: GenSpec[] = [
   { count: 10, skills: ["Boarding", "Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "JR01", rest_before_shift_hours: 10, weekly_hours: 34, keepWednesdayWorking: true },
 
   // ---- Specialized/fixed teams ----
-  // Transit — committed for the full shift once on it. Skill is the
-  // confirmed "Transit" qualification, not the removed "Arrivals". Split
-  // into two shift patterns; safe to be off on Wednesday since Transit
-  // isn't queried by any live Find-Agent role.
-  { count: 8, skills: ["Transit"], assignment: "Transit", shift_code: "MT01", rest_before_shift_hours: 11, weekly_hours: 28 },
-  { count: 6, skills: ["Transit"], assignment: "Transit", shift_code: "AP01", rest_before_shift_hours: 11, weekly_hours: 26 },
+  // Transit and Leaders MOVED to FIXED_CYCLE_GROUPS below — both now
+  // follow the confirmed continuous JR → NT → OFF → OFF cycle
+  // (lib/fixed-cycle-rotation.ts), not this flat 2-OFF-days path.
   // Profiling — document verification. Real Profiling skill, some also Boarding.
   { count: 7, skills: ["Profiling"], assignment: "Profiling", shift_code: "NR02", rest_before_shift_hours: 11, weekly_hours: 22, keepWednesdayWorking: true },
   { count: 5, skills: ["Profiling", "Boarding"], assignment: "Profiling", shift_code: "AP02", rest_before_shift_hours: 11, weekly_hours: 24, keepWednesdayWorking: true },
@@ -140,10 +145,6 @@ const CATEGORIES: GenSpec[] = [
   { count: 6, skills: ["Weight Control"], assignment: "Baggage Claim", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 20 },
   // Service Plus — T1-based premium/VIP/business-class/lounge activity.
   { count: 6, skills: ["Service Plus"], assignment: "Service Plus", shift_code: "AP02", rest_before_shift_hours: 12, weekly_hours: 18, keepWednesdayWorking: true },
-  // Leaders — confirmed fixed JR-type planning, excluded from general
-  // allocation regardless of off-status. Real rotation TBD — placeholder
-  // OFF-day distribution only.
-  { count: 5, skills: ["Boarding"], assignment: "Leaders", shift_code: "JR02", rest_before_shift_hours: 12, weekly_hours: 32 },
   // Duty Officers — confirmed fixed NT/JR-type planning (night/day
   // coverage). Kept working Wednesday so the narrative (Mohammed Alaoui
   // approving on Wednesday) doesn't read oddly next to others being off
@@ -151,27 +152,141 @@ const CATEGORIES: GenSpec[] = [
   { count: 4, skills: ["Boarding"], assignment: "Duty Officers", shift_code: "NT01", rest_before_shift_hours: 12, weekly_hours: 30, keepWednesdayWorking: true },
 ];
 
+interface FixedCycleSpec {
+  count: number;
+  skills: string[];
+  assignment: string;
+  cycle: FixedCycleDefinition;
+  rest_before_shift_hours: number;
+  weekly_hours: number;
+}
+
+/**
+ * Teams with a CONFIRMED continuous fixed-cycle rotation (see
+ * lib/fixed-cycle-rotation.ts) — a real repeating pattern, not a
+ * per-week OFF-day count and not flight-demand-derived. Currently
+ * confirmed: Transit and Leaders, both JR → NT → OFF → OFF. Adding
+ * another team's real confirmed cycle here later requires no change to
+ * the engine itself — only a new entry in this table (see the module
+ * comment on FixedCycleDefinition for why).
+ *
+ * Transit was previously split into two flat sub-specs (MT01/AP01) only
+ * to demonstrate shift-code variety within the team — the fixed cycle
+ * already produces real day-to-day variety (JR one day, NT another, OFF
+ * the rest), so that split is no longer needed; merged into one group.
+ */
+const FIXED_CYCLE_GROUPS: FixedCycleSpec[] = [
+  { count: 14, skills: ["Transit"], assignment: "Transit", cycle: JR_NT_OFF_OFF_CYCLE, rest_before_shift_hours: 11, weekly_hours: 28 },
+  { count: 5, skills: ["Boarding"], assignment: "Leaders", cycle: JR_NT_OFF_OFF_CYCLE, rest_before_shift_hours: 12, weekly_hours: 32 },
+];
+
+export interface FixedCycleEmployeeSeed {
+  employee: Omit<Employee, "weekly_shifts">;
+  cycle: FixedCycleDefinition;
+  cycleOffset: number;
+}
+
+/**
+ * Generates fixed-cycle-team employees. Unlike generateEmployees()
+ * (CATEGORIES/FOREIGN_GROUPS), this can't hand back a single off_days +
+ * shift_code pair — a fixed-cycle employee alternates between TWO real
+ * shift codes (JR, NT) across the cycle, which the uniform-schedule model
+ * (one shift_code + a set of off_days) can't represent. The caller
+ * (lib/seed-data.ts) builds this employee's actual weekly_shifts directly
+ * from {cycle, cycleOffset} via buildFixedCycleWeeklySchedule — the
+ * SAME mechanism used for both the displayed week and the 14-day
+ * cross-week tests, so there's no separate "week" logic to drift.
+ *
+ * cycleOffset is staggered by index (n % cycle length) purely for
+ * day-to-day coverage variety across the team's members — see the
+ * "stable anchor" explanation in lib/fixed-cycle-rotation.ts.
+ *
+ * off_days/shift_code/shift_start/shift_end on the returned employee are
+ * an INFORMATIONAL snapshot for the currently displayed week only (see
+ * offDaysForDisplayedWeek's doc comment) — the real, authoritative
+ * schedule is weekly_shifts, built by the caller from {cycle,
+ * cycleOffset} directly.
+ */
+export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeSeed[] {
+  const results: FixedCycleEmployeeSeed[] = [];
+  let i = startIndex;
+
+  for (const spec of FIXED_CYCLE_GROUPS) {
+    for (let n = 0; n < spec.count; n++) {
+      const name = nameForIndex(i);
+      const cycleOffset = n % spec.cycle.steps.length;
+      const off_days = offDaysForDisplayedWeek(spec.cycle, cycleOffset, ALL_DAYS);
+      // Representative reference shift for the static top-level fields
+      // (shift_code/shift_start/shift_end) — the cycle's first working
+      // step. These teams are excluded from all live scoring pools
+      // (isFixedPlanningTeam / isTransitTeam), so this value is never
+      // used to influence a real recommendation; it exists only so the
+      // field isn't null. The REAL day-to-day code is in weekly_shifts.
+      const referenceStep = spec.cycle.steps.find((s) => "code" in s) as { code: string } | undefined;
+      const referenceCode = referenceStep?.code ?? null;
+      const { shift_start, shift_end } = referenceCode ? getShiftTimesAs(referenceCode) : { shift_start: null, shift_end: null };
+
+      results.push({
+        employee: {
+          id: idForName(name, i),
+          name,
+          skills: spec.skills,
+          assignment: spec.assignment,
+          shift_code: referenceCode,
+          shift_start,
+          shift_end,
+          rest_before_shift_hours: spec.rest_before_shift_hours,
+          weekly_hours: spec.weekly_hours,
+          is_duty_officer: false,
+          off_days,
+          foreign_company_authorizations: [],
+          active: true,
+        },
+        cycle: spec.cycle,
+        cycleOffset,
+      });
+      i++;
+    }
+  }
+
+  return results;
+}
+
 /**
  * Foreign-company groups — persistent assignment (not re-decided daily),
  * per the explicit domain rule. Realistic group sizes per configured
  * carrier. Their daily roster is derived from each company's actual
  * flight schedule by the planning pipeline already built
  * (lib/foreign-shift-planning.ts) — nothing about scheduling changes
- * here, only headcount and distribution. "Ramp Team" is kept as a skill
- * specifically because it's the literal role name company_config
- * requirements use (see module comment above) — not a stray legacy
- * qualifier.
+ * here, only headcount and distribution. Skills here are real trained
+ * capabilities only (Boarding, used for spare RAM-available capacity
+ * outside the protected window) — eligibility for their OWN company's
+ * requirement comes from `foreign_company_authorizations` below, never
+ * from a skill (see the "Ramp Team" retirement note above CATEGORIES).
  */
 const FOREIGN_GROUPS: GenSpec[] = [
-  { count: 9, skills: ["Boarding", "Ramp Team"], assignment: "Emirates", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 26, foreign_company_authorizations: ["Emirates", "Etihad"], keepWednesdayWorking: true },
-  { count: 7, skills: ["Boarding", "Ramp Team"], assignment: "Qatar Airways", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Qatar Airways", "Gulf Air"], keepWednesdayWorking: true },
-  { count: 6, skills: ["Boarding", "Ramp Team"], assignment: "Gulf Air", shift_code: "MT02", rest_before_shift_hours: 11, weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
-  { count: 5, skills: ["Boarding", "Ramp Team"], assignment: "Etihad", shift_code: "NR02", rest_before_shift_hours: 12, weekly_hours: 23, foreign_company_authorizations: ["Etihad", "Emirates"], keepWednesdayWorking: true },
-  { count: 5, skills: ["Boarding", "Ramp Team"], assignment: "Air France", shift_code: "AP01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Air France"], keepWednesdayWorking: true },
+  { count: 9, skills: ["Boarding"], assignment: "Emirates", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 26, foreign_company_authorizations: ["Emirates", "Etihad"], keepWednesdayWorking: true },
+  { count: 7, skills: ["Boarding"], assignment: "Qatar Airways", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Qatar Airways", "Gulf Air"], keepWednesdayWorking: true },
+  { count: 6, skills: ["Boarding"], assignment: "Gulf Air", shift_code: "MT02", rest_before_shift_hours: 11, weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
+  { count: 5, skills: ["Boarding"], assignment: "Etihad", shift_code: "NR02", rest_before_shift_hours: 12, weekly_hours: 23, foreign_company_authorizations: ["Etihad", "Emirates"], keepWednesdayWorking: true },
+  // Corrected: baseline was AP01 (13:45-22:45). AF1234 departs 10:30, so
+  // its protected window (~06:00-10:30) requires an early-morning shift
+  // on flight days (Tue/Thu/Sat) — but ending a non-flight day on AP01
+  // (22:45) never leaves the confirmed 10h minimum rest before that early
+  // window, so applyForeignCompanyRoster's own honest "no compatible+
+  // rested shift, don't force an illegal roster" fallback was marking
+  // Thursday AND Saturday off for every Air France employee, on top of
+  // their 2 rotation-derived OFF days — a real, observed 3-4-consecutive-
+  // OFF pattern, in violation of the confirmed max-2-consecutive rule.
+  // NR01 (08:00-16:45) ends early enough to satisfy 10h rest before any
+  // early-morning flight-compatible code the next day, so it no longer
+  // cascades into forced extra OFF days. This is a baseline-data fix
+  // (this spec's own parameter), not an engine or rest-rule change.
+  { count: 5, skills: ["Boarding"], assignment: "Air France", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Air France"], keepWednesdayWorking: true },
   // Authorized for a foreign company but currently placed in the General
   // T1 Pool — proves authorization doesn't imply placement, at a
   // slightly larger scale than the original single example.
-  { count: 4, skills: ["Boarding", "Ramp Team"], assignment: "General T1 Pool", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 22, foreign_company_authorizations: ["Air France", "Qatar Airways"] },
+  { count: 4, skills: ["Boarding"], assignment: "General T1 Pool", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 22, foreign_company_authorizations: ["Air France", "Qatar Airways"] },
 ];
 
 /**

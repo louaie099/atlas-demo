@@ -1,11 +1,12 @@
 import { Employee, Flight, Config, WeeklyShiftEntry } from "./types";
-import { generateEmployees } from "./employee-generator";
+import { generateEmployees, generateFixedCycleEmployees } from "./employee-generator";
 import { generateWeeklyFlights } from "./flight-generator";
 import { getShiftTimesAs, buildUniformWeeklySchedule } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays, restHoursBetween } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
+import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
 
 // minimum_rest_hours and fairness_ceiling_hours are sourced from
 // lib/labor-rules.ts, not hand-picked here — see that file for which of
@@ -278,6 +279,8 @@ export const SCRIPTED_FLIGHTS: Flight[] = [
     day_of_week: "Wednesday",
     operator_type: "atlas_managed",
     destination_category: "Europe/Schengen",
+    seat_capacity: 189,
+    booked_passengers: 155,
   },
   {
     id: "at535",
@@ -301,6 +304,8 @@ export const SCRIPTED_FLIGHTS: Flight[] = [
     day_of_week: "Wednesday",
     operator_type: "atlas_managed",
     destination_category: "Europe/Schengen",
+    seat_capacity: 189,
+    booked_passengers: 181,
   },
 ];
 
@@ -402,19 +407,30 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
   return { ...employee, weekly_shifts };
 }
 
-// Full workforce: the 8 protected scripted employees, the generated pool
-// (197 more, distributed across General T1 Pool, specialized/fixed teams,
-// and foreign-company groups — see employee-generator.ts), and the
-// rotating-shift example, reaching 206 total. ~200 is the intended scale
-// for this stage — not expanded further. Foreign-company assigned
-// employees' weekly_shifts are then adjusted to match their company's
-// actual flight schedule.
+// Transit and Leaders: a confirmed continuous JR -> NT -> OFF -> OFF
+// cycle, not a per-week off_days set — see lib/fixed-cycle-rotation.ts.
+// Generated BEFORE generateEmployees() below purely so its own index
+// range starts after these, avoiding id collisions; the order here has
+// no other significance.
+const FIXED_CYCLE_EMPLOYEES = generateFixedCycleEmployees(SCRIPTED_EMPLOYEES.length);
+
+// Full workforce: the 8 protected scripted employees, the fixed-cycle
+// teams (Transit/Leaders), the generated pool (distributed across
+// General T1 Pool, other specialized/fixed teams, and foreign-company
+// groups — see employee-generator.ts), and the rotating-shift example.
+// ~200 is the intended scale for this stage — not expanded further.
+// Foreign-company assigned employees' weekly_shifts are then adjusted to
+// match their company's actual flight schedule.
 export const EMPLOYEES: Employee[] = [
   ...SCRIPTED_EMPLOYEES.map((e) => ({
     ...e,
     weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, DAYS_WITH_DATA),
   })),
-  ...generateEmployees(SCRIPTED_EMPLOYEES.length).map((e) => ({
+  ...FIXED_CYCLE_EMPLOYEES.map(({ employee, cycle, cycleOffset }) => ({
+    ...employee,
+    weekly_shifts: buildFixedCycleWeeklySchedule(cycle, cycleOffset, DAYS_WITH_DATA),
+  })),
+  ...generateEmployees(SCRIPTED_EMPLOYEES.length + FIXED_CYCLE_EMPLOYEES.length).map((e) => ({
     ...e,
     weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, DAYS_WITH_DATA),
   })),

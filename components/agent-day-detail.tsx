@@ -1,6 +1,7 @@
 import { AgentDayEntry, AgentScheduleDuty } from "@/lib/types";
 import { Badge } from "./ui";
 import { TeamBadge } from "./team-badge";
+import { ROSTER_COLORS } from "@/lib/roster-colors";
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
@@ -12,12 +13,12 @@ function minutesToTime(mins: number): string {
   return `${String(Math.floor(wrapped / 60)).padStart(2, "0")}:${String(wrapped % 60).padStart(2, "0")}`;
 }
 
-type Segment = { start: string; end: string; label: string; tone: "foreign" | "confirmed" | "proposed" | "available" };
+type Segment = { start: string; end: string; label: string; tone: "foreign" | "confirmed" | "assigned" | "available" };
 
 const SEGMENT_STYLE: Record<Segment["tone"], string> = {
   foreign: "bg-warn-500/70",
   confirmed: "bg-good-500/80",
-  proposed: "bg-brand-500/70",
+  assigned: "bg-brand-500/70",
   // "Available" is a real, positive fact -- capacity RAM/General T1 can
   // still draw on -- never rendered as an empty/idle-looking gap (see
   // lib/planning/validation.ts's PlanIssue types: unassigned time is not a
@@ -29,7 +30,7 @@ const SEGMENT_STYLE: Record<Segment["tone"], string> = {
 /**
  * Builds the chronological, composable picture of one working day: the
  * employee's foreign-company protected window (if any) and every RAM duty
- * (confirmed or proposed), in real time order, with the remaining shift
+ * (confirmed or ATLAS-assigned), in real time order, with the remaining shift
  * time between/around them labeled as available capacity -- never "idle".
  * Pure derivation from the same AgentDayEntry the grid cell already shows;
  * no new data, no invented duties or windows.
@@ -59,7 +60,7 @@ function buildTimeline(day: AgentDayEntry): Segment[] {
     events.push({
       startMin: s,
       endMin: e,
-      label: `${d.flightNumber} ${d.role}${d.status === "proposed" ? " (proposed)" : ""}`,
+      label: `${d.flightNumber} ${d.role}`,
       tone: d.status,
     });
   }
@@ -93,8 +94,8 @@ function DutyRow({ duty }: { duty: AgentScheduleDuty }) {
           ({duty.window.start}–{duty.window.end})
         </span>
       </div>
-      <Badge tone={duty.status === "proposed" ? "brand" : "good"}>
-        {duty.status === "proposed" ? "Proposed" : "Confirmed"}
+      <Badge tone={duty.status === "assigned" ? "brand" : "good"}>
+        {duty.status === "assigned" ? "Assigned" : "Confirmed"}
       </Badge>
     </div>
   );
@@ -110,8 +111,10 @@ export function AgentDayDetail({ day }: { day: AgentDayEntry }) {
   if (day.status === "off") {
     return (
       <div className="flex flex-col gap-2">
-        <Badge tone="neutral">OFF</Badge>
-        <p className="text-sm text-muted">Not rostered this day.</p>
+        <span className={`inline-flex w-fit items-center rounded-lg px-2.5 py-1 text-xs font-semibold ${ROSTER_COLORS.off.bg} ${ROSTER_COLORS.off.text}`}>
+          OFF
+        </span>
+        <p className="text-sm text-muted">Scheduled rest — not rostered this day.</p>
       </div>
     );
   }
@@ -188,8 +191,11 @@ export function AgentDayDetail({ day }: { day: AgentDayEntry }) {
       {day.issues.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <h4 className="text-xs font-semibold text-muted uppercase tracking-wide">Plan warnings</h4>
+          {/* Amber (warn), matching the grid's ⚠ indicator — deliberately
+              NOT the rose/pink used for OFF cells, so "scheduled rest" and
+              "planning problem" stay visually distinct even here. */}
           {day.issues.map((issue, i) => (
-            <p key={i} className="text-xs text-bad-700 bg-bad-50 rounded-lg px-3 py-2">
+            <p key={i} className={`text-xs ${ROSTER_COLORS.warning} bg-warn-50 rounded-lg px-3 py-2`}>
               {issue.description}
             </p>
           ))}

@@ -42,3 +42,34 @@ describe("scoreCandidates", () => {
     expect(results.find((r) => r.employee.id === "mohammed-alaoui")).toBeUndefined();
   });
 });
+
+describe("scoreCandidates — requiredAuthorization (company_config eligibility)", () => {
+  it("with requiredAuthorization set, eligibility is real foreign-company authorization, NOT a skill match", () => {
+    const authorizedNotSkilled = {
+      id: "e1", name: "Authorized", skills: [], assignment: "Gulf Air",
+      shift_code: "MT02", shift_start: "04:30", shift_end: "14:30", rest_before_shift_hours: 12,
+      weekly_hours: 20, is_duty_officer: false, off_days: [], foreign_company_authorizations: ["Gulf Air"],
+      active: true, weekly_shifts: [],
+    };
+    const skilledNotAuthorized = {
+      id: "e2", name: "Skilled Only", skills: ["Company Team"], assignment: "Emirates",
+      shift_code: "MT02", shift_start: "04:30", shift_end: "14:30", rest_before_shift_hours: 12,
+      weekly_hours: 20, is_duty_officer: false, off_days: [], foreign_company_authorizations: ["Emirates"],
+      active: true, weekly_shifts: [],
+    };
+    const results = scoreCandidates(
+      "Company Team",
+      { start: "08:00", end: "09:00" },
+      [authorizedNotSkilled, skilledNotAuthorized],
+      CONFIG,
+      {},
+      "Gulf Air"
+    );
+    expect(results.map((r) => r.employee.id)).toEqual(["e1"]); // authorization decides it, not the "skills" array
+  });
+
+  it("without requiredAuthorization, eligibility falls back to the ordinary skill match (unchanged behavior for every other role)", () => {
+    const results = scoreCandidates("Boarding", { start: "13:50", end: "14:20" }, EMPLOYEES, CONFIG);
+    expect(results.length).toBeGreaterThan(0);
+  });
+});

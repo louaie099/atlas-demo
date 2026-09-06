@@ -56,13 +56,23 @@ function hasRosterAssigned(e: Employee): e is RosteredEmployee {
  *   from getEmployeeForeignCommitments(), filtered to the relevant day, by
  *   the caller — this function stays pure and doesn't fetch or compute
  *   commitments itself.
+ * @param requiredAuthorization When set, eligibility is decided by real
+ *   foreign-company AUTHORIZATION (`Employee.foreign_company_authorizations`
+ *   includes this company name) instead of a flight-task skill match. This
+ *   is how a company_config (foreign-carrier) requirement finds candidates
+ *   — there is no employee "skill" that means "eligible for company X's
+ *   ground operation"; authorization is the real, existing concept for
+ *   that, not a manufactured qualification. Leave unset for every other
+ *   requirement (Gate/Boarding/Profiling/Mesure/Check-in), which continue
+ *   to match on `role` as a genuine trained capability.
  */
 export function scoreCandidates(
   role: string,
   window: TimeWindow,
   employees: Employee[],
   config: Config,
-  occupiedWindows: Record<string, TimeWindow[]> = {}
+  occupiedWindows: Record<string, TimeWindow[]> = {},
+  requiredAuthorization?: string
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e): e is RosteredEmployee => {
     if (!e.active) return false;
@@ -71,6 +81,7 @@ export function scoreCandidates(
     if (isFixedPlanningTeam(e.assignment)) return false;
     if (isTransitTeam(e.assignment) && role !== "Transit") return false;
     if ((occupiedWindows[e.id] ?? []).some((occupied) => windowsOverlap(occupied, window))) return false;
+    if (requiredAuthorization) return e.foreign_company_authorizations.includes(requiredAuthorization);
     return e.skills.includes(role);
   });
 
@@ -85,11 +96,17 @@ export function scoreCandidates(
       config.fairness_ceiling_hours !== "unconfirmed" && employee.weekly_hours >= config.fairness_ceiling_hours - 5;
     const rested = employee.rest_before_shift_hours >= config.minimum_rest_hours;
 
+    // Eligibility basis, stated honestly: a real trained skill for every
+    // ordinary role, or a real company authorization for a foreign-carrier
+    // requirement — never the same "qualified" phrasing for both, since
+    // authorization isn't a flight-task skill.
+    const eligibilityBasis = requiredAuthorization ? `${requiredAuthorization}-authorized` : `${role}-qualified`;
+
     if (rested && !extensionNeeded && !nearCeiling) {
       return {
         employee,
         status: "recommended",
-        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${role}-qualified. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within fairness range. No extension required.`,
+        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within fairness range. No extension required.`,
       };
     }
 
@@ -101,7 +118,7 @@ export function scoreCandidates(
     return {
       employee,
       status: "flagged",
-      reasoning: `${role}-qualified, but ${reasons.join("; ")}. Requires Duty Officer override to assign.`,
+      reasoning: `${eligibilityBasis}, but ${reasons.join("; ")}. Requires Duty Officer override to assign.`,
     };
   });
 

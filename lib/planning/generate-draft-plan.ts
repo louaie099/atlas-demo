@@ -3,7 +3,7 @@ import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay } from "./duty-generation";
-import { validateWeeklyPlan, PlanIssue } from "./validation";
+import { validateWeeklyPlan, collectConfigurationIssues, PlanIssue, ConfigurationIssue } from "./validation";
 
 export interface DraftWeeklyPlan {
   weekLabel: string;
@@ -11,7 +11,17 @@ export interface DraftWeeklyPlan {
   requirements: StaffingRequirement[];
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>;
   dutiesByDay: Record<string, GeneratedDuty[]>;
+  // Operational Plan Warnings ONLY — rest/weekly-hours/consecutive-OFF
+  // violations and unfilled duties. Never a configuration gap; see
+  // configurationIssues below for that.
   issues: PlanIssue[];
+  // Internal administrative/configuration gaps (no RAM staffing-matrix
+  // rule for some aircraft/destination combination, or an unclassifiable
+  // destination) — kept entirely separate from `issues` so nothing
+  // downstream can fold them back into the operational summary. Reserved
+  // for a future Administration/Configuration area; not surfaced in the
+  // routine Weekly Planning UI today.
+  configurationIssues: ConfigurationIssue[];
   generatedAt: string;
 }
 
@@ -92,7 +102,8 @@ export function generateDraftWeeklyPlan(
     priorDayShift = nextPriorDayShift;
   }
 
-  const issues = validateWeeklyPlan(requirements, allUnfilled, employees, daysOrder, config);
+  const issues = validateWeeklyPlan(allUnfilled, employees, daysOrder, config);
+  const configurationIssues = collectConfigurationIssues(requirements);
 
   return {
     weekLabel,
@@ -101,6 +112,7 @@ export function generateDraftWeeklyPlan(
     generatedShiftsByDay,
     dutiesByDay,
     issues,
+    configurationIssues,
     generatedAt: new Date().toISOString(),
   };
 }

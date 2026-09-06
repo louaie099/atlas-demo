@@ -8,7 +8,7 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
   );
 }
 
-type BadgeTone = "brand" | "good" | "warn" | "bad" | "neutral" | "config";
+type BadgeTone = "brand" | "good" | "warn" | "bad" | "neutral";
 
 const badgeTones: Record<BadgeTone, string> = {
   brand: "bg-brand-50 text-brand-700",
@@ -16,11 +16,6 @@ const badgeTones: Record<BadgeTone, string> = {
   warn: "bg-warn-50 text-warn-700",
   bad: "bg-bad-50 text-bad-700",
   neutral: "bg-gray-100 text-gray-600",
-  // Needs Configuration: deliberately its own tone, not "bad" (a staffing
-  // gap) and not "warn" (a plan-quality warning). Amber-adjacent so it
-  // still reads as "needs attention", but the dashed border keeps it
-  // visually distinct from a genuine problem badge at a glance.
-  config: "bg-warn-50 text-warn-700 border border-dashed border-warn-500/50",
 };
 
 export function Badge({ tone = "neutral", children }: { tone?: BadgeTone; children: ReactNode }) {

@@ -91,6 +91,8 @@ export async function POST(req: Request) {
     day_of_week: "Wednesday", // only the current demo week has data; see WeekNav
     operator_type: "atlas_managed", // this form only supports Boarding/Check-in roles, both RAM-operated
     destination_category: null, // manual-baseline path doesn't use the operation rule table
+    seat_capacity: null, // not collected by this manual-entry form
+    booked_passengers: null,
   };
 
   const { error: flightErr } = await supabase.from("flights").insert(flight);

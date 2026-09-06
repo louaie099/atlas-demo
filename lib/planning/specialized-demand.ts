@@ -1,5 +1,5 @@
 import { Flight, StaffingRequirement } from "../types";
-import { getRamRoleCounts } from "../ram-staffing-matrix";
+import { getRamRoleCounts, getRamMesureHeadcount } from "../ram-staffing-matrix";
 
 /**
  * Profiling and Mesure staffing, read from the same shared RAM matrix
@@ -7,31 +7,16 @@ import { getRamRoleCounts } from "../ram-staffing-matrix";
  * flight → same rule everywhere" guarantee holds because there's one
  * table, not two.
  *
- * Three distinct outcomes, kept honestly separate:
- *  - Profiling/Mesure doesn't apply to this flight's destination category
- *    at all (e.g. Profiling for an Africa flight) → return null. Not a
- *    gap, just not relevant — never surfaced as needs_configuration.
- *  - Applies, with a confirmed headcount (Profiling for Europe/UK-USA) →
- *    a real requirement row, needs_configuration: false.
- *  - Applies, but the headcount itself is unconfirmed (Mesure, always,
- *    per the explicit instruction not to invent one) → a real
- *    requirement row with total_requirement 0 and needs_configuration:
- *    true, so it shows up honestly rather than vanishing or being guessed.
+ * Profiling is aircraft-class-driven, same as Gate/Boarding — it reads
+ * getRamRoleCounts. Mesure is destination-driven ONLY — it reads the
+ * separate getRamMesureHeadcount, which deliberately ignores aircraft
+ * class entirely (see ram-staffing-matrix.ts). Never apply the Dreamliner
+ * doubling that legitimately applies to Gate/Boarding/Profiling to Mesure.
+ *
+ * Both are kept as genuinely separate qualifications/functions — a
+ * Profiling requirement and a Mesure requirement never merge into one row
+ * even when both apply to the same flight.
  */
-function missingSpecializedConfig(
-  flight: Flight,
-  role: "Profiling" | "Mesure"
-): Omit<StaffingRequirement, "id" | "flight_id"> {
-  return {
-    role,
-    baseline_requirement: 0,
-    additional_requirement: 0,
-    total_requirement: 0,
-    source: "fixed_rule",
-    reasoning: `${role} applies to ${flight.aircraft} to ${flight.destination_category} destinations, but the required headcount has not been confirmed yet. Add it to the RAM staffing matrix (lib/ram-staffing-matrix.ts) before ${role} can be planned for this flight.`,
-    needs_configuration: true,
-  };
-}
 
 /**
  * Whether this RAM flight has a Profiling requirement, and if so, how
@@ -59,18 +44,26 @@ export function classifyProfilingRequirement(flight: Flight): Omit<StaffingRequi
 }
 
 /**
- * Whether Mesure applies to this RAM flight. Returns null when there's no
- * established rule at all, or when the established rule says Mesure
- * doesn't apply to this category. When it DOES apply (currently: UK/USA
- * only), always returns the unconfigured placeholder — the headcount has
- * never been confirmed, for any category, and this module must not
- * invent one.
+ * Whether Mesure applies to this RAM flight, and if so, the confirmed
+ * headcount. Mesure is CONFIRMED at 4 agents per flight wherever it
+ * applies (currently: Canada, UK, USA), regardless of aircraft class — a
+ * standard 737-type and a Dreamliner to the same destination category both
+ * require exactly 4, never 8. Returns null when there's no established
+ * rule at all for this destination category, or when the established rule
+ * says Mesure doesn't apply to this category.
  */
 export function classifyMesureRequirement(flight: Flight): Omit<StaffingRequirement, "id" | "flight_id"> | null {
   if (flight.operator_type !== "atlas_managed") return null;
-  const counts = getRamRoleCounts(flight.destination_category, flight.aircraft);
-  if (!counts) return null;
-  if (!counts.mesureApplicable) return null;
+  const headcount = getRamMesureHeadcount(flight.destination_category);
+  if (headcount === null) return null;
 
-  return missingSpecializedConfig(flight, "Mesure");
+  return {
+    role: "Mesure",
+    baseline_requirement: headcount,
+    additional_requirement: 0,
+    total_requirement: headcount,
+    source: "fixed_rule",
+    reasoning: `${headcount} Mesure agent(s) required — confirmed destination-driven rule for ${flight.destination_category} destinations. Mesure headcount does not scale with aircraft class (unlike Gate/Boarding/Profiling).`,
+    needs_configuration: false,
+  };
 }

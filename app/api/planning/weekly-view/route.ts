@@ -55,5 +55,22 @@ export async function GET() {
     CURRENT_WEEK_LABEL
   );
 
-  return NextResponse.json({ roster, schedule, issues: draftPlan.issues, planIssueCount: draftPlan.issues.length });
+  // `flights` is the SAME array buildWeeklyPlanView computed `roster` and
+  // `schedule` from -- the raw weekly flight program, unfiltered by
+  // managed/unmanaged status, which is exactly what Flight Schedule (as
+  // opposed to Flight Coverage) needs to show. No separate flights fetch,
+  // no independent dataset.
+  //
+  // `configurationIssues` is exposed here for a future Administration/
+  // Configuration surface -- it is NOT read by the current Weekly
+  // Planning UI (see PlanningSummaryBar), so an internal RAM-matrix gap
+  // never inflates the operational Plan Warnings count.
+  return NextResponse.json({
+    flights,
+    roster,
+    schedule,
+    issues: draftPlan.issues,
+    planIssueCount: draftPlan.issues.length,
+    configurationIssues: draftPlan.configurationIssues,
+  });
 }

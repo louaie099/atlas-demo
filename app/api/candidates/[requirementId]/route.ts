@@ -83,7 +83,10 @@ export async function GET(
     }
   }
 
-  const candidates = scoreCandidates(requirement.role, window, candidatePool, CONFIG, occupiedWindows);
+  // Same rule duty-generation.ts uses: a company_config requirement is
+  // filled by real company authorization, not a flight-task skill.
+  const requiredAuthorization = requirement.source === "company_config" ? targetFlight.airline : undefined;
+  const candidates = scoreCandidates(requirement.role, window, candidatePool, CONFIG, occupiedWindows, requiredAuthorization);
 
   return NextResponse.json({ candidates });
 }

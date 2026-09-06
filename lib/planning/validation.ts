@@ -1,12 +1,18 @@
 import { Employee, StaffingRequirement, Config } from "../types";
 import { getShiftTimesAs } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
+import { usesFixedCycleRotation } from "../teams";
+import { checkConsecutiveOffCyclic } from "./consecutive-off";
 
-export type PlanIssueType =
-  | "needs_configuration"
-  | "unfilled_duty"
-  | "rest_violation"
-  | "weekly_hours_violation";
+// "needs_configuration" was REMOVED from this type entirely — it isn't an
+// operational planning problem, it's an internal administrative gap (no
+// RAM staffing-matrix rule for some aircraft/destination combination). It
+// used to be folded in here and then filtered back out downstream, which
+// left it one refactor away from silently inflating the operational Plan
+// Warnings count again. It's now a fully separate concept — see
+// ConfigurationIssue and collectConfigurationIssues below — with its own
+// field on DraftWeeklyPlan, never mixed into this array.
+export type PlanIssueType = "unfilled_duty" | "rest_violation" | "weekly_hours_violation" | "consecutive_off_violation";
 
 export interface PlanIssue {
   type: PlanIssueType;
@@ -14,6 +20,37 @@ export interface PlanIssue {
   requirementId?: string;
   employeeId?: string;
   dayOfWeek?: string;
+}
+
+/**
+ * An internal administrative/configuration gap — NOT an operational
+ * planning problem. "Plan Warnings" (rest violations, weekly-hours
+ * violations, consecutive-OFF violations, unfilled duties) describe
+ * something wrong with THIS WEEK'S generated plan; a ConfigurationIssue
+ * describes something missing from ATLAS's own RULEBOOK (no RAM staffing-
+ * matrix entry for an aircraft/destination combination, or an
+ * unclassifiable destination) — true regardless of which week you're
+ * looking at, and never something a planner can "fix" by reassigning
+ * someone. Kept in its own array so nothing downstream can accidentally
+ * fold it into the operational summary again; a future Administration/
+ * Configuration area is the natural place to surface these, not the
+ * routine weekly Plan Warnings count.
+ */
+export interface ConfigurationIssue {
+  requirementId: string;
+  description: string;
+}
+
+/**
+ * Collects every StaffingRequirement still marked needs_configuration —
+ * always non-empty-reasoning, never a guessed rule. Kept separate from
+ * validateWeeklyPlan (which computes true operational Plan Warnings) so
+ * the two can never be accidentally merged into one count again.
+ */
+export function collectConfigurationIssues(requirements: StaffingRequirement[]): ConfigurationIssue[] {
+  return requirements
+    .filter((r) => r.needs_configuration)
+    .map((r) => ({ requirementId: r.id, description: r.reasoning }));
 }
 
 function timeToMinutes(t: string): number {
@@ -96,6 +133,27 @@ export function checkWeeklyHoursCeiling(employee: Employee, config: Config): Pla
 }
 
 /**
+ * Confirmed global rest constraint: max 2 CONSECUTIVE OFF days, evaluated
+ * across week boundaries (see lib/planning/consecutive-off.ts). A team on
+ * a confirmed continuous FIXED CYCLE (Transit/Leaders — see
+ * lib/fixed-cycle-rotation.ts) is period-4, not period-7: wrapping their
+ * single displayed week onto itself would misrepresent their real
+ * continuous schedule, so they're validated directly against the cycle
+ * definition instead (guaranteed <= 2 by construction, exercised by
+ * dedicated tests) and skipped here.
+ */
+export function checkConsecutiveOff(employee: Employee): PlanIssue | null {
+  if (usesFixedCycleRotation(employee.assignment)) return null;
+  const violation = checkConsecutiveOffCyclic(employee);
+  if (!violation) return null;
+  return {
+    type: "consecutive_off_violation",
+    employeeId: employee.id,
+    description: `${employee.name}: ${violation.maxConsecutiveOffDays} consecutive OFF days (evaluated across the week boundary) — above the confirmed maximum of 2.`,
+  };
+}
+
+/**
  * Stage 10 of the planning pipeline. Deliberately does NOT include a
  * separate overlap detector — generateDutiesForDay already prevents
  * overlapping assignments by construction (proven by
@@ -105,7 +163,6 @@ export function checkWeeklyHoursCeiling(employee: Employee, config: Config): Pla
  * receive.
  */
 export function validateWeeklyPlan(
-  requirements: StaffingRequirement[],
   unfilledByDay: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[],
   employees: Employee[],
   daysOrder: string[],
@@ -113,15 +170,11 @@ export function validateWeeklyPlan(
 ): PlanIssue[] {
   const issues: PlanIssue[] = [];
 
-  for (const requirement of requirements) {
-    if (requirement.needs_configuration) {
-      issues.push({
-        type: "needs_configuration",
-        requirementId: requirement.id,
-        description: requirement.reasoning,
-      });
-    }
-  }
+  // needs_configuration requirements are NOT this function's concern at
+  // all any more — see collectConfigurationIssues above, called
+  // separately (generate-draft-plan.ts) into its own DraftWeeklyPlan
+  // field, so a configuration gap can never inflate the operational Plan
+  // Warnings count again.
 
   for (const u of unfilledByDay) {
     issues.push({
@@ -136,6 +189,8 @@ export function validateWeeklyPlan(
     issues.push(...checkRestBetweenDays(employee, daysOrder, config));
     const hoursIssue = checkWeeklyHoursCeiling(employee, config);
     if (hoursIssue) issues.push(hoursIssue);
+    const consecutiveOffIssue = checkConsecutiveOff(employee);
+    if (consecutiveOffIssue) issues.push(consecutiveOffIssue);
   }
 
   return issues;

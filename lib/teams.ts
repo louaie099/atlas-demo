@@ -57,14 +57,33 @@ export type Team = (typeof TEAMS)[number];
 /**
  * These teams follow fixed, specialized planning rather than general ACE
  * allocation — Atlas must never offer them as candidates for ordinary
- * flight-task recommendations. The exact JR/NT-type planning patterns for
- * Leaders/Duty Officers/Caisse-BCB have not been provided and are NOT
+ * flight-task recommendations. Leaders now has a confirmed fixed cycle
+ * (see FIXED_CYCLE_TEAMS below); Duty Officers/Caisse-BCB's real JR/NT-
+ * type planning patterns have still not been provided and are NOT
  * modeled here — this only encodes the exclusion, not invented schedules.
  */
 export const FIXED_PLANNING_TEAMS: Team[] = ["Leaders", "Duty Officers", "Caisse/BCB"];
 
 export function isFixedPlanningTeam(assignment: string): boolean {
   return (FIXED_PLANNING_TEAMS as string[]).includes(assignment);
+}
+
+/**
+ * Teams with a confirmed, continuous FIXED CYCLE rotation (see
+ * lib/fixed-cycle-rotation.ts) rather than a flat per-week OFF-day count
+ * or a demand-derived rotation. Currently confirmed: Transit and Leaders,
+ * both JR → NT → OFF → OFF. This list is planning CONFIGURATION, not
+ * part of the rotation engine itself — the engine never branches on a
+ * team name; only this table decides which teams use it. Used to keep
+ * the generic single-week consecutive-OFF validator
+ * (lib/planning/consecutive-off.ts) from misapplying a period-7 wraparound
+ * check to a period-4 continuous cycle — these teams are validated
+ * directly against their cycle definition instead.
+ */
+export const FIXED_CYCLE_TEAMS: Team[] = ["Transit", "Leaders"];
+
+export function usesFixedCycleRotation(assignment: string): boolean {
+  return (FIXED_CYCLE_TEAMS as string[]).includes(assignment);
 }
 
 /**

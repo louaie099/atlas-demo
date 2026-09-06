@@ -25,6 +25,8 @@ const delayedAT201: Flight = {
   day_of_week: "Wednesday",
   operator_type: "atlas_managed",
   destination_category: "Europe/Schengen",
+  booked_passengers: null,
+  seat_capacity: null,
 };
 
 const nadiaDuty: PlannedDuty = {

@@ -9,8 +9,13 @@ import { AddFlightForm } from "@/components/add-flight-form";
 import { WeekNav } from "@/components/week-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
+import { FlightScheduleView } from "@/components/flight-schedule-view";
 
-type Tab = "coverage" | "schedule";
+// Workflow order: see the imported schedule (Flight Schedule) -> see what
+// ATLAS generated for it (Flight Coverage) -> see the resulting employee
+// roster (Agent Schedule). All three read the SAME weekly-view response —
+// see loadWeeklyPlan below — never three independent datasets.
+type Tab = "flights" | "coverage" | "schedule";
 
 /**
  * Non-interactive placeholder for the future Generate -> Review -> Adjust ->
@@ -63,7 +68,8 @@ function groupByFlight(roster: RosterRequirementView[]): { flight: Flight; views
 }
 
 export default function PlanningPage() {
-  const [tab, setTab] = useState<Tab>("coverage");
+  const [tab, setTab] = useState<Tab>("flights");
+  const [flights, setFlights] = useState<Flight[] | null>(null);
   const [roster, setRoster] = useState<RosterRequirementView[] | null>(null);
   const [schedule, setSchedule] = useState<AgentScheduleEntry[] | null>(null);
   const [issues, setIssues] = useState<PlanIssue[]>([]);
@@ -86,6 +92,7 @@ export default function PlanningPage() {
     fetch("/api/planning/weekly-view")
       .then((r) => r.json())
       .then((data) => {
+        setFlights(data.flights ?? []);
         setRoster(data.roster ?? []);
         setSchedule(data.schedule ?? []);
         setIssues(data.issues ?? []);
@@ -111,8 +118,10 @@ export default function PlanningPage() {
           </div>
           <p className="text-muted mt-1 max-w-2xl">
             ATLAS generated this plan from the weekly flight program -- every requirement traces back
-            to a flight and a rule. Proposed assignments below are ATLAS&apos;s recommendations, not
-            yet published or confirmed by management.
+            to a flight and a rule. Normal staffing below is assigned directly as part of the draft
+            plan; management can still review and edit the whole draft before publishing. Only
+            exceptional situations -- a renfort decision, a live-operational reassignment -- are
+            surfaced as recommendations awaiting a human decision.
           </p>
         </div>
         <DraftLifecycle />
@@ -133,10 +142,18 @@ export default function PlanningPage() {
 
       {weekOffset === 0 && (
         <>
-          {roster && <PlanningSummaryBar roster={roster} issues={issues} />}
+          {flights && roster && <PlanningSummaryBar flights={flights} roster={roster} issues={issues} />}
 
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="flex gap-1 bg-white border border-border rounded-xl2 p-1 self-start">
+              <button
+                onClick={() => setTab("flights")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+                  tab === "flights" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+                }`}
+              >
+                Flight Schedule
+              </button>
               <button
                 onClick={() => setTab("coverage")}
                 className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
@@ -161,6 +178,13 @@ export default function PlanningPage() {
                 collapsed "+ Add Flight" button unless clicked open). */}
             {tab === "coverage" && <AddFlightForm onAdded={loadWeeklyPlan} />}
           </div>
+
+          {tab === "flights" && (
+            <>
+              {flights === null && <p className="text-sm text-muted">Loading flight schedule...</p>}
+              {flights && <FlightScheduleView flights={flights} />}
+            </>
+          )}
 
           {tab === "coverage" && (
             <div className="flex flex-col gap-6">

@@ -11,6 +11,17 @@ import { Flight, StaffingRequirement } from "./types";
  * below applies identically to every entry. A carrier absent from this
  * table has no configuration yet, surfaced explicitly, never assumed.
  *
+ * `role` is "Company Team" — a neutral internal identifier, not "Ramp
+ * Team". These are ACE passenger-service employees assigned to a foreign
+ * airline's own ground operation, never airport ramp workers, and the
+ * requirement role name must not misrepresent that. Eligibility for this
+ * requirement is NEVER a skill match (see scoring.ts's
+ * requiredAuthorization parameter) — it's decided by the employee's real
+ * `foreign_company_authorizations` for THIS specific airline, so `role`
+ * here carries no scoring weight at all; it exists purely to label the
+ * requirement/StaffingRequirement row (Flight Coverage displays the even
+ * friendlier `coverageLabel`, "{Airline} Team" — see weekly-plan-view.ts).
+ *
  * IMPORTANT — this is illustrative demo data, not confirmed real RAM
  * Handling business rules. The specific airlines, headcounts, and
  * assignment windows below (including which carriers appear "unconfigured")
@@ -19,13 +30,14 @@ import { Flight, StaffingRequirement } from "./types";
  * production fact.
  */
 const COMPANY_STAFFING_CONFIG: Record<string, { role: string; headcount: number; assignmentWindowMinutes: number }> = {
-  "Qatar Airways": { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 60 },
-  Emirates: { role: "Ramp Team", headcount: 3, assignmentWindowMinutes: 60 },
-  Etihad: { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 45 },
-  "Gulf Air": { role: "Ramp Team", headcount: 2, assignmentWindowMinutes: 45 },
-  "Air France": { role: "Ramp Team", headcount: 3, assignmentWindowMinutes: 60 },
-  // Turkish Airlines deliberately absent — demonstrates the
-  // "needs configuration" path for an unconfigured carrier.
+  "Qatar Airways": { role: "Company Team", headcount: 2, assignmentWindowMinutes: 60 },
+  Emirates: { role: "Company Team", headcount: 3, assignmentWindowMinutes: 60 },
+  Etihad: { role: "Company Team", headcount: 2, assignmentWindowMinutes: 45 },
+  "Gulf Air": { role: "Company Team", headcount: 2, assignmentWindowMinutes: 45 },
+  "Air France": { role: "Company Team", headcount: 3, assignmentWindowMinutes: 60 },
+  // Turkish Airlines deliberately absent — demonstrates the "unmanaged,
+  // no requirement generated at all" path for an unconfigured carrier
+  // (see classifyFlightRequirements in weekly-requirements.ts).
 };
 
 // Exported for UI/test use — the list of currently-configured foreign
@@ -56,23 +68,16 @@ export function classifyCompanyRequirement(
     additional_requirement: 0,
     total_requirement: config.headcount,
     source: "company_config",
-    reasoning: `${config.headcount} ${config.role} agents per ${flight.airline}'s configured staffing agreement (${config.assignmentWindowMinutes}-minute assignment window). RAM Handling assigns the team; internal task distribution remains under ${flight.airline} staff.`,
+    reasoning: `${config.headcount} agents per ${flight.airline}'s configured staffing agreement (${config.assignmentWindowMinutes}-minute assignment window). RAM Handling assigns the team (from employees authorized for ${flight.airline}); internal task distribution remains under ${flight.airline} staff.`,
     needs_configuration: false,
   };
 }
 
-export function missingCompanyConfigRequirement(
-  flight: Flight
-): Omit<StaffingRequirement, "id" | "flight_id"> {
-  return {
-    // Not a real staffing role — this row claims "this carrier has no
-    // agreement configured at all", never a guessed headcount for one.
-    role: "Company Configuration",
-    baseline_requirement: 0,
-    additional_requirement: 0,
-    total_requirement: 0,
-    source: "company_config",
-    reasoning: `No staffing configuration exists yet for ${flight.airline}. Add a company staffing agreement (role, headcount, assignment window) before this flight can be planned.`,
-    needs_configuration: true,
-  };
-}
+// A carrier absent from COMPANY_STAFFING_CONFIG is UNMANAGED, not "needs
+// configuration": classifyFlightRequirements (weekly-requirements.ts)
+// deliberately produces NO StaffingRequirement row at all for it — the
+// flight simply stays in Flight Schedule with no ATLAS staffing coverage.
+// There is no fabricated "Company Configuration" placeholder role/row here
+// any more; if a real internal admin surface for configuring a new company
+// is ever built, it reads CONFIGURED_COMPANIES/COMPANY_STAFFING_CONFIG
+// directly rather than needing a per-flight requirement row to exist.

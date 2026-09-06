@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeScheduledWeeklyHours, checkRestBetweenDays, checkWeeklyHoursCeiling, validateWeeklyPlan } from "../lib/planning/validation";
+import { computeScheduledWeeklyHours, checkRestBetweenDays, checkWeeklyHoursCeiling, validateWeeklyPlan, collectConfigurationIssues } from "../lib/planning/validation";
 import { CONFIG } from "../lib/seed-data";
 import { Employee, WeeklyShiftEntry } from "../lib/types";
 
@@ -112,13 +112,30 @@ describe("checkWeeklyHoursCeiling", () => {
 });
 
 describe("validateWeeklyPlan", () => {
-  it("surfaces needs_configuration and unfilled_duty issues together", () => {
-    const requirements = [
-      { id: "r1", flight_id: "f1", role: "Boarding", baseline_requirement: 0, additional_requirement: 0, total_requirement: 0, source: "fixed_rule" as const, reasoning: "no rule configured", needs_configuration: true },
-    ];
+  it("surfaces unfilled_duty issues — but NEVER a needs_configuration issue; that's collectConfigurationIssues's job, entirely separate", () => {
     const unfilled = [{ dayOfWeek: "Wednesday", requirementId: "r2", role: "Check-in", stillNeeded: 2 }];
-    const issues = validateWeeklyPlan(requirements, unfilled, [], ["Wednesday"], CONFIG);
-    expect(issues.some((i) => i.type === "needs_configuration")).toBe(true);
+    const issues = validateWeeklyPlan(unfilled, [], ["Wednesday"], CONFIG);
     expect(issues.some((i) => i.type === "unfilled_duty")).toBe(true);
+    // "needs_configuration" isn't even a valid PlanIssueType any more —
+    // this asserts the array contains ONLY the type we gave it.
+    expect(issues.every((i) => i.type === "unfilled_duty")).toBe(true);
+  });
+});
+
+describe("collectConfigurationIssues", () => {
+  it("collects only needs_configuration requirements, as their own ConfigurationIssue — never mixed into operational PlanIssues", () => {
+    const requirements = [
+      { id: "r1", flight_id: "f1", role: "Staffing Rule", baseline_requirement: 0, additional_requirement: 0, total_requirement: 0, source: "fixed_rule" as const, reasoning: "no rule configured", needs_configuration: true },
+      { id: "r2", flight_id: "f1", role: "Gate", baseline_requirement: 1, additional_requirement: 0, total_requirement: 1, source: "fixed_rule" as const, reasoning: "", needs_configuration: false },
+    ];
+    const issues = collectConfigurationIssues(requirements);
+    expect(issues).toEqual([{ requirementId: "r1", description: "no rule configured" }]);
+  });
+
+  it("returns an empty array when nothing needs configuration", () => {
+    const requirements = [
+      { id: "r1", flight_id: "f1", role: "Gate", baseline_requirement: 1, additional_requirement: 0, total_requirement: 1, source: "fixed_rule" as const, reasoning: "", needs_configuration: false },
+    ];
+    expect(collectConfigurationIssues(requirements)).toEqual([]);
   });
 });

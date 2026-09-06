@@ -29,16 +29,24 @@ export const DESTINATIONS: Record<string, { code: string; city: string; country:
 /**
  * Country -> confirmed RAM operational category. ONLY countries with an
  * actual confirmed rule appear here — this is deliberately short. A
- * country's absence (Turkey, Canada, Bahrain, the Gulf states reached by
- * their own carriers, etc.) means no established RAM category exists yet,
- * not that one was overlooked. Do not extend this table to "make a flight
- * fit" — extend it only when a real confirmed rule exists.
+ * country's absence (Turkey, Bahrain, the Gulf states reached by their own
+ * carriers, etc.) means no established RAM category exists yet, not that
+ * one was overlooked. Do not extend this table to "make a flight fit" —
+ * extend it only when a real confirmed rule exists.
+ *
+ * Canada is its own category, not folded into "UK/USA" — the CONFIRMED
+ * RULE (additional security/document-related functions: Profiling, Mesure)
+ * happens to be identical to UK/USA today (see ram-staffing-matrix.ts), but
+ * that is a coincidence of the current confirmed numbers, not a reason to
+ * merge the categories — a future change to one must not silently apply to
+ * the other.
  */
 const COUNTRY_TO_RAM_CATEGORY: Partial<Record<string, RamDestinationCategory>> = {
   Spain: "Europe/Schengen",
   France: "Europe/Schengen",
   "United Kingdom": "UK/USA",
   "United States": "UK/USA",
+  Canada: "Canada",
   Senegal: "Africa",
 };
 
@@ -54,12 +62,12 @@ const COUNTRY_TO_RAM_CATEGORY: Partial<Record<string, RamDestinationCategory>> =
  *   other category with no matrix entry, but the classification itself is
  *   not in doubt.
  * - A country with a confirmed RAM category (Spain/France -> Europe/Schengen,
- *   United Kingdom/United States -> UK/USA, Senegal -> Africa) returns that
- *   category directly.
- * - Everything else (Turkey, Canada, Bahrain, the UAE, Qatar, or an
- *   airport not in DESTINATIONS at all) returns null — genuinely
- *   unclassifiable with what's currently confirmed. Never guessed into
- *   the nearest-sounding bucket.
+ *   United Kingdom/United States -> UK/USA, Canada -> Canada, Senegal ->
+ *   Africa) returns that category directly.
+ * - Everything else (Turkey, Bahrain, the UAE, Qatar, or an airport not in
+ *   DESTINATIONS at all) returns null — genuinely unclassifiable with
+ *   what's currently confirmed. Never guessed into the nearest-sounding
+ *   bucket.
  */
 export function classifyDestinationOperationally(
   destinationCode: string | null

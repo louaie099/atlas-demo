@@ -21,6 +21,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     scheduled_arrival: null, gate: null, boarding_window_start: "13:50", boarding_window_end: "14:20",
     status: "scheduled", booking_pressure: "normal", day_of_week: "Wednesday",
     operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+    booked_passengers: null, seat_capacity: null,
     ...overrides,
   };
 }
@@ -87,7 +88,7 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
     expect(wednesday.status).toBe("working");
     expect(wednesday.shiftCode).not.toBeNull(); // some real effective code was resolved
     expect(wednesday.duties).toEqual([
-      { flightId: "f1", flightNumber: "AT100", role: "Boarding", window: { start: "13:00", end: "14:00" }, status: "proposed" },
+      { flightId: "f1", flightNumber: "AT100", role: "Boarding", window: { start: "13:00", end: "14:00" }, status: "assigned" },
     ]);
   });
 
