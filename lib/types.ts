@@ -127,7 +127,10 @@ export interface ResolutionRecommendation {
 
 export interface Config {
   minimum_rest_hours: number;
-  fairness_ceiling_hours: number;
+  // "unconfirmed" is a real, literal state (see lib/labor-rules.ts) — never
+  // a guessed number. Code reading this must skip/disable the ceiling
+  // check rather than compare against an invented value.
+  fairness_ceiling_hours: number | "unconfirmed";
   baseline_checkin_requirement: number;
   overbooking_checkin_reinforcement: number;
 }
@@ -141,4 +144,38 @@ export interface AgentScheduleEntry {
   // not yet confirmed. Kept honestly separate, same pattern as
   // RosterRequirementView.proposedEmployees — never silently merged into `duties`.
   proposedDuties: { flightNumber: string; role: string; dayOfWeek: string }[];
+  // The real day-by-day source of truth for the Agent Schedule weekly grid
+  // — one entry per day of the week, derived from the SAME generated plan
+  // as `duties`/`proposedDuties` above (never a second scheduling model).
+  days: AgentDayEntry[];
+  // Week-level plan issues for this employee that don't belong to one
+  // specific day (currently only weekly_hours_violation).
+  weeklyIssues: import("./planning/validation").PlanIssue[];
+}
+
+// A single flight duty on a specific day, tagged with the same
+// proposed/confirmed distinction established in Flight Coverage
+// (RosterRequirementView) — never silently merged into one status.
+export interface AgentScheduleDuty {
+  flightId: string;
+  flightNumber: string;
+  role: string;
+  window: { start: string; end: string };
+  status: "confirmed" | "proposed";
+}
+
+// One day of an employee's generated week. Deliberately NOT a single
+// exclusive "day kind" — an employee can simultaneously have a shift, a
+// foreign-company protected commitment, and one or more RAM duties on the
+// same day. Each fact is its own field so the UI composes them rather than
+// picking one label to represent the whole day.
+export interface AgentDayEntry {
+  dayOfWeek: string;
+  status: "working" | "off";
+  shiftCode: string | null; // the REAL effective code for this day (generated for flexible pool, actual roster entry otherwise) — never the employee's static shift_code
+  shiftStart: string | null;
+  shiftEnd: string | null;
+  foreignCommitments: import("./foreign-company-window").ForeignCommitment[];
+  duties: AgentScheduleDuty[];
+  issues: import("./planning/validation").PlanIssue[];
 }

@@ -60,6 +60,30 @@ export function effectiveShiftForDay(
 }
 
 /**
+ * Same effective-shift logic as effectiveShiftForDay above, but returns the
+ * shift CODE ("MT02") rather than resolved start/end times — what Agent
+ * Schedule's day-by-day grid needs to display. Kept as a separate function
+ * rather than changing effectiveShiftForDay's return shape, to avoid
+ * touching that function's existing callers/tests.
+ */
+export function effectiveShiftCodeForDay(
+  employee: Employee,
+  dayOfWeek: string,
+  generatedShifts: GeneratedShiftAssignment[]
+): string | null {
+  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
+  if (existing?.status === "off") return null;
+
+  if (isFlexibleGeneralPool(employee)) {
+    const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
+    if (generated) return generated.shiftCode;
+    return existing?.shift_code ?? null;
+  }
+
+  return existing?.shift_code ?? null;
+}
+
+/**
  * Stage 9 of the planning pipeline: assigning actual flight duties, one
  * requirement at a time, ONLY after shifts for the day already make
  * sense (Stages 6–8 done). Requirements are processed in departure-time

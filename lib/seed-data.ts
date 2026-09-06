@@ -4,11 +4,19 @@ import { generateWeeklyFlights } from "./flight-generator";
 import { getShiftTimesAs, buildUniformWeeklySchedule } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
-import { buildStaggeredOffDays, offDaysCountForShift, restHoursBetween } from "./roster-generation";
+import { buildStaggeredOffDays, restHoursBetween } from "./roster-generation";
+import { resolveDefaultLaborRules } from "./labor-rules";
+
+// minimum_rest_hours and fairness_ceiling_hours are sourced from
+// lib/labor-rules.ts, not hand-picked here — see that file for which of
+// these is confirmed vs. an honestly-labeled prototype placeholder.
+// fairness_ceiling_hours resolves to "unconfirmed" today: it is NOT a
+// number, and nothing may substitute a guessed one in its place.
+const DEFAULT_RULES = resolveDefaultLaborRules();
 
 export const CONFIG: Config = {
-  minimum_rest_hours: 10,
-  fairness_ceiling_hours: 40,
+  minimum_rest_hours: DEFAULT_RULES.minimumRestHours,
+  fairness_ceiling_hours: DEFAULT_RULES.weeklyHoursCeiling,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
 };
@@ -38,17 +46,18 @@ export const DEMO_TODAY = "Wednesday";
 //
 // off_days: previously [] for all 8 (a 7-day work week for every one of
 // them) — that was never a deliberate scenario requirement, just an
-// unfixed default, and it meant these employees' weekly hours (via real
-// shift durations) were guaranteed to exceed the fairness ceiling. Now
-// derived the same way the generated workforce's off days are (see
-// roster-generation.ts), staggered per employee so the 7 scripted
+// unfixed default. OFF-day COUNT is now the confirmed labor rule directly
+// (DEFAULT_RULES.normalWeeklyOffDays, currently 2) — no longer derived
+// from shift duration vs. an unconfirmed hours ceiling (see
+// lib/labor-rules.ts and roster-generation.ts's now-unused
+// offDaysCountForShift). Staggered per employee so the 7 scripted
 // employees don't all share the same OFF day. Wednesday — the one day the
 // scripted AT201/AT535 scenario and live scoring run against — is
 // deliberately excluded from the candidate pool for all of them, so
 // nothing about the scripted narrative changes.
 const SCRIPTED_OFF_DAY_POOL = DAYS_WITH_DATA.filter((d) => d !== DEMO_TODAY);
-function scriptedOffDays(shiftCode: string, employeeIndex: number): string[] {
-  return buildStaggeredOffDays(employeeIndex, offDaysCountForShift(shiftCode, CONFIG.fairness_ceiling_hours), SCRIPTED_OFF_DAY_POOL);
+function scriptedOffDays(employeeIndex: number): string[] {
+  return buildStaggeredOffDays(employeeIndex, DEFAULT_RULES.normalWeeklyOffDays, SCRIPTED_OFF_DAY_POOL);
 }
 
 export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
@@ -62,7 +71,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 24,
     is_duty_officer: false,
-    off_days: scriptedOffDays("AP01", 0),
+    off_days: scriptedOffDays(0),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -76,7 +85,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 26,
     is_duty_officer: false,
-    off_days: scriptedOffDays("AP02", 1),
+    off_days: scriptedOffDays(1),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -90,7 +99,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 22,
     is_duty_officer: false,
-    off_days: scriptedOffDays("NR02", 2),
+    off_days: scriptedOffDays(2),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -131,7 +140,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 13,
     weekly_hours: 20,
     is_duty_officer: false,
-    off_days: scriptedOffDays("AP01", 3),
+    off_days: scriptedOffDays(3),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -146,7 +155,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 30,
     is_duty_officer: true,
-    off_days: scriptedOffDays("JR01", 4),
+    off_days: scriptedOffDays(4),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -160,7 +169,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 30,
     is_duty_officer: false,
-    off_days: scriptedOffDays("MT01", 5),
+    off_days: scriptedOffDays(5),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -174,7 +183,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 12,
     weekly_hours: 18,
     is_duty_officer: false,
-    off_days: scriptedOffDays("MT02", 6),
+    off_days: scriptedOffDays(6),
     foreign_company_authorizations: [],
     active: true,
   },
@@ -204,6 +213,17 @@ const ROTATING_SHIFT_PATTERN_A: { day: string; code: string | null }[] = [
   { day: "Sunday", code: "OFF" },
 ];
 
+// LEGACY DEMO DATA — NOT engine output. Amine Sqalli's pattern below
+// (ROTATING_SHIFT_PATTERN_A) is a hand-authored example predating the
+// labor-rule/Rotation Feasibility Engine work, kept only to prove daily
+// roster entries genuinely vary day-to-day. Its 3-OFF-day pattern (see
+// the off_days comment below) must NOT be read as an ATLAS-generated
+// normal planning result, and must NOT be used as a template or
+// precedent when reasoning about real rotation output — every other
+// employee's off_days in this file is produced by lib/labor-rules.ts +
+// lib/rotation-feasibility.ts (foreign-company groups) or the confirmed
+// flat 2-OFF-days rule (everyone else). This one hardcoded exception
+// stands alone.
 export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
   {
     id: "rotation-example-gate",
@@ -215,7 +235,19 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 24,
     is_duty_officer: false,
-    off_days: ["Thursday"],
+    // Corrected: off_days previously said ["Thursday"] alone (1 day), but
+    // ROTATING_SHIFT_PATTERN_A above actually has THREE OFF days
+    // (Thursday, Saturday, Sunday) — the metadata field was simply wrong,
+    // not a deliberate scenario. off_days must describe the real pattern
+    // truthfully; a false "1 OFF day" reading here was previously
+    // mistaken for an implicit/renfort-style exception, which it was
+    // never intended to represent. No renfort has been invoked for this
+    // employee or anyone else — this is a pre-existing hand-authored
+    // rotation-variety example unrelated to the labor-rule/rotation
+    // engine, and its 3-OFF pattern is a separate, pre-existing question
+    // (not one this correction resolves) from the confirmed
+    // 2-OFF/renfort-1-OFF rule.
+    off_days: ["Thursday", "Saturday", "Sunday"],
     foreign_company_authorizations: [],
     active: true,
   },

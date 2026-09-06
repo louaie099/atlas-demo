@@ -78,7 +78,11 @@ export function scoreCandidates(
     const shiftEndMin = timeToMinutes(employee.shift_end);
     const windowEndMin = timeToMinutes(window.end);
     const extensionNeeded = shiftEndMin < windowEndMin;
-    const nearCeiling = employee.weekly_hours >= config.fairness_ceiling_hours - 5;
+    // fairness_ceiling_hours may be "unconfirmed" (see lib/labor-rules.ts)
+    // — an unconfirmed ceiling is never enforced or used to flag anyone,
+    // rather than compared against an invented number.
+    const nearCeiling =
+      config.fairness_ceiling_hours !== "unconfirmed" && employee.weekly_hours >= config.fairness_ceiling_hours - 5;
     const rested = employee.rest_before_shift_hours >= config.minimum_rest_hours;
 
     if (rested && !extensionNeeded && !nearCeiling) {

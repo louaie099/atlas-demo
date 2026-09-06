@@ -1,10 +1,24 @@
 import { Employee } from "./types";
 import { getShiftTimesAs } from "./shift-templates";
-import { buildStaggeredOffDays, offDaysCountForShift } from "./roster-generation";
+import { buildStaggeredOffDays } from "./roster-generation";
 import { companyOperatingDays } from "./flight-generator";
+import { getCompanyRequiredAgents } from "./company-config";
+import { resolveDefaultLaborRules } from "./labor-rules";
+import { deriveTeamRotation, DemandDay, RotationInfeasibleError } from "./rotation-feasibility";
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const FAIRNESS_CEILING_HOURS = 40; // kept in sync with CONFIG.fairness_ceiling_hours (lib/seed-data.ts)
+
+/**
+ * OFF-day count no longer comes from a weekly-hours ceiling (there is no
+ * confirmed ceiling — see lib/labor-rules.ts). The confirmed rule is a
+ * flat 2 OFF days/week for everyone in a normal week; a foreign-company
+ * team's actual OFF-day PLACEMENT (which 2 days, and how the team splits
+ * into rotating subgroups) is instead derived per-company below by the
+ * generic Rotation Feasibility Engine (lib/rotation-feasibility.ts) from
+ * that company's real flight demand — never hand-picked, never
+ * duration-based.
+ */
+const LABOR_RULES = resolveDefaultLaborRules();
 
 // Synthetic name pools — clearly generated, not real personnel. Combined
 // deterministically by index (never Math.random()) so the dataset is
@@ -178,19 +192,77 @@ function preferredOffDaysFor(assignment: string): string[] | undefined {
   return nonFlightDays.length > 0 ? nonFlightDays : undefined;
 }
 
+/**
+ * Builds the real weekly demand for a configured foreign company from its
+ * ACTUAL flight days (lib/flight-generator.ts) and its ACTUAL configured
+ * per-flight agent requirement (lib/company-config.ts) — never a guessed
+ * or company-name-branched number. Returns undefined for any assignment
+ * that isn't a configured company with at least one seeded flight, so the
+ * caller falls back to the flat, non-rotation path for those groups
+ * (e.g. an authorized-but-unassigned pool, or an unconfigured carrier).
+ */
+function realWeeklyDemandFor(assignment: string): DemandDay[] | undefined {
+  const flightDays = companyOperatingDays(assignment);
+  const requiredAgents = getCompanyRequiredAgents(assignment);
+  if (flightDays.length === 0 || requiredAgents === undefined) return undefined;
+  return ALL_DAYS.map((d) => ({ dayOfWeek: d, requiredAgents: flightDays.includes(d) ? requiredAgents : 0 }));
+}
+
+/**
+ * Assigns off_days for one foreign-company GROUP by running the generic
+ * Rotation Feasibility Engine against that company's real weekly demand.
+ * Never branches on the company's name — only on its headcount and its
+ * actual flights, exactly like every other input to deriveTeamRotation.
+ *
+ * If deriveTeamRotation reports infeasible, that is a genuine capacity
+ * gap — this function throws RotationInfeasibleError rather than
+ * inventing an unrelated flat roster to paper over it. Generation must
+ * not proceed with a fabricated schedule for a team the feasibility
+ * engine has rejected; the fix is a real human action (add headcount, or
+ * an explicit renfort decision once that workflow exists), not a
+ * quieter fallback here.
+ */
+function offDaysForForeignGroup(spec: GenSpec): string[][] {
+  const demand = realWeeklyDemandFor(spec.assignment);
+  if (!demand) {
+    // Not a configured company with real seeded flights (e.g. an
+    // authorized-but-unassigned pool) — there is no operational demand to
+    // test a rotation against, so the confirmed flat rule applies
+    // directly, same as the internal RAM teams.
+    const preferredOffDays = preferredOffDaysFor(spec.assignment);
+    const candidatePool = spec.keepWednesdayWorking ? ALL_DAYS.filter((d) => d !== "Wednesday") : ALL_DAYS;
+    return Array.from({ length: spec.count }, (_, n) =>
+      buildStaggeredOffDays(n, LABOR_RULES.normalWeeklyOffDays, candidatePool, preferredOffDays)
+    );
+  }
+
+  const result = deriveTeamRotation(spec.count, demand, ALL_DAYS, LABOR_RULES.normalWeeklyOffDays);
+  if (!result.feasible || !result.candidate) {
+    throw new RotationInfeasibleError(spec.assignment, spec.count, demand, result.reason ?? "No feasible rotation found.");
+  }
+
+  const perEmployee: string[][] = [];
+  for (const group of result.candidate.groups) {
+    for (let k = 0; k < group.size; k++) perEmployee.push(group.offDays);
+  }
+  return perEmployee;
+}
+
 export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts">[] {
   const employees: Omit<Employee, "weekly_shifts">[] = [];
   let i = startIndex;
 
-  for (const spec of [...CATEGORIES, ...FOREIGN_GROUPS]) {
-    const offDaysCount = offDaysCountForShift(spec.shift_code, FAIRNESS_CEILING_HOURS);
+  for (const spec of CATEGORIES) {
+    // Internal RAM teams have no operational-demand/rotation question to
+    // answer (they aren't tied to a specific foreign company's flight
+    // schedule) — the confirmed flat rule applies directly: 2 OFF
+    // days/week, staggered so the team isn't all off the same days.
     const candidatePool = spec.keepWednesdayWorking ? ALL_DAYS.filter((d) => d !== "Wednesday") : ALL_DAYS;
-    const preferredOffDays = preferredOffDaysFor(spec.assignment);
 
     for (let n = 0; n < spec.count; n++) {
       const name = nameForIndex(i);
       const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code);
-      const off_days = buildStaggeredOffDays(n, offDaysCount, candidatePool, preferredOffDays);
+      const off_days = buildStaggeredOffDays(n, LABOR_RULES.normalWeeklyOffDays, candidatePool);
       employees.push({
         id: idForName(name, i),
         name,
@@ -203,6 +275,31 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
         weekly_hours: spec.weekly_hours,
         is_duty_officer: spec.assignment === "Duty Officers",
         off_days,
+        foreign_company_authorizations: spec.foreign_company_authorizations ?? [],
+        active: true,
+      });
+      i++;
+    }
+  }
+
+  for (const spec of FOREIGN_GROUPS) {
+    const offDaysByMember = offDaysForForeignGroup(spec);
+
+    for (let n = 0; n < spec.count; n++) {
+      const name = nameForIndex(i);
+      const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code);
+      employees.push({
+        id: idForName(name, i),
+        name,
+        skills: spec.skills,
+        assignment: spec.assignment,
+        shift_code: spec.shift_code,
+        shift_start,
+        shift_end,
+        rest_before_shift_hours: spec.rest_before_shift_hours,
+        weekly_hours: spec.weekly_hours,
+        is_duty_officer: spec.assignment === "Duty Officers",
+        off_days: offDaysByMember[n],
         foreign_company_authorizations: spec.foreign_company_authorizations ?? [],
         active: true,
       });

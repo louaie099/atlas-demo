@@ -75,19 +75,38 @@ describe("checkRestBetweenDays", () => {
 });
 
 describe("checkWeeklyHoursCeiling", () => {
-  it("flags an employee scheduled above the fairness ceiling", () => {
+  // CONFIG.fairness_ceiling_hours is the literal "unconfirmed" (see
+  // lib/labor-rules.ts — the old 40h prototype value was deliberately not
+  // carried forward as a real number). These tests exercise the ceiling
+  // MECHANISM against an explicit, test-local confirmed value, and
+  // separately assert the real, current CONFIG never flags anyone while
+  // the ceiling stays unconfirmed.
+  const CONFIRMED_CEILING_CONFIG = { ...CONFIG, fairness_ceiling_hours: 40 as const };
+
+  it("flags an employee scheduled above a CONFIRMED fairness ceiling", () => {
     const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d) => ({
       day_of_week: d,
-      shift_code: "NR02", // 08:00-18:15 = 10.25h × 5 = 51.25h, well above 40h ceiling
+      shift_code: "NR02", // 08:00-18:15 = 10.25h × 5 = 51.25h, well above a 40h ceiling
       status: "working" as const,
     }));
     const employee = makeEmployee(days);
-    const issue = checkWeeklyHoursCeiling(employee, CONFIG);
+    const issue = checkWeeklyHoursCeiling(employee, CONFIRMED_CEILING_CONFIG);
     expect(issue?.type).toBe("weekly_hours_violation");
   });
 
-  it("does not flag an employee within the ceiling", () => {
+  it("does not flag an employee within a CONFIRMED ceiling", () => {
     const employee = makeEmployee([{ day_of_week: "Monday", shift_code: "MT01", status: "working" }]);
+    expect(checkWeeklyHoursCeiling(employee, CONFIRMED_CEILING_CONFIG)).toBeNull();
+  });
+
+  it("never flags anyone while the ceiling is unconfirmed (real CONFIG)", () => {
+    expect(CONFIG.fairness_ceiling_hours).toBe("unconfirmed");
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d) => ({
+      day_of_week: d,
+      shift_code: "NR02", // would be 51.25h — well above any plausible ceiling
+      status: "working" as const,
+    }));
+    const employee = makeEmployee(days);
     expect(checkWeeklyHoursCeiling(employee, CONFIG)).toBeNull();
   });
 });

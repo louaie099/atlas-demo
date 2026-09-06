@@ -7,9 +7,16 @@ import {
   RosterRequirementView,
   RequirementCoverageStatus,
   AgentScheduleEntry,
+  AgentDayEntry,
+  AgentScheduleDuty,
 } from "../types";
 import { generateDraftWeeklyPlan, DraftWeeklyPlan } from "./generate-draft-plan";
-import { GeneratedDuty } from "./duty-generation";
+import { GeneratedDuty, effectiveShiftCodeForDay } from "./duty-generation";
+import { GeneratedShiftAssignment } from "./shift-generation";
+import { getRequirementWindow } from "./requirement-window";
+import { getEmployeeForeignCommitments } from "../foreign-company-window";
+import { getShiftTimesAs } from "../shift-templates";
+import { PlanIssue } from "./validation";
 
 /**
  * Single source of truth for everything Weekly Planning shows: Flight
@@ -111,10 +118,29 @@ function buildAgentScheduleEntries(
   assignments: Assignment[],
   requirements: StaffingRequirement[],
   flights: Flight[],
-  allDuties: GeneratedDuty[]
+  allDuties: GeneratedDuty[],
+  daysOrder: string[],
+  planIssues: PlanIssue[],
+  generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
+
+  // Issues are per-employee, and are either day-specific (rest_violation
+  // carries dayOfWeek — the day rest was violated INTO) or week-level
+  // (weekly_hours_violation has no single day it belongs to). Indexed once
+  // here rather than re-filtering planIssues per employee x day.
+  const issuesByEmployeeDay = new Map<string, PlanIssue[]>();
+  const weeklyIssuesByEmployee = new Map<string, PlanIssue[]>();
+  for (const issue of planIssues) {
+    if (!issue.employeeId) continue; // needs_configuration/unfilled_duty belong to Flight Coverage, not an employee
+    if (issue.dayOfWeek) {
+      const key = `${issue.employeeId}|${issue.dayOfWeek}`;
+      issuesByEmployeeDay.set(key, [...(issuesByEmployeeDay.get(key) ?? []), issue]);
+    } else {
+      weeklyIssuesByEmployee.set(issue.employeeId, [...(weeklyIssuesByEmployee.get(issue.employeeId) ?? []), issue]);
+    }
+  }
 
   const schedule: AgentScheduleEntry[] = employees
     .filter((e) => !e.is_duty_officer)
@@ -152,11 +178,79 @@ function buildAgentScheduleEntries(
         })
         .filter((d): d is { flightNumber: string; role: string; dayOfWeek: string } => Boolean(d));
 
+      // The actual day-by-day source of truth this employee's week is
+      // built from — weekly_shifts (never the static shift_start/shift_end
+      // fields, which only describe the employee's own baseline/most-recent
+      // placement, not what any given day of THIS generated week holds).
+      // One entry per day in daysOrder; a day composes several independent,
+      // non-exclusive facts (shift, foreign commitment, RAM duties, issues)
+      // rather than collapsing to one "day type".
+      const foreignCommitmentsAll = getEmployeeForeignCommitments(employee.id, assignments, requirements, flights);
+
+      const days: AgentDayEntry[] = daysOrder.map((day) => {
+        const weeklyShift = employee.weekly_shifts.find((s) => s.day_of_week === day) ?? null;
+        const isOff = !weeklyShift || weeklyShift.status === "off";
+
+        // The REAL effective shift for this day — for a flexible General T1
+        // Pool employee this is the freshly generated demand-driven shift
+        // (Stage 6), not the static/uniform weekly_shifts baseline; for
+        // everyone else (foreign-committed, fixed/specialized, Transit) it's
+        // their real weekly_shifts entry, unchanged. This is exactly what
+        // duty-generation.ts itself uses to decide who's even a candidate
+        // that day, so the grid can never show a shift the plan didn't
+        // actually use.
+        const shiftCode = isOff ? null : effectiveShiftCodeForDay(employee, day, generatedShiftsByDay[day] ?? []);
+        const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode) : null;
+
+        const dayDuties: AgentScheduleDuty[] = [];
+
+        for (const a of confirmedAssignments) {
+          const requirement = requirementsById.get(a.staffing_requirement_id);
+          const flight = requirement ? flightsById.get(requirement.flight_id) : undefined;
+          if (!requirement || !flight || flight.day_of_week !== day) continue;
+          dayDuties.push({
+            flightId: flight.id,
+            flightNumber: flight.flight_number,
+            role: requirement.role,
+            window: getRequirementWindow(requirement, flight),
+            status: "confirmed",
+          });
+        }
+
+        for (const d of allDuties) {
+          if (d.employeeId !== employee.id || confirmedRequirementIds.has(d.requirementId)) continue;
+          const flight = flightsById.get(d.flightId);
+          if (!flight || flight.day_of_week !== day) continue;
+          dayDuties.push({
+            flightId: flight.id,
+            flightNumber: flight.flight_number,
+            role: d.role,
+            window: d.window,
+            status: "proposed",
+          });
+        }
+
+        dayDuties.sort((a, b) => a.window.start.localeCompare(b.window.start));
+
+        return {
+          dayOfWeek: day,
+          status: isOff ? "off" : "working",
+          shiftCode,
+          shiftStart: shiftTimes?.shift_start ?? null,
+          shiftEnd: shiftTimes?.shift_end ?? null,
+          foreignCommitments: foreignCommitmentsAll.filter((c) => c.dayOfWeek === day),
+          duties: dayDuties,
+          issues: issuesByEmployeeDay.get(`${employee.id}|${day}`) ?? [],
+        };
+      });
+
       return {
         employee,
         dayOff: employee.off_days.length > 0,
         duties,
         proposedDuties,
+        days,
+        weeklyIssues: weeklyIssuesByEmployee.get(employee.id) ?? [],
       };
     });
 
@@ -178,7 +272,16 @@ export function buildWeeklyPlanView(
   const allDuties = Object.values(draftPlan.dutiesByDay).flat();
 
   const roster = buildRosterViews(requirements, flights, employees, assignments, allDuties);
-  const schedule = buildAgentScheduleEntries(employees, assignments, requirements, flights, allDuties);
+  const schedule = buildAgentScheduleEntries(
+    employees,
+    assignments,
+    requirements,
+    flights,
+    allDuties,
+    daysOrder,
+    draftPlan.issues,
+    draftPlan.generatedShiftsByDay
+  );
 
   return { draftPlan, roster, schedule };
 }

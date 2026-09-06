@@ -74,7 +74,16 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
   return issues;
 }
 
+/**
+ * `config.fairness_ceiling_hours` may be the literal "unconfirmed" (see
+ * lib/labor-rules.ts) — the prototype 40h value was deliberately NOT
+ * carried forward as a number. An unconfirmed ceiling is never enforced:
+ * this returns null rather than comparing scheduled hours against a
+ * guessed figure. Once a real ceiling is confirmed, this starts reporting
+ * again with no other change needed here.
+ */
 export function checkWeeklyHoursCeiling(employee: Employee, config: Config): PlanIssue | null {
+  if (config.fairness_ceiling_hours === "unconfirmed") return null;
   const scheduled = computeScheduledWeeklyHours(employee);
   if (scheduled > config.fairness_ceiling_hours) {
     return {

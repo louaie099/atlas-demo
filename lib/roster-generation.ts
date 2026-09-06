@@ -1,52 +1,20 @@
-import { SHIFT_CODES } from "./shift-templates";
-
 /**
- * How the synthetic weekly roster is built. The prior generator gave every
- * employee exactly one OFF day regardless of shift length, which made a
- * weekly-hours violation mathematically inevitable for anyone on a shift
- * longer than ~6h40 (40h / 6 working days) — this was the actual root
- * cause of the near-universal weekly-hours violations, not missing
- * General T1 demand. This module fixes that by deriving how many days a
- * given shift can be worked without crossing the fairness ceiling, then
- * distributing OFF days across a group so coverage still varies day to
- * day (not everyone off the same day).
- *
- * This is a prototype-safe scheduling STRATEGY, not a claim about real
- * RAM rotation rules. Real rotation patterns for most teams (Leaders,
- * Duty Officers, Caisse/BCB, specialized teams) remain TBD — this module
- * does not invent detailed rules for them; it applies the same
- * ceiling-respecting, staggered-OFF-day approach uniformly, which is
- * honest about being a placeholder rather than a researched rotation.
+ * Shared low-level roster-building helpers. The OFF-day COUNT and
+ * PLACEMENT logic that used to live here (deriving days-off from a
+ * weekly-hours ceiling) has been removed — there is no confirmed ceiling
+ * to derive it from (see lib/labor-rules.ts), and the confirmed rule is a
+ * flat OFF-day count applied directly, with a foreign-company team's
+ * actual OFF-day placement derived by the generic Rotation Feasibility
+ * Engine (lib/rotation-feasibility.ts) instead. What remains here:
+ * buildStaggeredOffDays (a generic "spread N off-days across a group,
+ * preferring given days" placement helper, still used for teams with no
+ * operational-demand rotation question to answer) and restHoursBetween
+ * (the shared rest-hours-between-shifts calculation).
  */
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
-}
-
-/** Duration of a catalog shift code, in hours, handling overnight-crossing shifts. */
-export function shiftDurationHours(code: string): number {
-  const times = SHIFT_CODES[code];
-  if (!times) {
-    throw new Error(`Unknown shift code "${code}" — not in the authoritative shift catalog.`);
-  }
-  let minutes = timeToMinutes(times.sortie) - timeToMinutes(times.entree);
-  if (minutes < 0) minutes += 24 * 60;
-  return Math.round((minutes / 60) * 100) / 100;
-}
-
-/**
- * The most days a given shift can be worked in a week without exceeding
- * ceilingHours — never forces exactly the ceiling, just caps at it.
- * Clamped to [1, 6]: never zero working days (that's not a roster, that's
- * an inactive employee), never a full 7-day week (everyone gets at least
- * one day off, matching real staffing practice even when the ceiling
- * alone would technically allow more).
- */
-export function maxWorkingDaysForShift(shiftCode: string, ceilingHours: number): number {
-  const duration = shiftDurationHours(shiftCode);
-  const byCeiling = Math.floor(ceilingHours / duration);
-  return Math.max(1, Math.min(6, byCeiling));
 }
 
 /**
@@ -90,14 +58,6 @@ export function buildStaggeredOffDays(
     if (!chosen.includes(day)) chosen.push(day);
   }
   return chosen;
-}
-
-/**
- * Convenience: how many OFF days a shift needs (out of a 7-day week) to
- * stay at or under ceilingHours. `7 - maxWorkingDaysForShift(...)`.
- */
-export function offDaysCountForShift(shiftCode: string, ceilingHours: number): number {
-  return 7 - maxWorkingDaysForShift(shiftCode, ceilingHours);
 }
 
 /**

@@ -15,7 +15,11 @@ describe("scoreCandidates", () => {
     const karim = results.find((r) => r.employee.id === "karim-idrissi");
     expect(karim?.status).toBe("flagged");
     expect(karim?.reasoning).toContain("unplanned shift extension");
-    expect(karim?.reasoning).toContain("38h");
+    // CONFIG.fairness_ceiling_hours is "unconfirmed" (lib/labor-rules.ts) —
+    // an unconfirmed ceiling is never enforced or mentioned, so Karim is
+    // flagged for the shift extension alone, not for "approaching" a
+    // ceiling that doesn't have a confirmed value.
+    expect(karim?.reasoning).not.toContain("ceiling");
   });
 
   it("recommends both Hicham Bouzid and Rania Toumi for the AT535 Check-in gap", () => {

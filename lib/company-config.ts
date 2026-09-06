@@ -32,6 +32,18 @@ const COMPANY_STAFFING_CONFIG: Record<string, { role: string; headcount: number;
 // carriers. Turkish Airlines deliberately absent, per above.
 export const CONFIGURED_COMPANIES = Object.keys(COMPANY_STAFFING_CONFIG);
 
+/**
+ * The per-flight agent requirement for a configured company — the same
+ * headcount classifyCompanyRequirement derives, exposed directly for
+ * callers (e.g. the Rotation Feasibility Engine's wiring layer in
+ * employee-generator.ts) that need to build a week's operational demand
+ * WITHOUT a live Flight object. Returns undefined for an unconfigured
+ * carrier — never a guessed number.
+ */
+export function getCompanyRequiredAgents(company: string): number | undefined {
+  return COMPANY_STAFFING_CONFIG[company]?.headcount;
+}
+
 export function classifyCompanyRequirement(
   flight: Flight
 ): Omit<StaffingRequirement, "id" | "flight_id"> | null {
