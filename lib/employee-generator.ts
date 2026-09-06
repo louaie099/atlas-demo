@@ -5,7 +5,7 @@ import { companyOperatingDays } from "./flight-generator";
 import { getCompanyRequiredAgents } from "./company-config";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { deriveTeamRotation, DemandDay, RotationInfeasibleError } from "./rotation-feasibility";
-import { FixedCycleDefinition, JR_NT_OFF_OFF_CYCLE, offDaysForDisplayedWeek } from "./fixed-cycle-rotation";
+import { FixedCycleDefinition, JR_NT_OFF_OFF_CYCLE, offDaysForDisplayedWeek, maxConsecutiveOffInCycle } from "./fixed-cycle-rotation";
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -180,6 +180,22 @@ const FIXED_CYCLE_GROUPS: FixedCycleSpec[] = [
   { count: 5, skills: ["Boarding"], assignment: "Leaders", cycle: JR_NT_OFF_OFF_CYCLE, rest_before_shift_hours: 12, weekly_hours: 32 },
 ];
 
+// Generation-time sanity check, not a rotation-generation input: the
+// confirmed Transit/Leader cycle itself never changes here (rotation
+// policy stays entirely in lib/fixed-cycle-rotation.ts), but every fixed
+// cycle used in generation must still SATISFY the resolved labor
+// protection — if a future edit to a cycle definition ever violated the
+// confirmed max-consecutive-OFF rule, this fails loudly at generation time
+// rather than silently producing a non-compliant roster.
+for (const spec of FIXED_CYCLE_GROUPS) {
+  const cycleMax = maxConsecutiveOffInCycle(spec.cycle);
+  if (cycleMax > LABOR_RULES.maxConsecutiveOffDays) {
+    throw new Error(
+      `Fixed cycle for "${spec.assignment}" has ${cycleMax} consecutive OFF days, exceeding the confirmed maximum of ${LABOR_RULES.maxConsecutiveOffDays}. This cycle cannot be used for generation until it satisfies the resolved labor protection.`
+    );
+  }
+}
+
 export interface FixedCycleEmployeeSeed {
   employee: Omit<Employee, "weekly_shifts">;
   cycle: FixedCycleDefinition;
@@ -351,9 +367,23 @@ function offDaysForForeignGroup(spec: GenSpec): string[][] {
     );
   }
 
-  const result = deriveTeamRotation(spec.count, demand, ALL_DAYS, LABOR_RULES.normalWeeklyOffDays);
+  const result = deriveTeamRotation(
+    spec.count,
+    demand,
+    ALL_DAYS,
+    LABOR_RULES.normalWeeklyOffDays,
+    undefined,
+    4,
+    LABOR_RULES.maxConsecutiveOffDays
+  );
   if (!result.feasible || !result.candidate) {
-    throw new RotationInfeasibleError(spec.assignment, spec.count, demand, result.reason ?? "No feasible rotation found.");
+    throw new RotationInfeasibleError(
+      spec.assignment,
+      spec.count,
+      demand,
+      result.reason ?? "No feasible rotation found.",
+      LABOR_RULES.normalWeeklyOffDays
+    );
   }
 
   const perEmployee: string[][] = [];

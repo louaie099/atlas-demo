@@ -20,6 +20,9 @@ export const CONFIG: Config = {
   fairness_ceiling_hours: DEFAULT_RULES.weeklyHoursCeiling,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
+  normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
+  max_consecutive_off_days: DEFAULT_RULES.maxConsecutiveOffDays,
+  renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,
 };
 
 // Only this week currently has scheduled flights seeded. Week navigation in

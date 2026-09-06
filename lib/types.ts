@@ -161,6 +161,18 @@ export interface Config {
   fairness_ceiling_hours: number | "unconfirmed";
   baseline_checkin_requirement: number;
   overbooking_checkin_reinforcement: number;
+  // Resolved labor-rule values (see lib/labor-rules.ts) — the single
+  // source every generator/validator must read instead of hardcoding its
+  // own copy of the confirmed OFF-day protections. normal_weekly_off_days
+  // and max_consecutive_off_days govern ordinary weekly-roster generation
+  // and validation AND are the same hard feasibility gate the Rotation
+  // Feasibility Engine applies to foreign-team candidate rotations.
+  // renfort_weekly_off_days is carried here purely for representability —
+  // no automatic generation path reads it; renfort is only ever activated
+  // by an explicit human management action.
+  normal_weekly_off_days: number;
+  max_consecutive_off_days: number;
+  renfort_weekly_off_days: number;
 }
 
 export interface AgentScheduleEntry {

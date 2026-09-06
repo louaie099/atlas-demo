@@ -49,11 +49,14 @@ export interface ConsecutiveOffViolation {
 
 /**
  * Checks one employee's weekly_shifts (already in day order) for a
- * consecutive-OFF violation. Returns null when compliant (run <= 2).
+ * consecutive-OFF violation against the RESOLVED labor-rule threshold
+ * (see lib/labor-rules.ts's maxConsecutiveOffDays, threaded in via
+ * Config.max_consecutive_off_days) — never a value hardcoded here.
+ * Returns null when compliant (run <= maxAllowed).
  */
-export function checkConsecutiveOffCyclic(employee: Employee): ConsecutiveOffViolation | null {
+export function checkConsecutiveOffCyclic(employee: Employee, maxAllowed: number): ConsecutiveOffViolation | null {
   const run = maxConsecutiveOffCyclic(employee.weekly_shifts.map((s) => ({ status: s.status })));
-  if (run > 2) {
+  if (run > maxAllowed) {
     return { employeeId: employee.id, employeeName: employee.name, maxConsecutiveOffDays: run };
   }
   return null;

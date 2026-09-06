@@ -14,21 +14,25 @@
  *
  * HARD FEASIBILITY vs. RANKING (important distinction, corrected from an
  * earlier version of this engine): the only HARD constraints a rotation
- * can fail on are the confirmed labor rule's OFF-day count and whether the
- * resulting working headcount covers every day's real demand. Contiguous
- * (unfragmented) rest is operationally preferable — ATLAS should always
- * prefer a candidate with coherent rest blocks over an otherwise
- * equivalent fragmented one — but fragmentation alone is NOT a confirmed
- * hard labor rule, so it must never make a rotation infeasible by itself.
- * Every combination of OFF-day placements (contiguous or not) that
+ * can fail on are (1) the confirmed labor rule's OFF-day count, (2) the
+ * confirmed labor rule's maximum-consecutive-OFF-days protection (see
+ * lib/labor-rules.ts's maxConsecutiveOffDays — passed in, never
+ * hardcoded here), and (3) whether the resulting working headcount covers
+ * every day's real demand. Contiguous (unfragmented) rest BEYOND that
+ * maximum is operationally preferable — ATLAS should always prefer a
+ * candidate with coherent rest blocks over an otherwise equivalent
+ * fragmented one — but fragmentation alone, short of the confirmed
+ * maximum, is NOT a hard rule, so it must never make a rotation
+ * infeasible by itself. Every combination of OFF-day placements that
  * satisfies the hard constraints is a valid candidate; candidates are then
  * RANKED by a restContinuityScore (1.0 = fully contiguous per group, lower
  * = more fragmented), and the highest-ranked feasible candidate is
  * returned, together with that scoring, so ATLAS can later explain why one
- * feasible rotation was preferred over another. If continuity is ever
- * confirmed as a genuine hard rule, that becomes a real filter added here
- * explicitly — it must not be smuggled in as an implicit search-order
- * artifact again.
+ * feasible rotation was preferred over another. If no candidate of any
+ * group count / OFF-day placement satisfies the maximum-consecutive-OFF
+ * protection alongside demand coverage, this is a real capacity/rotation
+ * infeasibility (see RotationInfeasibleError) — never silently bypassed by
+ * generating extra OFF days or otherwise changing the roster.
  *
  * Rest-hours-between-shifts (minimumRestHours) is NOT re-validated inside
  * this module — that depends on the ACTUAL shift code chosen per day
@@ -48,6 +52,8 @@
  * must NOT fall back to inventing an unrelated flat roster for that team;
  * see RotationInfeasibleError and lib/employee-generator.ts.
  */
+
+import { maxConsecutiveOffCyclic } from "./planning/consecutive-off";
 
 export interface DemandDay {
   dayOfWeek: string;
@@ -150,9 +156,14 @@ function restContinuityScore(offDays: string[], daysOrder: string[]): number {
 /**
  * Derives a viable team rotation, or reports that none exists at the
  * current headcount. `demandByDay` must have one entry per day in
- * `daysOrder`, same order. `normalWeeklyOffDays` is the resolved,
- * confirmed labor rule (see lib/labor-rules.ts) — never a value this
- * function invents or reads from a ceiling.
+ * `daysOrder`, same order. `normalWeeklyOffDays` and
+ * `maxConsecutiveOffDays` are the resolved, confirmed labor rules (see
+ * lib/labor-rules.ts) — never a value this function invents, hardcodes,
+ * or reads from a ceiling. A candidate group whose OFF-day placement
+ * would exceed `maxConsecutiveOffDays` (evaluated cyclically, since the
+ * same OFF-day set repeats identically every week) is rejected as a HARD
+ * feasibility failure, exactly like a demand shortfall — never merely
+ * ranked lower.
  */
 export function deriveTeamRotation(
   headcount: number,
@@ -160,7 +171,8 @@ export function deriveTeamRotation(
   daysOrder: string[],
   normalWeeklyOffDays: number,
   preference?: RotationPreference,
-  maxGroupCount = 4
+  maxGroupCount = 4,
+  maxConsecutiveOffDays?: number
 ): RotationResult {
   if (headcount <= 0) {
     return { feasible: false, reason: "No employees are assigned to this team — nothing to rotate." };
@@ -209,6 +221,14 @@ export function deriveTeamRotation(
 
       if (shortfall) continue; // fails the HARD coverage constraint — never a ranking matter
 
+      if (maxConsecutiveOffDays !== undefined) {
+        const exceedsRestProtection = groups.some((gr) => {
+          const statusByDay = daysOrder.map((d) => ({ status: gr.offDays.includes(d) ? ("off" as const) : ("working" as const) }));
+          return maxConsecutiveOffCyclic(statusByDay) > maxConsecutiveOffDays;
+        });
+        if (exceedsRestProtection) continue; // fails the HARD max-consecutive-OFF labor protection — never a ranking matter
+      }
+
       const qualityScore = groups.reduce((sum, gr) => sum + gr.size * gr.restContinuityScore, 0) / headcount;
 
       if (!best || qualityScore > best.qualityScore) {
@@ -248,7 +268,10 @@ export function deriveTeamRotation(
 
   return {
     feasible: false,
-    reason: `No rotation using up to ${cappedMaxGroups} subteam(s) can cover this week's flight demand with ${headcount} assigned agent(s) while preserving ${normalWeeklyOffDays} OFF day(s) per person.`,
+    reason:
+      maxConsecutiveOffDays !== undefined
+        ? `No rotation using up to ${cappedMaxGroups} subteam(s) can cover this week's flight demand with ${headcount} assigned agent(s) while preserving ${normalWeeklyOffDays} OFF day(s) per person without exceeding ${maxConsecutiveOffDays} consecutive OFF day(s).`
+        : `No rotation using up to ${cappedMaxGroups} subteam(s) can cover this week's flight demand with ${headcount} assigned agent(s) while preserving ${normalWeeklyOffDays} OFF day(s) per person.`,
   };
 }
 
@@ -266,12 +289,23 @@ export class RotationInfeasibleError extends Error {
   readonly demandByDay: DemandDay[];
   readonly reason: string;
 
-  constructor(team: string, headcount: number, demandByDay: DemandDay[], reason: string) {
+  /**
+   * `normalWeeklyOffDays` is optional purely so existing call sites (and
+   * tests) that predate the labor-rule threading still compile — when
+   * omitted, the message simply doesn't name a specific OFF-day count
+   * rather than falling back to an invented or hardcoded one. Every real
+   * caller (lib/employee-generator.ts) passes the resolved value.
+   */
+  constructor(team: string, headcount: number, demandByDay: DemandDay[], reason: string, normalWeeklyOffDays?: number) {
     const affectedDays = demandByDay.filter((d) => d.requiredAgents > 0).map((d) => `${d.dayOfWeek} (needs ${d.requiredAgents})`);
+    const ruleClause =
+      normalWeeklyOffDays !== undefined
+        ? `under the confirmed ${normalWeeklyOffDays}-OFF-days labor protection`
+        : `under the confirmed labor protections`;
     super(
       `team_rotation_infeasible: "${team}" has ${headcount} assigned agent(s), which cannot cover its real weekly demand [${affectedDays.join(
         ", "
-      )}] under the confirmed 2-OFF-days rule. ${reason} This is a genuine capacity gap, not a bug — resolve it with an explicit human action (add headcount, or invoke an explicit renfort decision once that workflow exists) and regenerate.`
+      )}] ${ruleClause}. ${reason} This is a genuine capacity gap, not a bug — resolve it with an explicit human action (add headcount, or invoke an explicit renfort decision once that workflow exists) and regenerate.`
     );
     this.name = "RotationInfeasibleError";
     this.team = team;

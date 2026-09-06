@@ -3,7 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { resetDatabase } from "../lib/reset-database";
 import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { checkConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
-import { JR_NT_OFF_OFF_CYCLE, cycleStepAt } from "../lib/fixed-cycle-rotation";
+import { JR_NT_OFF_OFF_CYCLE, cycleStepAt, maxConsecutiveOffInCycle } from "../lib/fixed-cycle-rotation";
+import { CONFIG } from "../lib/seed-data";
 import { Employee } from "../lib/types";
 
 /**
@@ -83,9 +84,14 @@ describe("end-to-end seed generation (resetDatabase against a fake DB) — the r
       const offCount = e.weekly_shifts.filter((s) => s.status === "off").length;
       expect(offCount, `${e.id} (${e.assignment}) must have exactly 2 OFF days, has ${offCount}`).toBe(2);
 
-      const violation = checkConsecutiveOffCyclic(e);
-      expect(violation, `${e.id} (${e.assignment}) must never exceed 2 consecutive OFF days`).toBeNull();
+      const violation = checkConsecutiveOffCyclic(e, CONFIG.max_consecutive_off_days);
+      expect(violation, `${e.id} (${e.assignment}) must never exceed the confirmed max consecutive OFF days`).toBeNull();
     }
+
+    // --- Fixed-cycle teams' own confirmed cycle must satisfy the same
+    // resolved labor protection (architecture check, not a per-employee
+    // weekly-snapshot check — see lib/planning/validation.ts). ---
+    expect(maxConsecutiveOffInCycle(JR_NT_OFF_OFF_CYCLE)).toBeLessThanOrEqual(CONFIG.max_consecutive_off_days);
 
     // --- Transit / Leaders: must actually be on the fixed JR->NT->OFF->OFF
     // cycle, never a flat/uniform shift like AP01. ---

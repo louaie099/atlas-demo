@@ -3,6 +3,13 @@ import { getShiftTimesAs } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
 import { usesFixedCycleRotation } from "../teams";
 import { checkConsecutiveOffCyclic } from "./consecutive-off";
+// JR_NT_OFF_OFF_CYCLE is imported directly (not looked up per-team) because
+// every fixed-cycle team today shares this one confirmed cycle definition
+// (see lib/teams.ts's FIXED_CYCLE_TEAMS and lib/employee-generator.ts's
+// FIXED_CYCLE_GROUPS). If a second, distinct fixed cycle is ever confirmed
+// for a different team, this becomes a real per-team lookup then — not
+// invented speculatively now.
+import { JR_NT_OFF_OFF_CYCLE, maxConsecutiveOffInCycle } from "../fixed-cycle-rotation";
 
 // "needs_configuration" was REMOVED from this type entirely — it isn't an
 // operational planning problem, it's an internal administrative gap (no
@@ -133,23 +140,39 @@ export function checkWeeklyHoursCeiling(employee: Employee, config: Config): Pla
 }
 
 /**
- * Confirmed global rest constraint: max 2 CONSECUTIVE OFF days, evaluated
- * across week boundaries (see lib/planning/consecutive-off.ts). A team on
- * a confirmed continuous FIXED CYCLE (Transit/Leaders — see
- * lib/fixed-cycle-rotation.ts) is period-4, not period-7: wrapping their
- * single displayed week onto itself would misrepresent their real
- * continuous schedule, so they're validated directly against the cycle
- * definition instead (guaranteed <= 2 by construction, exercised by
- * dedicated tests) and skipped here.
+ * Confirmed labor-rule constraint: max CONSECUTIVE OFF days (resolved via
+ * config.max_consecutive_off_days — see lib/labor-rules.ts), evaluated
+ * across week boundaries (see lib/planning/consecutive-off.ts).
+ *
+ * A team on a confirmed continuous FIXED CYCLE (Transit/Leaders — see
+ * lib/fixed-cycle-rotation.ts) is period-4, not period-7, so wrapping
+ * their single displayed Monday-Sunday snapshot onto itself would
+ * misrepresent their real continuous schedule. They are still subject to
+ * the SAME resolved labor protection, though — not skipped outright: the
+ * real continuous cycle's own maxConsecutiveOffInCycle is validated
+ * against config.max_consecutive_off_days instead of the weekly snapshot.
+ * The rotation policy (the JR->NT->OFF->OFF sequence itself) stays
+ * entirely in lib/fixed-cycle-rotation.ts — this only checks that the
+ * cycle SATISFIES the labor rule, never redefines or overrides it.
  */
-export function checkConsecutiveOff(employee: Employee): PlanIssue | null {
-  if (usesFixedCycleRotation(employee.assignment)) return null;
-  const violation = checkConsecutiveOffCyclic(employee);
+export function checkConsecutiveOff(employee: Employee, config: Config): PlanIssue | null {
+  if (usesFixedCycleRotation(employee.assignment)) {
+    const cycleMax = maxConsecutiveOffInCycle(JR_NT_OFF_OFF_CYCLE);
+    if (cycleMax > config.max_consecutive_off_days) {
+      return {
+        type: "consecutive_off_violation",
+        employeeId: employee.id,
+        description: `${employee.name}: the ${employee.assignment} fixed cycle has ${cycleMax} consecutive OFF days in its continuous rotation — above the confirmed maximum of ${config.max_consecutive_off_days}.`,
+      };
+    }
+    return null;
+  }
+  const violation = checkConsecutiveOffCyclic(employee, config.max_consecutive_off_days);
   if (!violation) return null;
   return {
     type: "consecutive_off_violation",
     employeeId: employee.id,
-    description: `${employee.name}: ${violation.maxConsecutiveOffDays} consecutive OFF days (evaluated across the week boundary) — above the confirmed maximum of 2.`,
+    description: `${employee.name}: ${violation.maxConsecutiveOffDays} consecutive OFF days (evaluated across the week boundary) — above the confirmed maximum of ${config.max_consecutive_off_days}.`,
   };
 }
 
@@ -189,7 +212,7 @@ export function validateWeeklyPlan(
     issues.push(...checkRestBetweenDays(employee, daysOrder, config));
     const hoursIssue = checkWeeklyHoursCeiling(employee, config);
     if (hoursIssue) issues.push(hoursIssue);
-    const consecutiveOffIssue = checkConsecutiveOff(employee);
+    const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);
   }
 

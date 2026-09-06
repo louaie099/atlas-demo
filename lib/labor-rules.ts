@@ -53,6 +53,14 @@ export interface LaborRules {
   // per employee yet (that's future, explicitly out of scope for this
   // milestone); it exists here only so the rule is representable.
   renfortWeeklyOffDays: RuleValue<number>;
+  // The confirmed rule: an employee must never have more than this many
+  // CONSECUTIVE OFF days, evaluated across week boundaries (never a
+  // single Monday-Sunday snapshot in isolation). This is a HUMAN-
+  // PROTECTION constraint (how much rest is acceptable), not a rotation
+  // policy — a fixed-cycle team's own sequence (see
+  // lib/fixed-cycle-rotation.ts) is validated AGAINST this value, but the
+  // sequence itself lives in the rotation engine, never here.
+  maxConsecutiveOffDays: RuleValue<number>;
   // "unconfirmed" is a real, literal state — never replaced with a guessed
   // number. Code that reads this must treat "unconfirmed" as "do not
   // enforce, do not use to drive generation," not as a missing value to
@@ -72,8 +80,13 @@ export interface LaborRules {
  * operative rest constraint (rest protection has to mean something even
  * before a real number is confirmed), it's just honestly labeled.
  *
- * normalWeeklyOffDays (2) and renfortWeeklyOffDays (1) ARE confirmed —
- * stated explicitly as the real rule.
+ * normalWeeklyOffDays (2), renfortWeeklyOffDays (1), and
+ * maxConsecutiveOffDays (2) ARE confirmed — stated explicitly as the real
+ * rules. maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
+ * consecutive-OFF check and the hard feasibility gate the Rotation
+ * Feasibility Engine applies to candidate rotations (see
+ * lib/rotation-feasibility.ts) — one resolved number, one source of truth,
+ * never a value re-declared at either call site.
  *
  * weeklyHoursCeiling stays "unconfirmed" — the old 40h prototype value is
  * deliberately NOT carried forward as a number. It must never again drive
@@ -89,6 +102,7 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     minimumRestHours: { value: 10, source: "unconfirmed_prototype" },
     normalWeeklyOffDays: { value: 2, source: "confirmed_management_policy" },
     renfortWeeklyOffDays: { value: 1, source: "confirmed_management_policy" },
+    maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
     weeklyHoursCeiling: { value: "unconfirmed", source: "unconfirmed_prototype" },
   },
 ];
@@ -100,6 +114,8 @@ export interface ResolvedLaborRules {
   normalWeeklyOffDaysSource: LaborRuleSource;
   renfortWeeklyOffDays: number;
   renfortWeeklyOffDaysSource: LaborRuleSource;
+  maxConsecutiveOffDays: number;
+  maxConsecutiveOffDaysSource: LaborRuleSource;
   weeklyHoursCeiling: number | "unconfirmed";
   weeklyHoursCeilingSource: LaborRuleSource;
 }
@@ -156,6 +172,8 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     normalWeeklyOffDaysSource: rule.normalWeeklyOffDays.source,
     renfortWeeklyOffDays: rule.renfortWeeklyOffDays.value,
     renfortWeeklyOffDaysSource: rule.renfortWeeklyOffDays.source,
+    maxConsecutiveOffDays: rule.maxConsecutiveOffDays.value,
+    maxConsecutiveOffDaysSource: rule.maxConsecutiveOffDays.source,
     weeklyHoursCeiling: rule.weeklyHoursCeiling.value,
     weeklyHoursCeilingSource: rule.weeklyHoursCeiling.source,
   };
