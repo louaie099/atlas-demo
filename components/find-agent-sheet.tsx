@@ -16,6 +16,7 @@ export function FindAgentSheet({
 }) {
   const [candidates, setCandidates] = useState<CandidateResult[] | null>(null);
   const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   function loadCandidates() {
     fetch(`/api/candidates/${requirementId}`)
@@ -25,16 +26,33 @@ export function FindAgentSheet({
 
   useEffect(loadCandidates, [requirementId]);
 
+  /**
+   * The Assign click is only "done" once the server has confirmed the
+   * duty was actually persisted — a failed request (already full,
+   * no-longer-eligible, overlapping duty, or a server error) must surface
+   * a concrete reason and leave the requirement's coverage untouched,
+   * never silently do nothing and never optimistically update local
+   * state as if it had succeeded.
+   */
   async function handleAssign(employeeId: string) {
     setAssigningId(employeeId);
+    setError(null);
     try {
-      await fetch("/api/assign", {
+      const res = await fetch("/api/assign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ staffingRequirementId: requirementId, employeeId }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error ?? "Assignment failed — please try again.");
+        loadCandidates(); // the candidate list may itself be stale (e.g. requirement just filled)
+        return;
+      }
       onAssigned();
       loadCandidates();
+    } catch {
+      setError("Could not reach the server — the assignment was not made. Please try again.");
     } finally {
       setAssigningId(null);
     }
@@ -50,6 +68,10 @@ export function FindAgentSheet({
             Close
           </Button>
         </div>
+
+        {error && (
+          <p className="text-sm text-bad-700 bg-bad-50 border border-bad-500/30 rounded-lg px-3 py-2">{error}</p>
+        )}
 
         {candidates === null && <p className="text-sm text-muted">Evaluating candidates…</p>}
         {candidates?.length === 0 && <p className="text-sm text-muted">No qualified candidates found.</p>}

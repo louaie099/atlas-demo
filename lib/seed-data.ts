@@ -4,7 +4,7 @@ import { generateWeeklyFlights } from "./flight-generator";
 import { getShiftTimesAs, buildUniformWeeklySchedule } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
-import { buildStaggeredOffDays, restHoursBetween } from "./roster-generation";
+import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
 
@@ -199,32 +199,35 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
 // the flat shift_start/shift_end fields say, so nothing about today's
 // single-day behavior is affected.
 //
-// Previously included a Sunday JR01 shift, which — combined with 3x MT01
-// and 2x AP01 — totaled 57.5h/week, itself a weekly-hours-ceiling
-// violation this same iteration is meant to fix elsewhere. Dropped to 4
-// working days (3x MT01 + 1x AP01 = 36h) while keeping the day-to-day
-// shift-code variation the comment above is about.
+// CORRECTED: this pattern previously had THREE OFF days (Thursday,
+// Saturday, Sunday) — an undocumented, unapproved exception to the
+// confirmed normalWeeklyOffDays=2 rule that a General T1 Pool employee
+// (a normal, non-fixed-cycle, non-renfort team) should never carry. Fixed
+// to exactly 2 OFF days (Thursday, Sunday) while still keeping the
+// day-to-day shift-code variety (MT01/AP01) this example exists to
+// demonstrate. Rest between every consecutive pair of working days here
+// is checked to clear the 10h minimum (Friday MT01 14:45 -> Saturday AP01
+// 13:45 is 23h; every other transition is either same-code or follows an
+// OFF day).
 const ROTATING_SHIFT_PATTERN_A: { day: string; code: string | null }[] = [
   { day: "Monday", code: "MT01" },
   { day: "Tuesday", code: "MT01" },
   { day: "Wednesday", code: "MT01" },
   { day: "Thursday", code: "OFF" },
-  { day: "Friday", code: "AP01" },
-  { day: "Saturday", code: "OFF" },
+  { day: "Friday", code: "MT01" },
+  { day: "Saturday", code: "AP01" },
   { day: "Sunday", code: "OFF" },
 ];
 
 // LEGACY DEMO DATA — NOT engine output. Amine Sqalli's pattern below
 // (ROTATING_SHIFT_PATTERN_A) is a hand-authored example predating the
 // labor-rule/Rotation Feasibility Engine work, kept only to prove daily
-// roster entries genuinely vary day-to-day. Its 3-OFF-day pattern (see
-// the off_days comment below) must NOT be read as an ATLAS-generated
-// normal planning result, and must NOT be used as a template or
-// precedent when reasoning about real rotation output — every other
-// employee's off_days in this file is produced by lib/labor-rules.ts +
-// lib/rotation-feasibility.ts (foreign-company groups) or the confirmed
-// flat 2-OFF-days rule (everyone else). This one hardcoded exception
-// stands alone.
+// roster entries genuinely vary day-to-day. It now carries exactly 2 OFF
+// days, same as every other normal (non-fixed-cycle, non-renfort)
+// employee — see the correction note above. Every other employee's
+// off_days in this file is produced by lib/labor-rules.ts +
+// lib/rotation-feasibility.ts (foreign-company groups), the fixed JR/NT
+// cycle (Transit/Leaders), or this same confirmed flat 2-OFF-days rule.
 export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
   {
     id: "rotation-example-gate",
@@ -236,19 +239,11 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     rest_before_shift_hours: 11,
     weekly_hours: 24,
     is_duty_officer: false,
-    // Corrected: off_days previously said ["Thursday"] alone (1 day), but
-    // ROTATING_SHIFT_PATTERN_A above actually has THREE OFF days
-    // (Thursday, Saturday, Sunday) — the metadata field was simply wrong,
-    // not a deliberate scenario. off_days must describe the real pattern
-    // truthfully; a false "1 OFF day" reading here was previously
-    // mistaken for an implicit/renfort-style exception, which it was
-    // never intended to represent. No renfort has been invoked for this
-    // employee or anyone else — this is a pre-existing hand-authored
-    // rotation-variety example unrelated to the labor-rule/rotation
-    // engine, and its 3-OFF pattern is a separate, pre-existing question
-    // (not one this correction resolves) from the confirmed
-    // 2-OFF/renfort-1-OFF rule.
-    off_days: ["Thursday", "Saturday", "Sunday"],
+    // off_days now truthfully matches ROTATING_SHIFT_PATTERN_A above:
+    // exactly 2 OFF days (Thursday, Sunday), the same confirmed normal
+    // rule every other non-fixed-cycle employee follows. No renfort
+    // invoked for this employee or anyone else.
+    off_days: ["Thursday", "Sunday"],
     foreign_company_authorizations: [],
     active: true,
   },
@@ -256,6 +251,10 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
 
 // AT201 and AT535 are protected — hand-authored, exact values depended on
 // by 02-scenario-script.md and the test suite. Never touched by generation.
+// Their seat_capacity/booked_passengers are likewise hand-set synthetic
+// demo figures (same caveat as lib/flight-generator.ts's generated
+// flights) — not real booking data, kept in range with the same
+// normal/elevated load-factor bands the generator uses.
 export const SCRIPTED_FLIGHTS: Flight[] = [
   {
     id: "at201",
@@ -362,7 +361,7 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
       continue;
     }
 
-    const plan = planForeignCompanyDay(
+    const restAwarePlan = planForeignCompanyDay(
       employee.assignment,
       entry.day_of_week,
       FLIGHTS,
@@ -370,36 +369,46 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
       CONFIG.minimum_rest_hours
     );
 
-    if (plan) {
-      if (plan.shiftCode) {
-        weekly_shifts.push({ ...entry, shift_code: plan.shiftCode, status: "working" });
-        prevShiftEnd = getShiftTimesAs(plan.shiftCode).shift_end;
+    if (restAwarePlan) {
+      if (restAwarePlan.shiftCode) {
+        weekly_shifts.push({ ...entry, shift_code: restAwarePlan.shiftCode, status: "working" });
+        prevShiftEnd = getShiftTimesAs(restAwarePlan.shiftCode).shift_end;
       } else {
         // A real company flight exists today, but no catalog shift both
         // covers the protected window and leaves this employee rested
-        // since yesterday's actual shift. Never force an illegal roster
-        // to hit the commitment — this is a genuine coverage problem
-        // (this employee doesn't work today), not an invented one.
-        weekly_shifts.push({ ...entry, shift_code: null, status: "off" });
-        prevShiftEnd = null;
+        // since yesterday's actual shift. CORRECTED: this used to force
+        // the day to OFF — silently mutating the employee's contractual
+        // pattern into an extra rest day just to make generation
+        // "succeed" (the exact anti-pattern flagged as the "Air France
+        // issue"). Instead, fall back to the coverage-only shift (rest
+        // ignored) so the employee is genuinely scheduled to cover the
+        // company's flight, and let the existing week-level rest check
+        // (checkRestBetweenDays, lib/planning/validation.ts) surface the
+        // real conflict as a rest_violation Plan Warning — a real,
+        // visible planning conflict for a human to resolve, never masked
+        // as invented rest.
+        const coverageOnlyPlan = planForeignCompanyDay(employee.assignment, entry.day_of_week, FLIGHTS);
+        if (coverageOnlyPlan?.shiftCode) {
+          weekly_shifts.push({ ...entry, shift_code: coverageOnlyPlan.shiftCode, status: "working" });
+          prevShiftEnd = getShiftTimesAs(coverageOnlyPlan.shiftCode).shift_end;
+        } else {
+          // No catalog shift covers the protected window at all, rest
+          // aside — a genuine coverage gap (no shift exists, not "no
+          // rested shift exists"), so OFF is the honest state here.
+          weekly_shifts.push({ ...entry, shift_code: null, status: "off" });
+          prevShiftEnd = null;
+        }
       }
       continue;
     }
 
     // No company flight today — the employee's existing (baseline) shift
-    // applies, but it's still subject to the same rest rule: a normal,
-    // unprotected working day is never worth generating an illegal
-    // roster over either.
-    if (
-      entry.shift_code &&
-      prevShiftEnd != null &&
-      restHoursBetween(prevShiftEnd, getShiftTimesAs(entry.shift_code).shift_start) < CONFIG.minimum_rest_hours
-    ) {
-      weekly_shifts.push({ ...entry, shift_code: null, status: "off" });
-      prevShiftEnd = null;
-      continue;
-    }
-
+    // applies. CORRECTED: this branch used to also silently convert the
+    // day to OFF when rest since yesterday's actual shift fell short —
+    // same anti-pattern as above (mutating a contractual working day into
+    // invented rest). The baseline shift is now kept as-is; any real rest
+    // shortfall is left to surface as a rest_violation Plan Warning via
+    // checkRestBetweenDays, exactly like every other employee's schedule.
     weekly_shifts.push(entry);
     prevShiftEnd = entry.shift_code ? getShiftTimesAs(entry.shift_code).shift_end : null;
   }
@@ -451,8 +460,25 @@ export const EMPLOYEES: Employee[] = [
 // represented as a count only (not individually named — not candidates).
 export const AT535_BASELINE_ALREADY_STAFFED = 4;
 
-// AT201's two initially-assigned Boarding agents.
-export const INITIAL_AT201_ASSIGNEES = ["sara-bennis", "youssef-el-amrani"];
+// AT201's initially-assigned Boarding agent.
+//
+// CORRECTED: this used to list TWO employees (Sara Bennis AND Youssef El
+// Amrani) both confirmed against AT201's single Boarding slot — a direct,
+// hardcoded violation of the headcount invariant (Boarding total_requirement
+// is 1 for a standard aircraft to Europe/Schengen), predating the Weekly
+// Planning overhaul's multi-role requirement model. Sara Bennis alone now
+// fills Boarding 1/1; see INITIAL_AT201_PROFILING_ASSIGNEE below for
+// Youssef, moved to Profiling instead of being double-booked onto an
+// already-full Boarding requirement.
+export const INITIAL_AT201_ASSIGNEES = ["sara-bennis"];
+
+// AT201's initially-assigned Profiling agent — previously incorrectly also
+// held a confirmed Boarding assignment on the same flight (an overlap-
+// invariant violation: Boarding and Profiling windows are the same
+// protected boarding window, so one employee cannot hold both). Youssef is
+// a qualified Profiling candidate (confirmed via the scoring engine), so
+// this is a real, valid single confirmed duty, not a fabricated one.
+export const INITIAL_AT201_PROFILING_ASSIGNEE = "youssef-el-amrani";
 
 // Nadia's pre-planned duty that creates the live-ops conflict once AT201 is delayed.
 export const INITIAL_PLANNED_DUTY = {

@@ -3,8 +3,8 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CONFIG } from "@/lib/seed-data";
-import { getEmployeeForeignCommitments } from "@/lib/foreign-company-window";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
+import { computeBusyWindowsForDay } from "@/lib/planning/duty-generation";
 import { Employee, Assignment, Flight, StaffingRequirement } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -66,22 +66,20 @@ export async function GET(
 
   const window: TimeWindow = getRequirementWindow(requirement, targetFlight);
 
-  // For each candidate, compute their real protected foreign-company
-  // commitments on THIS SPECIFIC DATE (the target flight's day) — never
-  // a blanket exclusion based on persistent company assignment alone.
-  const occupiedWindows: Record<string, TimeWindow[]> = {};
-  for (const employee of candidatePool) {
-    const commitments = getEmployeeForeignCommitments(
-      employee.id,
-      allAssignments as Assignment[],
-      allRequirements as StaffingRequirement[],
-      allFlights as Flight[]
-    ).filter((c) => c.dayOfWeek === targetFlight.day_of_week);
-
-    if (commitments.length > 0) {
-      occupiedWindows[employee.id] = commitments.map((c) => c.window);
-    }
-  }
+  // Every window this specific date's already-persisted Assignments make
+  // an employee unavailable for — foreign commitments AND every other RAM/
+  // company_config duty (Gate, Boarding, Profiling, Mesure alike). Shared
+  // with duty-generation.ts and the Assign API's own re-validation so all
+  // three can never disagree about who's actually free (this is the fix
+  // for "Find Agent recommends someone already on an overlapping duty",
+  // e.g. Sara Bennis appearing eligible for both Gate and Boarding).
+  const occupiedWindows = computeBusyWindowsForDay(
+    targetFlight.day_of_week,
+    allAssignments as Assignment[],
+    allRequirements as StaffingRequirement[],
+    allFlights as Flight[],
+    candidatePool
+  );
 
   // Same rule duty-generation.ts uses: a company_config requirement is
   // filled by real company authorization, not a flight-task skill.

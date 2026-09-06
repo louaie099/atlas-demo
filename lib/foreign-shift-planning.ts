@@ -1,4 +1,4 @@
-import { Flight } from "./types";
+import { Employee, Flight, StaffingRequirement } from "./types";
 import { SHIFT_CODES } from "./shift-templates";
 import { computeForeignCompanyProtectedWindow } from "./foreign-company-window";
 import { restHoursBetween } from "./roster-generation";
@@ -140,4 +140,75 @@ export function planForeignCompanyDay(
   const shiftCode = selectCompatibleShiftCode(combinedWindow.start, combinedWindow.end, adjacentShiftEnd, minimumRestHours);
 
   return { flights: dayFlights, windows, combinedWindow, shiftCode };
+}
+
+export interface ForeignCommitmentAssignment {
+  id: string;
+  staffing_requirement_id: string;
+  employee_id: string;
+}
+
+/**
+ * Builds the real duty Assignment rows for every configured foreign
+ * company's flights across the week — enforcing two invariants that a
+ * previous version of this logic violated:
+ *
+ * 1. HEADCOUNT: never more than requirement.total_requirement distinct
+ *    employees per (flight, requirement) — company team membership or
+ *    authorization is NOT the same as being assigned to a specific
+ *    flight. Only the number of employees the requirement actually needs
+ *    is selected from the pool of employees genuinely working that day
+ *    with a shift covering the flight's protected window; every other
+ *    company employee keeps their normal RAM Handling shift that day
+ *    without holding a duty on this flight.
+ * 2. NO DOUBLE-BOOKING: an employee selected for one of a company's
+ *    same-day flights is removed from that day's available pool before
+ *    the next same-day flight (if any) is considered, so nobody can be
+ *    assigned to two overlapping company flights on one day.
+ *
+ * Deterministic: employees are selected in the order they appear in
+ * `employees` (never randomized), so Reset Demo always reproduces the
+ * exact same scenario.
+ */
+export function buildForeignCommitmentAssignments(
+  employees: Employee[],
+  flights: Flight[],
+  requirements: StaffingRequirement[],
+  daysOrder: string[],
+  configuredCompanies: string[]
+): ForeignCommitmentAssignment[] {
+  const foreignAssignmentEmployees = employees.filter((e) => configuredCompanies.includes(e.assignment));
+  const assignments: ForeignCommitmentAssignment[] = [];
+
+  for (const day of daysOrder) {
+    for (const company of configuredCompanies) {
+      const plan = planForeignCompanyDay(company, day, flights);
+      if (!plan || !plan.shiftCode) continue; // no flight that day, or no compatible shift — no commitment to record
+
+      let availablePool = foreignAssignmentEmployees.filter((e) => {
+        if (e.assignment !== company) return false;
+        const dayEntry = e.weekly_shifts.find((s) => s.day_of_week === day);
+        return dayEntry?.status !== "off";
+      });
+
+      for (const { flight } of plan.windows) {
+        const requirement = requirements.find((r) => r.flight_id === flight.id && !r.needs_configuration);
+        if (!requirement) continue;
+
+        const selected = availablePool.slice(0, requirement.total_requirement);
+        for (const emp of selected) {
+          assignments.push({
+            id: `assign-foreign-${emp.id}-${flight.id}`,
+            staffing_requirement_id: requirement.id,
+            employee_id: emp.id,
+          });
+        }
+
+        const selectedIds = new Set(selected.map((e) => e.id));
+        availablePool = availablePool.filter((e) => !selectedIds.has(e.id));
+      }
+    }
+  }
+
+  return assignments;
 }

@@ -4,11 +4,12 @@ import {
   EMPLOYEES,
   FLIGHTS,
   INITIAL_AT201_ASSIGNEES,
+  INITIAL_AT201_PROFILING_ASSIGNEE,
   INITIAL_PLANNED_DUTY,
   DAYS_WITH_DATA,
 } from "./seed-data";
 import { CONFIGURED_COMPANIES } from "./company-config";
-import { planForeignCompanyDay } from "./foreign-shift-planning";
+import { buildForeignCommitmentAssignments } from "./foreign-shift-planning";
 import { computeWeeklyStaffingRequirements } from "./planning/weekly-requirements";
 
 /**
@@ -45,48 +46,42 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   const at201ProfilingRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Profiling")!;
   const at535Requirement = requirements.find((r) => r.flight_id === "at535" && r.role === "Check-in")!;
 
-  const initialAssignments = INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
-    id: `assign-at201-${i}`,
-    staffing_requirement_id: at201BoardingRequirement.id,
-    employee_id: employeeId,
-  }));
+  // CORRECTED — root cause of the "AT201 Boarding 2/1" over-assignment
+  // bug: two employees used to be hardcoded as confirmed against this
+  // single-headcount Boarding requirement, and one of them (Youssef) also
+  // qualified for Profiling on the same flight — the same protected
+  // window, so holding both was an overlap-invariant violation too.
+  // INITIAL_AT201_ASSIGNEES now has exactly one entry (Boarding
+  // total_requirement is 1); Youssef is confirmed for Profiling instead —
+  // a real, distinct duty, never a second Boarding slot.
+  const initialAssignments = [
+    ...INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
+      id: `assign-at201-boarding-${i}`,
+      staffing_requirement_id: at201BoardingRequirement.id,
+      employee_id: employeeId,
+    })),
+    {
+      id: "assign-at201-profiling-0",
+      staffing_requirement_id: at201ProfilingRequirement.id,
+      employee_id: INITIAL_AT201_PROFILING_ASSIGNEE,
+    },
+  ];
 
-  // Employees whose current `assignment` is a foreign company get a real
-  // Assignment for EVERY flight that company actually operates on each
-  // day — derived from the flight schedule itself, never fabricated, and
-  // capable of multiple same-company flights on one date (each gets its
-  // own Assignment row, tied to its own requirement). Days with no flight
-  // for that company get no Assignment row at all — the employee simply
-  // follows their normal fallback shift that day (already reflected in
-  // seed-data.ts's applyForeignCompanyRoster).
-  const foreignAssignmentEmployees = EMPLOYEES.filter((e) => CONFIGURED_COMPANIES.includes(e.assignment));
-  const foreignCommitmentAssignments: { id: string; staffing_requirement_id: string; employee_id: string }[] = [];
-
-  for (const emp of foreignAssignmentEmployees) {
-    for (const day of DAYS_WITH_DATA) {
-      // Real bug fix: if the employee is OFF that day (per their own
-      // weekly_shifts, which seed-data.ts's applyForeignCompanyRoster
-      // already leaves untouched on OFF days), skip entirely — a day off
-      // must not be silently overridden by a fabricated company
-      // commitment. Previously this loop ignored off-status altogether.
-      const dayEntry = emp.weekly_shifts.find((s) => s.day_of_week === day);
-      if (dayEntry?.status === "off") continue;
-
-      const plan = planForeignCompanyDay(emp.assignment, day, FLIGHTS);
-      if (!plan || !plan.shiftCode) continue; // no flight that day, or no compatible shift — no commitment to record
-
-      for (const { flight } of plan.windows) {
-        const requirement = requirements.find((r) => r.flight_id === flight.id && !r.needs_configuration);
-        if (!requirement) continue;
-
-        foreignCommitmentAssignments.push({
-          id: `assign-foreign-${emp.id}-${flight.id}`,
-          staffing_requirement_id: requirement.id,
-          employee_id: emp.id,
-        });
-      }
-    }
-  }
+  // CORRECTED — root cause of the "Gulf Air 6/2", "Emirates 9/3"
+  // over-assignment bug: this used to give EVERY working company employee
+  // a real Assignment to EVERY flight that company operates that day,
+  // completely ignoring the requirement's own confirmed headcount. Now
+  // delegated to buildForeignCommitmentAssignments (lib/foreign-shift-
+  // planning.ts), which enforces the headcount and no-double-booking
+  // invariants directly — see its doc comment for the full rationale, and
+  // tests/assignment-invariants.test.ts for regression coverage.
+  const foreignCommitmentAssignments = buildForeignCommitmentAssignments(
+    EMPLOYEES,
+    FLIGHTS,
+    requirements,
+    DAYS_WITH_DATA,
+    CONFIGURED_COMPANIES
+  );
 
   const { error: assignErr } = await supabase
     .from("assignments")
@@ -115,10 +110,11 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
       step_number: 2,
       // AT201 (Europe/Schengen, standard aircraft) now has three concurrent
       // RAM requirements — Gate, Boarding, Profiling — not one merged
-      // number. The scripted assignees cover Boarding only, so describe
-      // each role's actual initial coverage honestly rather than asserting
-      // a single "gap" that may not even be true for the role they cover.
-      description: `Weekly plan validated — AT201 initial coverage: Boarding ${INITIAL_AT201_ASSIGNEES.length}/${at201BoardingRequirement.total_requirement}, Gate 0/${at201GateRequirement.total_requirement}, Profiling 0/${at201ProfilingRequirement.total_requirement} (operation rule) — Gate and Profiling remain unfilled gaps.`,
+      // number. The scripted assignees cover Boarding and Profiling; each
+      // role's actual initial coverage is described honestly, respecting
+      // each requirement's own headcount, rather than asserting a single
+      // "gap" that may not even be true for the role they cover.
+      description: `Weekly plan validated — AT201 initial coverage: Boarding ${INITIAL_AT201_ASSIGNEES.length}/${at201BoardingRequirement.total_requirement}, Gate 0/${at201GateRequirement.total_requirement}, Profiling 1/${at201ProfilingRequirement.total_requirement} — Gate remains an unfilled gap.`,
     },
   ];
 

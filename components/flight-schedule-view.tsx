@@ -42,10 +42,30 @@ function FlightScheduleRow({ flight, onClick }: { flight: Flight; onClick: () =>
   );
 }
 
-function loadFactorLabel(flight: Flight): string | null {
-  if (flight.booked_passengers === null || flight.seat_capacity === null) return null;
-  const pct = Math.round((flight.booked_passengers / flight.seat_capacity) * 100);
-  return `${flight.booked_passengers}/${flight.seat_capacity} (${pct}%)`;
+/**
+ * Passenger load display. Deliberately defensive: passenger data is
+ * currently synthetic demo data (see lib/flight-generator.ts) but this
+ * field is also the intended landing spot for real imported/API figures
+ * later, so this must never render "undefined", "NaN", or "0/0" no matter
+ * where the numbers came from — genuinely missing or malformed data always
+ * reads as the neutral "Not available" instead of a broken calculation.
+ */
+function loadFactorLabel(flight: Flight): string {
+  const { booked_passengers, seat_capacity } = flight;
+  if (
+    booked_passengers === null ||
+    booked_passengers === undefined ||
+    seat_capacity === null ||
+    seat_capacity === undefined ||
+    !Number.isFinite(booked_passengers) ||
+    !Number.isFinite(seat_capacity) ||
+    seat_capacity <= 0 ||
+    booked_passengers < 0
+  ) {
+    return "Not available";
+  }
+  const pct = Math.round((booked_passengers / seat_capacity) * 100);
+  return `${booked_passengers} / ${seat_capacity} passengers · ${pct}%`;
 }
 
 function FlightDetailField({ label, value }: { label: string; value: string | null }) {

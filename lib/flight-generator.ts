@@ -32,31 +32,85 @@ interface FlightTemplate {
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 /**
- * Seat capacity by aircraft type — factual aircraft data, not a staffing
- * input by itself (see Flight.seat_capacity's doc comment in lib/types.ts:
- * passenger load is architecture-only, made available for future planning
- * logic, not consumed by any staffing rule yet). An aircraft type absent
- * here gets a null capacity rather than a guessed figure.
+ * SYNTHETIC DEMO AIRCRAFT-CAPACITY CONFIGURATION.
+ *
+ * These are illustrative, presentation-only seat counts used to generate a
+ * believable demo passenger load. They are NOT a claim about the real seat
+ * configuration of any specific airline's actual aircraft (a given operator
+ * may configure the same airframe with a different seat count entirely).
+ * This table exists so capacity numbers live in exactly one centralized
+ * place — no UI component or other module should ever hard-code a seat
+ * count itself; they all read Flight.seat_capacity, which is populated from
+ * here at generation time.
+ *
+ * An aircraft type absent here gets a null capacity rather than a guessed
+ * figure — see getSyntheticSeatCapacity below.
  */
-const AIRCRAFT_SEAT_CAPACITY: Record<string, number> = {
+const SYNTHETIC_DEMO_AIRCRAFT_CAPACITY: Record<string, number> = {
   "Boeing 737-800": 189,
   "Airbus A320": 180,
   "Airbus A321": 220,
   "Airbus A350": 325,
   "Boeing 777-300ER": 396,
+  "Boeing 777-200ER": 346,
   "Boeing 787-9": 296,
+  "Boeing 787-8": 242,
+  "Boeing 787-10": 330,
 };
 
 /**
- * A deterministic, illustrative booked-passenger figure derived from the
- * template's own booking_pressure — never a random number, so re-running
- * generation always produces the same demo data. This is demo data, same
- * caveat as the rest of this file's TEMPLATES: not real booking figures.
+ * Looks up the synthetic demo capacity for an aircraft type. Centralizing
+ * the lookup (rather than every caller reading the map directly) means a
+ * future real/imported capacity source can replace this one function
+ * without touching any generation or UI call site.
  */
-function bookedPassengersFor(capacity: number | null, bookingPressure: "normal" | "elevated"): number | null {
+function getSyntheticSeatCapacity(aircraft: string): number | null {
+  return SYNTHETIC_DEMO_AIRCRAFT_CAPACITY[aircraft] ?? null;
+}
+
+/**
+ * A small deterministic hash of a string, used below to derive believable
+ * per-flight variation without any randomness (Math.random would break the
+ * "Reset Demo always reproduces the same scenario" requirement).
+ */
+function stableHash(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+/**
+ * A deterministic, illustrative booked-passenger figure for one flight
+ * instance (a specific flight number on a specific day) — never a random
+ * number, so Reset Demo always reproduces the exact same presentation
+ * scenario. This is synthetic demo data, same caveat as the rest of this
+ * file's TEMPLATES: not real booking figures, and not read by any staffing
+ * rule (see Flight.seat_capacity's doc comment in lib/types.ts).
+ *
+ * booking_pressure sets the center of the load-factor range (an "elevated"
+ * flight trends fuller), and a per-flight-instance hash spreads individual
+ * flights across that range so the demo shows real variety — moderate,
+ * busy, and nearly-full flights — rather than every flight landing on the
+ * exact same percentage.
+ */
+function syntheticBookedPassengersFor(
+  flightInstanceKey: string,
+  capacity: number | null,
+  bookingPressure: "normal" | "elevated"
+): number | null {
   if (capacity === null) return null;
-  const loadFactor = bookingPressure === "elevated" ? 0.96 : 0.82;
-  return Math.round(capacity * loadFactor);
+
+  // normal centers around ~72-88% load; elevated around ~90-99%.
+  const [minFactor, maxFactor] = bookingPressure === "elevated" ? [0.9, 0.99] : [0.72, 0.88];
+  const spread = stableHash(flightInstanceKey) % 1000; // 0..999, deterministic per flight instance
+  const loadFactor = minFactor + (spread / 999) * (maxFactor - minFactor);
+
+  const booked = Math.round(capacity * loadFactor);
+  // Defensive clamp — booked passengers must always be a real, non-negative
+  // count no greater than the aircraft's own capacity.
+  return Math.min(Math.max(booked, 0), capacity);
 }
 
 const TEMPLATES: FlightTemplate[] = [
@@ -100,7 +154,7 @@ export function generateWeeklyFlights(): Flight[] {
   const flights: Flight[] = [];
 
   for (const t of TEMPLATES) {
-    const seatCapacity = AIRCRAFT_SEAT_CAPACITY[t.aircraft] ?? null;
+    const seatCapacity = getSyntheticSeatCapacity(t.aircraft);
     for (const day of t.daysOfWeek) {
       const id = `${t.flightNumber.toLowerCase()}-${day.toLowerCase()}`;
       flights.push({
@@ -131,7 +185,7 @@ export function generateWeeklyFlights(): Flight[] {
         // never hand-typed.
         destination_category: t.operatorType === "self_managed" ? null : classifyDestinationOperationally(t.destination),
         seat_capacity: seatCapacity,
-        booked_passengers: bookedPassengersFor(seatCapacity, t.bookingPressure),
+        booked_passengers: syntheticBookedPassengersFor(id, seatCapacity, t.bookingPressure),
       });
     }
   }

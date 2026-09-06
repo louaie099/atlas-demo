@@ -99,6 +99,52 @@ export function effectiveShiftCodeForDay(
  * fairness ceiling) is left for human review rather than silently
  * auto-picked, consistent with "ATLAS recommends, humans approve."
  */
+/**
+ * Every window a given day's already-persisted Assignments make an
+ * employee unavailable for — the shared overlap-exclusion input for
+ * scoreCandidates, used identically by duty-generation (draft-plan
+ * generation), the Find Agent candidates API, and the Assign API's own
+ * server-side re-validation, so the three can never drift apart.
+ *
+ * Two sources, both included:
+ *  1. Foreign-company commitments (getEmployeeForeignCommitments) — the
+ *     WIDER protected window (4h30 before departure), deliberately
+ *     broader than the requirement's own window.
+ *  2. EVERY other existing Assignment for the day, RAM or company_config
+ *     alike, using that requirement's own window. This is what prevents
+ *     an employee already confirmed for one requirement (Gate, say) from
+ *     also being recommended/assignable to a different, overlapping
+ *     requirement (Boarding) on the same or another flight that day —
+ *     the "Sara Bennis on both Gate and Boarding" bug.
+ */
+export function computeBusyWindowsForDay(
+  dayOfWeek: string,
+  existingAssignments: Assignment[],
+  requirements: StaffingRequirement[],
+  flights: Flight[],
+  allEmployees: Employee[]
+): Record<string, TimeWindow[]> {
+  const busyWindows: Record<string, TimeWindow[]> = {};
+
+  for (const employee of allEmployees) {
+    const commitments = getEmployeeForeignCommitments(employee.id, existingAssignments, requirements, flights).filter(
+      (c) => c.dayOfWeek === dayOfWeek
+    );
+    if (commitments.length > 0) busyWindows[employee.id] = commitments.map((c) => c.window);
+  }
+
+  for (const assignment of existingAssignments) {
+    const requirement = requirements.find((r) => r.id === assignment.staffing_requirement_id);
+    if (!requirement) continue;
+    const flight = flights.find((f) => f.id === requirement.flight_id);
+    if (!flight || flight.day_of_week !== dayOfWeek) continue;
+    const window = getRequirementWindow(requirement, flight);
+    busyWindows[assignment.employee_id] = [...(busyWindows[assignment.employee_id] ?? []), window];
+  }
+
+  return busyWindows;
+}
+
 export function generateDutiesForDay(
   dayOfWeek: string,
   requirements: StaffingRequirement[],
@@ -114,15 +160,7 @@ export function generateDutiesForDay(
     .map((r) => ({ requirement: r, flight: flights.find((f) => f.id === r.flight_id)! }))
     .sort((a, b) => a.flight.scheduled_departure.localeCompare(b.flight.scheduled_departure));
 
-  const busyWindows: Record<string, TimeWindow[]> = {};
-  // Pre-populate with real foreign commitments for the day — these are
-  // never up for negotiation by duty generation.
-  for (const employee of allEmployees) {
-    const commitments = getEmployeeForeignCommitments(employee.id, existingAssignments, requirements, flights).filter(
-      (c) => c.dayOfWeek === dayOfWeek
-    );
-    if (commitments.length > 0) busyWindows[employee.id] = commitments.map((c) => c.window);
-  }
+  const busyWindows = computeBusyWindowsForDay(dayOfWeek, existingAssignments, requirements, flights, allEmployees);
 
   const duties: GeneratedDuty[] = [];
   const unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
