@@ -1,4 +1,4 @@
-import { Employee, Flight, StaffingRequirement, Assignment, Config } from "../types";
+import { Employee, Flight, StaffingRequirement, Assignment, Config, WeeklyPlanRosterEntry } from "../types";
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
@@ -81,6 +81,80 @@ export function effectiveShiftCodeForDay(
   }
 
   return existing?.shift_code ?? null;
+}
+
+/**
+ * Resolves ONE employee's plan-scoped roster entry for one day -- the
+ * single function that produces what becomes a persisted
+ * WeeklyPlanRosterEntry row (see lib/types.ts), for every employee group
+ * alike (fixed-cycle, foreign-committed, flexible General T1 Pool). Same
+ * effective-shift logic as effectiveShiftForDay/effectiveShiftCodeForDay
+ * above, restated here to also produce the explicit "working"/"off"
+ * status a roster row needs (those two functions return null for both
+ * "off" and "not rostered at all", which is the right behavior for
+ * candidate-pool building but not enough to persist a row).
+ *
+ * This is generation-time input resolution -- it reads Employee.weekly_shifts
+ * as the baseline/template it still legitimately is (see lib/types.ts's
+ * Employee doc comment). Once the result is persisted as a
+ * WeeklyPlanRosterEntry, THAT row -- not a re-read of Employee.weekly_shifts
+ * -- is what every later read of this plan must use.
+ */
+export function resolvePlanRosterEntry(
+  employee: Employee,
+  dayOfWeek: string,
+  generatedShifts: GeneratedShiftAssignment[]
+): { status: "working" | "off"; shift_code: string | null } {
+  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
+  if (existing?.status === "off") return { status: "off", shift_code: null };
+
+  if (isFlexibleGeneralPool(employee)) {
+    const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
+    if (generated) return { status: "working", shift_code: generated.shiftCode };
+    if (existing?.shift_code) return { status: "working", shift_code: existing.shift_code };
+    return { status: "off", shift_code: null }; // not selected for a generated shift and no baseline -- not planned to work
+  }
+
+  if (existing?.shift_code) return { status: "working", shift_code: existing.shift_code };
+  return { status: "off", shift_code: null }; // no roster entry at all for this day -- treated the same as off, matching AgentDayEntry's existing isOff semantics
+}
+
+/**
+ * Same day-effective-pool gate generation itself uses (see
+ * generateDutiesForDay below), but sourced from a PERSISTED
+ * WeeklyPlanRosterEntry set instead of live Employee.weekly_shifts +
+ * freshly-computed generated shifts. This is what the Find Agent
+ * candidates API and the Assign API's server-side re-validation must use
+ * instead of scoring raw Employee rows directly -- scoreCandidates alone
+ * only checks that an employee HAS some shift profile (non-null
+ * shift_start/shift_end), never whether they are actually working on the
+ * specific day in question. Without this gate, a human could manually
+ * assign an employee on their scheduled day off -- silently overriding a
+ * fixed labor-rule protection (e.g. max consecutive off days) that ATLAS's
+ * own generation is never allowed to violate. Excludes anyone with no
+ * roster entry for the day or a status of "off"; everyone else gets their
+ * shift_start/shift_end substituted from their persisted roster shift_code
+ * so scoreCandidates' rest/extension math reflects THIS plan's actual
+ * roster, not a stale static baseline.
+ */
+export function buildDayEffectivePoolFromRosterEntries(
+  employees: Employee[],
+  rosterEntries: WeeklyPlanRosterEntry[],
+  dayOfWeek: string
+): Employee[] {
+  const byEmployee = new Map<string, WeeklyPlanRosterEntry>();
+  for (const entry of rosterEntries) {
+    if (entry.day_of_week === dayOfWeek) byEmployee.set(entry.employee_id, entry);
+  }
+
+  return employees
+    .map((e) => {
+      const entry = byEmployee.get(e.id);
+      if (!entry || entry.status === "off" || !entry.shift_code) return null;
+      const times = getShiftTimesAs(entry.shift_code);
+      return { ...e, shift_start: times.shift_start, shift_end: times.shift_end } as Employee;
+    })
+    .filter((e): e is Employee => e !== null);
 }
 
 /**

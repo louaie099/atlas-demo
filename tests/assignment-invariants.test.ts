@@ -72,11 +72,22 @@ describe("AT201 — Boarding and Profiling no longer over-assigned or overlappin
   const existingAssignments = [
     ...INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
       id: `ab${i}`,
+      plan_id: "plan-test",
       staffing_requirement_id: boardingReq.id,
       employee_id: employeeId,
+      source: "atlas_generated" as const,
+      created_by: null,
       assigned_at: "",
     })),
-    { id: "ap0", staffing_requirement_id: profilingReq.id, employee_id: INITIAL_AT201_PROFILING_ASSIGNEE, assigned_at: "" },
+    {
+      id: "ap0",
+      plan_id: "plan-test",
+      staffing_requirement_id: profilingReq.id,
+      employee_id: INITIAL_AT201_PROFILING_ASSIGNEE,
+      source: "atlas_generated" as const,
+      created_by: null,
+      assigned_at: "",
+    },
   ];
 
   it("Boarding shows exactly 1/1, never 2/1", () => {

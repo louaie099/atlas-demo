@@ -2,10 +2,13 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates } from "@/lib/scoring";
-import { CONFIG } from "@/lib/seed-data";
+import { CURRENT_WEEK_START } from "@/lib/seed-data";
+import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
-import { computeBusyWindowsForDay } from "@/lib/planning/duty-generation";
-import { Assignment, Employee, Flight, StaffingRequirement } from "@/lib/types";
+import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
+import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
+
+const PLANNER_NAME = "Mohammed Alaoui";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +56,23 @@ export async function POST(req: Request) {
     );
   }
 
+  // A human modification only ever targets the current DRAFT plan --
+  // editing a published plan's assignments isn't exposed anywhere in this
+  // milestone (see lib/planning/weekly-plan-service.ts's publishPlan doc
+  // comment); a future operational-modification layer is what that will
+  // eventually go through.
+  const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(CURRENT_WEEK_START));
+  const plan = (planRows as WeeklyPlan[] | null)?.[0];
+  if (!plan) {
+    return NextResponse.json({ error: "No draft plan exists for this week — generate one first." }, { status: 409 });
+  }
+  if (plan.status !== "draft") {
+    return NextResponse.json(
+      { error: "This week's plan has already been published — manual assignment against a published plan is not available yet." },
+      { status: 409 }
+    );
+  }
+
   const { data: flight } = await supabase.from("flights").select("*").eq("id", requirement.flight_id).single();
   if (!flight) return NextResponse.json({ error: "Flight not found" }, { status: 404 });
 
@@ -81,21 +101,50 @@ export async function POST(req: Request) {
     );
   }
 
-  // Full eligibility re-check: authorization/skill, roster status, and no
-  // overlapping duty already held that day — the exact same rule Find
-  // Agent's own candidate list is built from, so the Assign button can
-  // never bypass candidate validation.
+  // Full eligibility re-check: authorization/skill, day-specific roster
+  // status, and no overlapping duty already held that day — the exact
+  // same rule Find Agent's own candidate list is built from, so the
+  // Assign button can never bypass candidate validation.
   const targetFlight = flight as Flight;
   const window = getRequirementWindow(requirement as StaffingRequirement, targetFlight);
+
+  // Day-effective gate, same as the Find Agent candidates API: this
+  // employee is only a real candidate if THIS plan's persisted roster has
+  // them working (not off) on this specific day. Without this, scoring
+  // the raw employee row would only check that a shift profile exists at
+  // all -- never whether it's a day they're actually off -- letting a
+  // manual assignment silently override a fixed labor-rule protection
+  // (e.g. max consecutive off days) that ATLAS's own generation is never
+  // allowed to violate.
+  const { data: rosterRows } = await supabase
+    .from("weekly_plan_roster_entries")
+    .select("*")
+    .eq("plan_id", plan.id)
+    .eq("employee_id", employeeId);
+  const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(
+    [employee as Employee],
+    (rosterRows ?? []) as WeeklyPlanRosterEntry[],
+    targetFlight.day_of_week
+  );
+
+  if (dayEffectivePool.length === 0) {
+    return NextResponse.json(
+      { error: `${employee.name} is off on ${targetFlight.day_of_week} per this plan's roster — cannot be assigned a duty that day.` },
+      { status: 409 }
+    );
+  }
+
   const occupiedWindows = computeBusyWindowsForDay(
     targetFlight.day_of_week,
     allAssignments as Assignment[],
     allRequirements as StaffingRequirement[],
     allFlights as Flight[],
-    [employee as Employee]
+    dayEffectivePool
   );
   const requiredAuthorization = requirement.source === "company_config" ? targetFlight.airline : undefined;
-  const [scored] = scoreCandidates(requirement.role, window, [employee as Employee], CONFIG, occupiedWindows, requiredAuthorization);
+  // Scored against the plan's own frozen config_snapshot, not a possibly-
+  // since-changed live CONFIG -- see lib/types.ts's WeeklyPlan doc comment.
+  const [scored] = scoreCandidates(requirement.role, window, dayEffectivePool, plan.config_snapshot, occupiedWindows, requiredAuthorization);
 
   if (!scored) {
     return NextResponse.json(
@@ -104,12 +153,34 @@ export async function POST(req: Request) {
     );
   }
 
+  const assignmentId = `assign-${plan.id}-${staffingRequirementId}-${employeeId}`;
   const { error: insertErr } = await supabase.from("assignments").insert({
-    id: `assign-${staffingRequirementId}-${employeeId}`,
+    id: assignmentId,
+    plan_id: plan.id,
     staffing_requirement_id: staffingRequirementId,
     employee_id: employeeId,
+    source: "human_modified",
+    created_by: PLANNER_NAME,
   });
   if (insertErr) return NextResponse.json({ error: insertErr.message }, { status: 500 });
+
+  // Structured modification history -- a gap fill is action "added": there
+  // is no previous_employee_id (nothing occupied this slot before), and
+  // it's tagged to the plan's CURRENT revision so a later Regenerate can
+  // unambiguously detect it (see regenerateDraftPlan's blocking check).
+  const { error: modErr } = await supabase.from("assignment_modifications").insert({
+    id: `mod-${assignmentId}`,
+    plan_id: plan.id,
+    plan_revision: plan.revision,
+    staffing_requirement_id: staffingRequirementId,
+    action: "added",
+    previous_employee_id: null,
+    new_employee_id: employeeId,
+    changed_by: PLANNER_NAME,
+    changed_at: new Date().toISOString(),
+    reason: null,
+  });
+  if (modErr) return NextResponse.json({ error: modErr.message }, { status: 500 });
 
   const coverage = existingForRequirement.length + 1;
 
@@ -124,7 +195,7 @@ export async function POST(req: Request) {
   await supabase.from("audit_log_entries").insert({
     id: `audit-${nextStep}`,
     step_number: nextStep,
-    description: `${employee.name} assigned to ${requirement.role} (${requirement.flight_id.toUpperCase()}) by Mohammed Alaoui — coverage ${coverage}/${requirement.total_requirement}`,
+    description: `${employee.name} assigned to ${requirement.role} (${requirement.flight_id.toUpperCase()}) by ${PLANNER_NAME} — coverage ${coverage}/${requirement.total_requirement}`,
   });
 
   return NextResponse.json({ status: "assigned", coverage, total: requirement.total_requirement });

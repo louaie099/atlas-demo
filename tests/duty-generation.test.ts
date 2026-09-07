@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { generateDutiesForDay } from "../lib/planning/duty-generation";
+import { generateDutiesForDay, buildDayEffectivePoolFromRosterEntries } from "../lib/planning/duty-generation";
 import { CONFIG } from "../lib/seed-data";
-import { Employee, Flight, StaffingRequirement, Assignment } from "../lib/types";
+import { Employee, Flight, StaffingRequirement, Assignment, WeeklyPlanRosterEntry } from "../lib/types";
 
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
@@ -99,7 +99,7 @@ describe("generateDutiesForDay", () => {
   it("accounts for already-existing real Assignment rows when deciding how many more are needed", () => {
     const flight = makeFlight({});
     const requirement = makeRequirement({ total_requirement: 2 });
-    const alreadyAssigned: Assignment = { id: "a1", staffing_requirement_id: "r1", employee_id: "existing-1", assigned_at: "" };
+    const alreadyAssigned: Assignment = { id: "a1", plan_id: "plan-test", staffing_requirement_id: "r1", employee_id: "existing-1", source: "atlas_generated", created_by: null, assigned_at: "" };
     const newCandidate = makeEmployee({ id: "e2" });
 
     const { duties, unfilled } = generateDutiesForDay(
@@ -140,5 +140,36 @@ describe("generateDutiesForDay", () => {
     const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("flex-1");
+  });
+});
+
+describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manual assignment (Find Agent / Assign API) must use, not just automatic generation", () => {
+  it("excludes an employee whose persisted roster entry for this day is 'off' — a fixed labor-rule protection (e.g. max consecutive off days) manual assignment must never be able to override", () => {
+    const offEmployee = makeEmployee({ id: "e1" });
+    const rosterEntries: WeeklyPlanRosterEntry[] = [
+      { id: "r1", plan_id: "plan-1", employee_id: "e1", day_of_week: "Wednesday", status: "off", shift_code: null },
+    ];
+
+    const pool = buildDayEffectivePoolFromRosterEntries([offEmployee], rosterEntries, "Wednesday");
+    expect(pool).toHaveLength(0);
+  });
+
+  it("excludes an employee with no roster entry at all for this day (e.g. no plan generated yet)", () => {
+    const employee = makeEmployee({ id: "e1" });
+    const pool = buildDayEffectivePoolFromRosterEntries([employee], [], "Wednesday");
+    expect(pool).toHaveLength(0);
+  });
+
+  it("includes a working employee, with shift_start/shift_end substituted from the PERSISTED roster's shift_code, not the employee's static baseline", () => {
+    const employee = makeEmployee({ id: "e1", shift_code: "MT01", shift_start: "05:45", shift_end: "14:45" });
+    const rosterEntries: WeeklyPlanRosterEntry[] = [
+      { id: "r1", plan_id: "plan-1", employee_id: "e1", day_of_week: "Wednesday", status: "working", shift_code: "AP01" },
+    ];
+
+    const pool = buildDayEffectivePoolFromRosterEntries([employee], rosterEntries, "Wednesday");
+    expect(pool).toHaveLength(1);
+    // AP01's real window (13:45-22:45), not the static baseline MT01 (05:45-14:45)
+    expect(pool[0].shift_start).toBe("13:45");
+    expect(pool[0].shift_end).toBe("22:45");
   });
 });

@@ -3,24 +3,39 @@ import {
   CONFIG,
   EMPLOYEES,
   FLIGHTS,
-  INITIAL_AT201_ASSIGNEES,
-  INITIAL_AT201_PROFILING_ASSIGNEE,
   INITIAL_PLANNED_DUTY,
   DAYS_WITH_DATA,
+  CURRENT_WEEK_START,
+  CURRENT_WEEK_LABEL,
 } from "./seed-data";
-import { CONFIGURED_COMPANIES } from "./company-config";
-import { buildForeignCommitmentAssignments } from "./foreign-shift-planning";
 import { computeWeeklyStaffingRequirements } from "./planning/weekly-requirements";
+import { buildDraftPlanBundle, persistDraftPlanBundle, planIdForWeek } from "./planning/weekly-plan-service";
 
 /**
- * Wipes and re-seeds every table from lib/seed-data.ts. Used by both the
- * standalone seed script and the /api/reset route, so there is exactly one
- * implementation of "what a fresh demo looks like."
+ * Wipes and re-seeds every table from lib/seed-data.ts, THEN generates and
+ * persists a fresh Draft Weekly Plan through the exact same
+ * buildDraftPlanBundle/persistDraftPlanBundle steps a normal Generate
+ * Draft API call uses (lib/planning/weekly-plan-service.ts) -- Reset Demo
+ * is demo orchestration around that one real service, never a second
+ * seed-only planning implementation. This is also why the old hand-
+ * scripted "confirm these specific employees to AT201/foreign-company
+ * flights" seeding is gone entirely: the real generator now produces (and
+ * persists) every normal assignment on its own, honoring the exact same
+ * headcount/overlap invariants tests/assignment-invariants.test.ts checks
+ * directly against the generator.
+ *
+ * Used by both the standalone seed script and the /api/reset route, so
+ * there is exactly one implementation of "what a fresh demo looks like."
  */
 export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
-  // Delete in FK-safe order.
+  // Delete in FK-safe order. New tables (assignment_modifications,
+  // weekly_plan_roster_entries, weekly_plans) are wiped alongside the
+  // existing ones -- a reset genuinely starts over, no plan survives it.
   await supabase.from("audit_log_entries").delete().neq("id", "");
+  await supabase.from("assignment_modifications").delete().neq("id", "");
   await supabase.from("assignments").delete().neq("id", "");
+  await supabase.from("weekly_plan_roster_entries").delete().neq("id", "");
+  await supabase.from("weekly_plans").delete().neq("id", "");
   await supabase.from("planned_duties").delete().neq("id", "");
   await supabase.from("staffing_requirements").delete().neq("id", "");
   await supabase.from("flights").delete().neq("id", "");
@@ -37,57 +52,6 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   const { error: reqErr } = await supabase.from("staffing_requirements").insert(requirements);
   if (reqErr) throw new Error(`Seeding staffing requirements failed: ${reqErr.message}`);
 
-  // AT201 now produces multiple concurrent requirements (Gate, Boarding,
-  // Profiling — Europe/Schengen, standard aircraft), not one — the
-  // scripted initial assignees are specifically Boarding agents, so find
-  // that role explicitly rather than the first requirement for the flight.
-  const at201BoardingRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Boarding")!;
-  const at201GateRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Gate")!;
-  const at201ProfilingRequirement = requirements.find((r) => r.flight_id === "at201" && r.role === "Profiling")!;
-  const at535Requirement = requirements.find((r) => r.flight_id === "at535" && r.role === "Check-in")!;
-
-  // CORRECTED — root cause of the "AT201 Boarding 2/1" over-assignment
-  // bug: two employees used to be hardcoded as confirmed against this
-  // single-headcount Boarding requirement, and one of them (Youssef) also
-  // qualified for Profiling on the same flight — the same protected
-  // window, so holding both was an overlap-invariant violation too.
-  // INITIAL_AT201_ASSIGNEES now has exactly one entry (Boarding
-  // total_requirement is 1); Youssef is confirmed for Profiling instead —
-  // a real, distinct duty, never a second Boarding slot.
-  const initialAssignments = [
-    ...INITIAL_AT201_ASSIGNEES.map((employeeId, i) => ({
-      id: `assign-at201-boarding-${i}`,
-      staffing_requirement_id: at201BoardingRequirement.id,
-      employee_id: employeeId,
-    })),
-    {
-      id: "assign-at201-profiling-0",
-      staffing_requirement_id: at201ProfilingRequirement.id,
-      employee_id: INITIAL_AT201_PROFILING_ASSIGNEE,
-    },
-  ];
-
-  // CORRECTED — root cause of the "Gulf Air 6/2", "Emirates 9/3"
-  // over-assignment bug: this used to give EVERY working company employee
-  // a real Assignment to EVERY flight that company operates that day,
-  // completely ignoring the requirement's own confirmed headcount. Now
-  // delegated to buildForeignCommitmentAssignments (lib/foreign-shift-
-  // planning.ts), which enforces the headcount and no-double-booking
-  // invariants directly — see its doc comment for the full rationale, and
-  // tests/assignment-invariants.test.ts for regression coverage.
-  const foreignCommitmentAssignments = buildForeignCommitmentAssignments(
-    EMPLOYEES,
-    FLIGHTS,
-    requirements,
-    DAYS_WITH_DATA,
-    CONFIGURED_COMPANIES
-  );
-
-  const { error: assignErr } = await supabase
-    .from("assignments")
-    .insert([...initialAssignments, ...foreignCommitmentAssignments]);
-  if (assignErr) throw new Error(`Seeding assignments failed: ${assignErr.message}`);
-
   const { error: dutyErr } = await supabase.from("planned_duties").insert([
     {
       id: "duty-nadia-carepoint",
@@ -99,6 +63,40 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   ]);
   if (dutyErr) throw new Error(`Seeding planned duties failed: ${dutyErr.message}`);
 
+  // Generate Draft, through the real service -- same bundle-building step
+  // the /api/planning/generate-draft route calls. This is what actually
+  // creates the demo's WeeklyPlan, its full plan-scoped roster, and every
+  // normal atlas_generated Assignment row.
+  const planId = planIdForWeek(CURRENT_WEEK_START);
+  const bundle = buildDraftPlanBundle({
+    planId,
+    weekStart: CURRENT_WEEK_START,
+    weekLabel: CURRENT_WEEK_LABEL,
+    revision: 1,
+    flights: FLIGHTS,
+    employees: EMPLOYEES,
+    config: CONFIG,
+    daysOrder: DAYS_WITH_DATA,
+  });
+  await persistDraftPlanBundle(supabase, bundle);
+
+  const at535Requirement = requirements.find((r) => r.flight_id === "at535" && r.role === "Check-in")!;
+  const at201Boarding = bundle.assignments.filter((a) => {
+    const req = requirements.find((r) => r.id === a.staffing_requirement_id);
+    return req?.flight_id === "at201" && req.role === "Boarding";
+  }).length;
+  const at201Gate = bundle.assignments.filter((a) => {
+    const req = requirements.find((r) => r.id === a.staffing_requirement_id);
+    return req?.flight_id === "at201" && req.role === "Gate";
+  }).length;
+  const at201Profiling = bundle.assignments.filter((a) => {
+    const req = requirements.find((r) => r.id === a.staffing_requirement_id);
+    return req?.flight_id === "at201" && req.role === "Profiling";
+  }).length;
+  const at201BoardingReq = requirements.find((r) => r.flight_id === "at201" && r.role === "Boarding")!;
+  const at201GateReq = requirements.find((r) => r.flight_id === "at201" && r.role === "Gate")!;
+  const at201ProfilingReq = requirements.find((r) => r.flight_id === "at201" && r.role === "Profiling")!;
+
   const auditEntries = [
     {
       id: "audit-1",
@@ -108,13 +106,15 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     {
       id: "audit-2",
       step_number: 2,
-      // AT201 (Europe/Schengen, standard aircraft) now has three concurrent
-      // RAM requirements — Gate, Boarding, Profiling — not one merged
-      // number. The scripted assignees cover Boarding and Profiling; each
-      // role's actual initial coverage is described honestly, respecting
-      // each requirement's own headcount, rather than asserting a single
-      // "gap" that may not even be true for the role they cover.
-      description: `Weekly plan validated — AT201 initial coverage: Boarding ${INITIAL_AT201_ASSIGNEES.length}/${at201BoardingRequirement.total_requirement}, Gate 0/${at201GateRequirement.total_requirement}, Profiling 1/${at201ProfilingRequirement.total_requirement} — Gate remains an unfilled gap.`,
+      // Coverage numbers now come directly from the real generated bundle
+      // (bundle.assignments) -- never a hardcoded expectation of what the
+      // generator "should" produce.
+      description: `Draft Weekly Plan ${planId} generated automatically — AT201 coverage: Boarding ${at201Boarding}/${at201BoardingReq.total_requirement}, Gate ${at201Gate}/${at201GateReq.total_requirement}, Profiling ${at201Profiling}/${at201ProfilingReq.total_requirement}.`,
+    },
+    {
+      id: "audit-3",
+      step_number: 3,
+      description: `Draft Weekly Plan ${planId} persisted — ${bundle.rosterEntries.length} roster entries, ${bundle.assignments.length} ATLAS-generated assignments across ${DAYS_WITH_DATA.length} days.`,
     },
   ];
 
@@ -123,7 +123,7 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     const flight = FLIGHTS.find((f) => f.id === r.flight_id)!;
     auditEntries.push({
       id: `audit-config-${i}`,
-      step_number: 3 + i,
+      step_number: 4 + i,
       description: `Weekly plan validation — ${flight.flight_number} (${flight.airline}) requires configuration before it can be staffed: ${r.reasoning}`,
     });
   });

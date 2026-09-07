@@ -102,7 +102,7 @@ describe("computeEmployeeDaySummary", () => {
   it("returns on_duty with the RAM flight listed as a duty for a normal working day with a RAM assignment", () => {
     const employee = makeEmployee({ id: "sara" });
     const assignments: Assignment[] = [
-      { id: "a1", staffing_requirement_id: "req-at201", employee_id: "sara", assigned_at: "" },
+      { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-at201", employee_id: "sara", source: "atlas_generated", created_by: null, assigned_at: "" },
     ];
     const summary = computeEmployeeDaySummary(employee, "Wednesday", assignments, [ramRequirement], [ramFlight]);
     expect(summary.status).toBe("on_duty");
@@ -114,7 +114,7 @@ describe("computeEmployeeDaySummary", () => {
   it("returns committed status with the correct protected window for a foreign-company assignment", () => {
     const employee = makeEmployee({ id: "ayoub", assignment: "Emirates" });
     const assignments: Assignment[] = [
-      { id: "a1", staffing_requirement_id: "req-ek751", employee_id: "ayoub", assigned_at: "" },
+      { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-ek751", employee_id: "ayoub", source: "atlas_generated", created_by: null, assigned_at: "" },
     ];
     const summary = computeEmployeeDaySummary(employee, "Wednesday", assignments, [foreignRequirement], [foreignFlight]);
     expect(summary.status).toBe("committed");
@@ -131,7 +131,7 @@ describe("computeEmployeeDaySummary", () => {
     const employee = makeEmployee({ id: "sara" });
     const mondayFlight: Flight = { ...ramFlight, day_of_week: "Monday" };
     const assignments: Assignment[] = [
-      { id: "a1", staffing_requirement_id: "req-at201", employee_id: "sara", assigned_at: "" },
+      { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-at201", employee_id: "sara", source: "atlas_generated", created_by: null, assigned_at: "" },
     ];
     const summary = computeEmployeeDaySummary(employee, "Wednesday", assignments, [ramRequirement], [mondayFlight]);
     expect(summary.duties).toHaveLength(0);

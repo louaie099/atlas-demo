@@ -3,74 +3,34 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { buildWeeklyPlanView } from "@/lib/planning/weekly-plan-view";
-import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL } from "@/lib/seed-data";
-import { Employee, Flight, StaffingRequirement, Assignment } from "@/lib/types";
+import { loadPersistedPlanView } from "@/lib/planning/weekly-plan-service";
+import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
- * The single endpoint behind the Weekly Planning page. Fetches ONE
- * snapshot of flights/employees/assignments/requirements and runs
- * generateDraftWeeklyPlan() exactly once (via buildWeeklyPlanView) --
- * Flight Coverage (`roster`), Agent Schedule (`schedule`), and the
- * summary counts the page computes from `roster` all come from that one
- * computation. Replaces the page's previous two independent fetches to
- * /api/roster and /api/agent-schedule, which each read their own snapshot
- * and ran the full pipeline separately: same inputs give the same output
- * since the pipeline is pure, but two DB reads at two different moments
- * (e.g. while an assignment is being made) is a real race, and recomputing
- * the whole pipeline twice per page load was pure waste besides. Those two
- * routes are unchanged and still used elsewhere (the Dashboard reads
- * /api/roster), now backed by the same shared builder as this route so
- * there's no parallel view-construction logic either.
+ * The single endpoint behind the Weekly Planning page. Reads the
+ * PERSISTED WeeklyPlan for the current week -- it no longer runs the
+ * generation pipeline on every request. If no plan has been generated yet
+ * for this week, `plan` comes back null and the page should show a
+ * "Generate Draft" call to action rather than any computed content.
  */
 export async function GET() {
   const supabase = getSupabaseServerClient();
 
-  const [
-    { data: flights, error: flightsErr },
-    { data: employees, error: empErr },
-    { data: assignments, error: assignErr },
-    { data: requirements, error: reqErr },
-  ] = await Promise.all([
-    supabase.from("flights").select("*"),
-    supabase.from("employees").select("*"),
-    supabase.from("assignments").select("*"),
-    supabase.from("staffing_requirements").select("*"),
-  ]);
-
-  if (flightsErr || empErr || assignErr || reqErr) {
-    return NextResponse.json(
-      { error: (flightsErr || empErr || assignErr || reqErr)?.message },
-      { status: 500 }
-    );
+  const view = await loadPersistedPlanView(supabase, CURRENT_WEEK_START, DAYS_WITH_DATA);
+  if (!view) {
+    return NextResponse.json({ plan: null, roster: [], schedule: [], issues: [], planIssueCount: 0, configurationIssues: [] });
   }
 
-  const { draftPlan, roster, schedule } = buildWeeklyPlanView(
-    flights as Flight[],
-    employees as Employee[],
-    assignments as Assignment[],
-    requirements as StaffingRequirement[],
-    CONFIG,
-    DAYS_WITH_DATA,
-    CURRENT_WEEK_LABEL
-  );
-
-  // `flights` is the SAME array buildWeeklyPlanView computed `roster` and
-  // `schedule` from -- the raw weekly flight program, unfiltered by
-  // managed/unmanaged status, which is exactly what Flight Schedule (as
-  // opposed to Flight Coverage) needs to show. No separate flights fetch,
-  // no independent dataset.
-  //
   // `configurationIssues` is exposed here for a future Administration/
   // Configuration surface -- it is NOT read by the current Weekly
   // Planning UI (see PlanningSummaryBar), so an internal RAM-matrix gap
   // never inflates the operational Plan Warnings count.
   return NextResponse.json({
-    flights,
-    roster,
-    schedule,
-    issues: draftPlan.issues,
-    planIssueCount: draftPlan.issues.length,
-    configurationIssues: draftPlan.configurationIssues,
+    plan: view.plan,
+    roster: view.roster,
+    schedule: view.schedule,
+    issues: view.plan.issues,
+    planIssueCount: view.plan.issues.length,
+    configurationIssues: view.plan.configuration_issues,
   });
 }

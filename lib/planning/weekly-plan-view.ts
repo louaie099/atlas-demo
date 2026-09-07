@@ -63,12 +63,32 @@ export function computeCoverageStatus(
   // it never applies to a static, undisturbed weekly plan.
 }
 
-function buildRosterViews(
+/**
+ * One employee's claim on one requirement, tagged by which display bucket
+ * it belongs in. This is the shared shape both the LIVE (pre-persistence,
+ * "what would generation produce") and PERSISTED (post-persistence, "what
+ * IS in the plan") view builders reduce their very different inputs down
+ * to, so the actual requirement-coverage assembly logic below exists in
+ * exactly one place. "assigned" = a real, human-attributable row (styled
+ * plain/gray); "proposed" = ATLAS's own normal generated output, not a
+ * pending recommendation (styled brand blue) — see
+ * RosterRequirementView's doc comment in lib/types.ts. Before persistence
+ * this distinction was "real Assignment row" vs. "engine draft, not yet a
+ * row"; after persistence (every Assignment is a real row) it maps onto
+ * `Assignment.source` instead — human_modified vs. atlas_generated — see
+ * lib/planning/persisted-plan-view.ts.
+ */
+export interface CoverageItem {
+  requirementId: string;
+  employeeId: string;
+  bucket: "assigned" | "proposed";
+}
+
+export function buildRosterViewsFromItems(
   requirements: StaffingRequirement[],
   flights: Flight[],
   employees: Employee[],
-  assignments: Assignment[],
-  allDuties: GeneratedDuty[]
+  items: CoverageItem[]
 ): RosterRequirementView[] {
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
   const employeesById = new Map<string, Employee>(employees.map((e) => [e.id, e]));
@@ -85,17 +105,17 @@ function buildRosterViews(
   const views: RosterRequirementView[] = routineRequirements.map((req) => {
     const flight = flightsById.get(req.flight_id)!;
 
-    const confirmedIds = assignments
-      .filter((a) => a.staffing_requirement_id === req.id)
-      .map((a) => a.employee_id);
-    const assignedEmployees = confirmedIds
+    const forRequirement = items.filter((i) => i.requirementId === req.id);
+
+    const assignedIds = Array.from(new Set(forRequirement.filter((i) => i.bucket === "assigned").map((i) => i.employeeId)));
+    const assignedEmployees = assignedIds
       .map((id) => employeesById.get(id))
       .filter((e): e is Employee => Boolean(e));
 
-    const proposedIds = allDuties
-      .filter((d) => d.requirementId === req.id && !confirmedIds.includes(d.employeeId))
-      .map((d) => d.employeeId);
-    const proposedEmployees = Array.from(new Set(proposedIds))
+    const proposedIds = Array.from(
+      new Set(forRequirement.filter((i) => i.bucket === "proposed" && !assignedIds.includes(i.employeeId)).map((i) => i.employeeId))
+    );
+    const proposedEmployees = proposedIds
       .map((id) => employeesById.get(id))
       .filter((e): e is Employee => Boolean(e));
 
@@ -129,6 +149,29 @@ function buildRosterViews(
   });
 
   return views;
+}
+
+/**
+ * LIVE (pre-persistence) roster view: "what would generation currently
+ * produce" from a real Assignment[] plus the engine's own in-memory
+ * GeneratedDuty[]. Reduces both inputs to the shared CoverageItem shape
+ * and delegates to buildRosterViewsFromItems above. This is what
+ * lib/planning/weekly-plan-service.ts's draft-building step uses to decide
+ * what to persist; it is NOT how an already-persisted plan is read back
+ * (see lib/planning/persisted-plan-view.ts for that).
+ */
+function buildRosterViews(
+  requirements: StaffingRequirement[],
+  flights: Flight[],
+  employees: Employee[],
+  assignments: Assignment[],
+  allDuties: GeneratedDuty[]
+): RosterRequirementView[] {
+  const items: CoverageItem[] = [
+    ...assignments.map((a): CoverageItem => ({ requirementId: a.staffing_requirement_id, employeeId: a.employee_id, bucket: "assigned" })),
+    ...allDuties.map((d): CoverageItem => ({ requirementId: d.requirementId, employeeId: d.employeeId, bucket: "proposed" })),
+  ];
+  return buildRosterViewsFromItems(requirements, flights, employees, items);
 }
 
 function buildAgentScheduleEntries(

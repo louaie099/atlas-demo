@@ -2,8 +2,16 @@ import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../ty
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
-import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay } from "./duty-generation";
+import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, PlanIssue, ConfigurationIssue } from "./validation";
+
+/** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
+export interface PlanRosterEntryDraft {
+  employee_id: string;
+  day_of_week: string;
+  status: "working" | "off";
+  shift_code: string | null;
+}
 
 export interface DraftWeeklyPlan {
   weekLabel: string;
@@ -11,6 +19,12 @@ export interface DraftWeeklyPlan {
   requirements: StaffingRequirement[];
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>;
   dutiesByDay: Record<string, GeneratedDuty[]>;
+  // The full, plan-scoped roster for the week -- every employee, every
+  // day, "when are they planned to work and with what shift code" --
+  // computed once here so persistence never has to re-derive it from
+  // Employee.weekly_shifts later (see resolvePlanRosterEntry's doc
+  // comment and lib/types.ts's WeeklyPlanRosterEntry).
+  rosterEntries: PlanRosterEntryDraft[];
   // Operational Plan Warnings ONLY — rest/weekly-hours/consecutive-OFF
   // violations and unfilled duties. Never a configuration gap; see
   // configurationIssues below for that.
@@ -105,12 +119,21 @@ export function generateDraftWeeklyPlan(
   const issues = validateWeeklyPlan(allUnfilled, employees, daysOrder, config);
   const configurationIssues = collectConfigurationIssues(requirements);
 
+  const rosterEntries: PlanRosterEntryDraft[] = [];
+  for (const day of daysOrder) {
+    for (const employee of employees) {
+      const resolved = resolvePlanRosterEntry(employee, day, generatedShiftsByDay[day] ?? []);
+      rosterEntries.push({ employee_id: employee.id, day_of_week: day, ...resolved });
+    }
+  }
+
   return {
     weekLabel,
     daysOrder,
     requirements,
     generatedShiftsByDay,
     dutiesByDay,
+    rosterEntries,
     issues,
     configurationIssues,
     generatedAt: new Date().toISOString(),

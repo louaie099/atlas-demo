@@ -29,6 +29,11 @@ export const CONFIG: Config = {
 // the UI is built to support other weeks, but no other week's data exists
 // yet — an honest empty state, not fabricated flights.
 export const CURRENT_WEEK_LABEL = "Week of Mon, Sep 1 2026";
+// Identifier for the currently-seeded demo week -- used as the WeeklyPlan's
+// week_start/id key (see lib/planning/weekly-plan-service.ts), NOT
+// validated against a real calendar (matches CURRENT_WEEK_LABEL's own
+// existing convention of being a fixed demo label, not a derived date).
+export const CURRENT_WEEK_START = "2026-09-01";
 export const DAYS_WITH_DATA = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 // The only day with real flight data (AT201/AT535 and the generated

@@ -64,7 +64,7 @@ const ramRequirement: StaffingRequirement = {
 describe("getEmployeeForeignCommitments", () => {
   it("returns a commitment, with the correct window, for an employee assigned to a self-managed flight's requirement", () => {
     const assignments: Assignment[] = [
-      { id: "a1", staffing_requirement_id: "req-qr1013", employee_id: "emp-1", assigned_at: "" },
+      { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-qr1013", employee_id: "emp-1", source: "atlas_generated", created_by: null, assigned_at: "" },
     ];
     const commitments = getEmployeeForeignCommitments(
       "emp-1",
@@ -79,7 +79,7 @@ describe("getEmployeeForeignCommitments", () => {
 
   it("returns no commitment for an employee only assigned to RAM (fixed_rule) requirements — capacity is not consumed outside a foreign window", () => {
     const assignments: Assignment[] = [
-      { id: "a1", staffing_requirement_id: "req-at201", employee_id: "emp-1", assigned_at: "" },
+      { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-at201", employee_id: "emp-1", source: "atlas_generated", created_by: null, assigned_at: "" },
     ];
     const commitments = getEmployeeForeignCommitments(
       "emp-1",

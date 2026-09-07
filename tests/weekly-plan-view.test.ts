@@ -85,7 +85,7 @@ describe("buildWeeklyPlanView", () => {
     const flight = makeFlight({});
     const requirement = makeRequirement({ total_requirement: 1 });
     const employee = makeEmployee({ id: "e1", name: "Amina Test" });
-    const assignment: Assignment = { id: "a1", staffing_requirement_id: "req-f1-boarding", employee_id: "e1", assigned_at: "" };
+    const assignment: Assignment = { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-f1-boarding", employee_id: "e1", source: "atlas_generated", created_by: null, assigned_at: "" };
 
     const { roster, schedule } = buildWeeklyPlanView([flight], [employee], [assignment], [requirement], CONFIG, DAYS, "Test Week");
 

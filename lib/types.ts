@@ -92,11 +92,108 @@ export interface StaffingRequirement {
   needs_configuration: boolean; // true when no operation rule / company config exists yet
 }
 
+// "atlas_generated" = created automatically when a Draft Weekly Plan was
+// generated/regenerated -- a normal ATLAS assignment, never a pending
+// recommendation. "human_modified" = a planner's own action against an
+// existing plan (today: a Find Agent gap fill; a future swap/replace would
+// be the same source). See AssignmentModification below for the
+// structured history of human_modified changes -- this field alone says
+// WHO currently owns the row, not what (if anything) it replaced.
+export type AssignmentSource = "atlas_generated" | "human_modified";
+
 export interface Assignment {
   id: string;
+  // Every assignment belongs to exactly one WeeklyPlan -- there is no more
+  // "global" assignment floating outside planning context. See
+  // lib/planning/weekly-plan-service.ts.
+  plan_id: string;
   staffing_requirement_id: string;
   employee_id: string;
+  source: AssignmentSource;
+  // The planner's name for a human_modified row; null for atlas_generated
+  // (nothing to attribute -- see the audit log for the plan-level
+  // generation event instead).
+  created_by: string | null;
   assigned_at: string;
+}
+
+export type WeeklyPlanStatus = "draft" | "published";
+
+/**
+ * The planning aggregate root (see lib/planning/weekly-plan-service.ts).
+ * One row per week. A browser refresh reads this row's persisted roster/
+ * assignments -- it never triggers a fresh computation. `revision`
+ * increments only on an explicit Regenerate (see the service's
+ * modification-blocking rule); `generated_from_hash` is a content hash of
+ * the facts (flights/employees/config) the current revision was generated
+ * from, so staleness against later-changed inputs is DETECTABLE without a
+ * full historical-versioning subsystem. `config_snapshot` freezes the
+ * resolved labor/operational rules this revision was generated and
+ * validated under, so a later rule change can never silently reinterpret
+ * an already-generated (let alone published) plan.
+ */
+export interface WeeklyPlan {
+  id: string;
+  week_start: string; // ISO date -- the Monday of the planned week
+  week_label: string;
+  status: WeeklyPlanStatus;
+  revision: number;
+  generated_at: string;
+  published_at: string | null;
+  generated_from_hash: string;
+  config_snapshot: Config;
+  // Generation-time Plan Warnings/configuration gaps, frozen at generation
+  // time -- never recomputed live on read. See lib/planning/validation.ts.
+  issues: import("./planning/validation").PlanIssue[];
+  configuration_issues: import("./planning/validation").ConfigurationIssue[];
+}
+
+/**
+ * The persisted result of "when is this employee planned to work this
+ * week" -- one row per (plan, employee, day), for EVERY employee
+ * regardless of group (fixed-cycle, foreign-committed, flexible pool
+ * alike). This is what makes the generated week's actual roster durable
+ * and plan-scoped instead of silently re-derivable (and therefore
+ * driftable) from Employee.weekly_shifts, which stays only as permanent/
+ * baseline workforce data -- never the live source of truth for a
+ * generated plan's read path once that plan exists. See
+ * lib/planning/weekly-plan-service.ts and lib/planning/duty-generation.ts's
+ * resolvePlanRosterEntry (the single function that computes this at
+ * generation time, for every employee group alike).
+ */
+export interface WeeklyPlanRosterEntry {
+  id: string;
+  plan_id: string;
+  employee_id: string;
+  day_of_week: string;
+  status: "working" | "off";
+  shift_code: string | null; // null when status is "off"
+}
+
+export type AssignmentModificationAction = "added" | "replaced" | "removed";
+
+/**
+ * Append-only structured history of human changes to a plan's
+ * assignments -- never a mutation of the live Assignment row itself, so
+ * "what did ATLAS originally assign here?" stays answerable. Scoped by
+ * `plan_revision` (not just `plan_id`) because Regenerate increments the
+ * plan's revision -- without this, a modification row would become
+ * ambiguous as to which generation of the draft it actually applied to.
+ * Today only `action: "added"` is produced (a Find Agent gap fill);
+ * "replaced"/"removed" are represented for a future swap/unassign action,
+ * not yet wired to any route.
+ */
+export interface AssignmentModification {
+  id: string;
+  plan_id: string;
+  plan_revision: number;
+  staffing_requirement_id: string;
+  action: AssignmentModificationAction;
+  previous_employee_id: string | null; // null when action === "added"
+  new_employee_id: string | null; // null when action === "removed"
+  changed_by: string;
+  changed_at: string;
+  reason: string | null;
 }
 
 export interface PlannedDuty {

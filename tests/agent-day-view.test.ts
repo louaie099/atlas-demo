@@ -96,7 +96,7 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
     const flight = makeFlight({});
     const requirement = makeRequirement({ total_requirement: 1 });
     const employee = makeEmployee({ id: "e1" });
-    const assignment: Assignment = { id: "a1", staffing_requirement_id: "req-f1-boarding", employee_id: "e1", assigned_at: "" };
+    const assignment: Assignment = { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-f1-boarding", employee_id: "e1", source: "atlas_generated", created_by: null, assigned_at: "" };
 
     const { schedule } = buildWeeklyPlanView([flight], [employee], [assignment], [requirement], CONFIG, DAYS, "Test Week");
     const entry = schedule.find((s) => s.employee.id === "e1")!;
@@ -118,7 +118,7 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
         { day_of_week: "Wednesday", shift_code: "AP01", status: "working" },
       ],
     });
-    const assignment: Assignment = { id: "a1", staffing_requirement_id: "req-f2-ramp", employee_id: "e1", assigned_at: "" };
+    const assignment: Assignment = { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-f2-ramp", employee_id: "e1", source: "atlas_generated", created_by: null, assigned_at: "" };
 
     const { schedule } = buildWeeklyPlanView([foreignFlight], [employee], [assignment], [companyReq], CONFIG, DAYS, "Test Week");
     const entry = schedule.find((s) => s.employee.id === "e1")!;
