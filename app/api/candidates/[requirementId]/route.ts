@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CONFIG, CURRENT_WEEK_START } from "@/lib/seed-data";
-import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
+import { planIdForWeek, fetchAllRosterEntriesForPlan } from "@/lib/planning/weekly-plan-service";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
@@ -84,12 +84,10 @@ export async function GET(
   // doc comment for why this matters (a fixed labor-rule protection like
   // max consecutive off days must never be overridable via manual
   // assignment either).
-  const { data: rosterRows } = plan
-    ? await supabase.from("weekly_plan_roster_entries").select("*").eq("plan_id", plan.id)
-    : { data: [] as WeeklyPlanRosterEntry[] };
+  const rosterRows = plan ? await fetchAllRosterEntriesForPlan(supabase, plan.id) : ([] as WeeklyPlanRosterEntry[]);
   const candidatePool = buildDayEffectivePoolFromRosterEntries(
     notYetAssigned,
-    (rosterRows ?? []) as WeeklyPlanRosterEntry[],
+    rosterRows,
     targetFlight.day_of_week
   );
 

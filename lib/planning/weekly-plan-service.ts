@@ -126,6 +126,46 @@ export async function persistDraftPlanBundle(supabase: SupabaseClient, bundle: D
   }
 }
 
+/**
+ * Supabase/PostgREST caps a plain `.select()` at 1000 rows by default
+ * (the `db-max-rows` setting) -- silently: no error, it just returns the
+ * first page and stops. weekly_plan_roster_entries holds one row per
+ * employee per day (7 * headcount), which crosses that cap well within
+ * this project's current ~200-employee scale (7 * 200 = 1400), and every
+ * consumer of this table treats "no row returned" as an implicit OFF (see
+ * buildPersistedAgentScheduleEntries and buildDayEffectivePoolFromRosterEntries's
+ * callers) -- so a silent truncation here doesn't error, it just makes
+ * whichever employee/day rows fell past row 1000 look like unplanned days
+ * off. Rows are inserted day-major (every employee for Monday, then every
+ * employee for Tuesday, ...), so a truncation reliably eats the LAST days
+ * of the week first and the LAST-generated employee groups within a day
+ * first -- exactly the "everyone is off Saturday/Sunday, and it's worst
+ * for the foreign-company teams" shape this was actually observed as.
+ * This paginates with `.range()` until a page comes back short of a full
+ * page, so the full table is read regardless of size.
+ */
+export async function fetchAllRosterEntriesForPlan(
+  supabase: SupabaseClient,
+  planId: string
+): Promise<WeeklyPlanRosterEntry[]> {
+  const PAGE_SIZE = 1000;
+  const all: WeeklyPlanRosterEntry[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from("weekly_plan_roster_entries")
+      .select("*")
+      .eq("plan_id", planId)
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`Fetching plan roster entries failed: ${error.message}`);
+    const page = (data ?? []) as WeeklyPlanRosterEntry[];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
+
 export type PlanLifecycleResult = { plan: WeeklyPlan } | { blocked: true; reason: string };
 
 /**
@@ -309,25 +349,25 @@ export async function loadPersistedPlanView(
   if (!plan) return null;
 
   const [
-    { data: rosterEntries, error: rosterErr },
+    rosterEntries,
     { data: assignments, error: assignErr },
     { data: requirements, error: reqErr },
     { data: flights, error: flightErr },
     { data: employees, error: empErr },
   ] = await Promise.all([
-    supabase.from("weekly_plan_roster_entries").select("*").eq("plan_id", planId),
+    fetchAllRosterEntriesForPlan(supabase, planId),
     supabase.from("assignments").select("*").eq("plan_id", planId),
     supabase.from("staffing_requirements").select("*"),
     supabase.from("flights").select("*"),
     supabase.from("employees").select("*"),
   ]);
-  if (rosterErr || assignErr || reqErr || flightErr || empErr) {
-    throw new Error((rosterErr || assignErr || reqErr || flightErr || empErr)!.message);
+  if (assignErr || reqErr || flightErr || empErr) {
+    throw new Error((assignErr || reqErr || flightErr || empErr)!.message);
   }
 
   return buildPersistedWeeklyPlanView(
     plan,
-    rosterEntries as WeeklyPlanRosterEntry[],
+    rosterEntries,
     assignments as Assignment[],
     requirements as StaffingRequirement[],
     flights as Flight[],

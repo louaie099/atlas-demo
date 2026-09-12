@@ -28,14 +28,39 @@ interface FakeRow {
 class FakeQuery implements PromiseLike<{ data: FakeRow[]; error: null }> {
   constructor(private table: FakeTable, private filters: [string, unknown][] = []) {}
 
+  private rangeBounds: [number, number] | null = null;
+
   eq(col: string, val: unknown): FakeQuery {
     return new FakeQuery(this.table, [...this.filters, [col, val]]);
+  }
+
+  // Mirrors supabase-js's .range(from, to): an inclusive slice, applied
+  // after filtering -- real PostgREST behavior fetchAllRosterEntriesForPlan
+  // (lib/planning/weekly-plan-service.ts) actually relies on to page past
+  // the default 1000-row cap. Without this, the fake would silently return
+  // every row from a single unbounded page and could never catch a
+  // regression back to the plain, unpaginated .select("*") this replaced.
+  range(from: number, to: number): FakeQuery {
+    const next = new FakeQuery(this.table, this.filters);
+    next.rangeBounds = [from, to];
+    return next;
   }
 
   then<TResult1 = { data: FakeRow[]; error: null }, TResult2 = never>(
     onfulfilled?: ((value: { data: FakeRow[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null
   ): PromiseLike<TResult1 | TResult2> {
-    const rows = this.table.rows.filter((r) => this.filters.every(([c, v]) => r[c] === v));
+    let rows = this.table.rows.filter((r) => this.filters.every(([c, v]) => r[c] === v));
+    if (this.rangeBounds) {
+      const [from, to] = this.rangeBounds;
+      rows = rows.slice(from, to + 1);
+    } else {
+      // Real PostgREST silently caps an unbounded select at its
+      // db-max-rows default (1000) -- reproduce that here so a regression
+      // back to a plain, unpaginated .select("*") on a table that can
+      // exceed it (weekly_plan_roster_entries, at real seed-data scale)
+      // fails a test instead of only failing in production.
+      rows = rows.slice(0, 1000);
+    }
     return Promise.resolve({ data: rows, error: null }).then(onfulfilled as any);
   }
 }
@@ -273,5 +298,31 @@ describe("weekly-plan-service — loadPersistedPlanView", () => {
     // persisted, atlas_generated row, never a pending recommendation.
     const anyProposed = view!.roster.some((r) => r.proposedEmployees.length > 0);
     expect(anyProposed).toBe(true);
+
+    // Regression guard for the 1000-row PostgREST select cap: the real
+    // EMPLOYEES seed (~206 people) * 7 days is ~1442 roster rows, which
+    // crosses that cap, and rows are inserted day-major (every employee
+    // for Monday, then Tuesday, ... Sunday) -- so a truncated, unpaginated
+    // fetch drops Saturday/Sunday (and the tail of Friday) first, and
+    // drops the LAST-generated employees within a day first. If
+    // loadPersistedPlanView ever regresses to a plain, unpaginated
+    // .select("*") instead of fetchAllRosterEntriesForPlan, this is what
+    // catches it: every employee must have a real, resolved Sunday entry,
+    // not a phantom "no roster row -> displayed as off."
+    expect(view!.schedule.length).toBeGreaterThan(0);
+    for (const entry of view!.schedule) {
+      const sunday = entry.days.find((d) => d.dayOfWeek === "Sunday");
+      expect(sunday).toBeDefined();
+    }
+    // The specific employee most likely to land past row 1000 in
+    // insertion order (last in the seed array, i.e. the last-generated
+    // group) must resolve to a genuine, non-default Sunday status --
+    // never silently coerced to "off" by a missing row.
+    const lastEmployee = EMPLOYEES[EMPLOYEES.length - 1];
+    const lastEntry = view!.schedule.find((e) => e.employee.id === lastEmployee.id);
+    expect(lastEntry).toBeDefined();
+    const lastSunday = lastEntry!.days.find((d) => d.dayOfWeek === "Sunday")!;
+    const expectedSunday = lastEmployee.weekly_shifts.find((s) => s.day_of_week === "Sunday")!;
+    expect(lastSunday.status).toBe(expectedSunday.status);
   });
 });
