@@ -18,7 +18,7 @@ export async function GET() {
 
   const view = await loadPersistedPlanView(supabase, CURRENT_WEEK_START, DAYS_WITH_DATA);
   if (!view) {
-    return NextResponse.json({ plan: null, roster: [], schedule: [], issues: [], planIssueCount: 0, configurationIssues: [] });
+    return NextResponse.json({ plan: null, flights: [], roster: [], schedule: [], issues: [], planIssueCount: 0, configurationIssues: [] });
   }
 
   // `configurationIssues` is exposed here for a future Administration/
@@ -27,6 +27,7 @@ export async function GET() {
   // never inflates the operational Plan Warnings count.
   return NextResponse.json({
     plan: view.plan,
+    flights: view.flights,
     roster: view.roster,
     schedule: view.schedule,
     issues: view.plan.issues,

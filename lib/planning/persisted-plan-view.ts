@@ -34,6 +34,7 @@ import { PlanIssue } from "./validation";
  */
 export interface PersistedWeeklyPlanView {
   plan: WeeklyPlan;
+  flights: Flight[];
   roster: RosterRequirementView[];
   schedule: AgentScheduleEntry[];
 }
@@ -62,7 +63,7 @@ export function buildPersistedWeeklyPlanView(
   const roster = buildRosterViewsFromItems(requirements, flights, employees, items);
   const schedule = buildPersistedAgentScheduleEntries(employees, assignments, requirements, flights, daysOrder, plan.issues, rosterEntries);
 
-  return { plan, roster, schedule };
+  return { plan, flights, roster, schedule };
 }
 
 function buildPersistedAgentScheduleEntries(
