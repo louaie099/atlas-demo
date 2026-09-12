@@ -62,16 +62,32 @@ export function buildStaggeredOffDays(
 
 /**
  * Rest hours between the end of one working day's shift and the start of
- * the NEXT calendar day's shift — prevShiftEnd is read on today's clock,
- * nextShiftStart on tomorrow's. This is the exact same rest definition
- * lib/planning/validation.ts's week-level rest check already uses
- * (checkRestBetweenDays); it's factored out here so shift SELECTION
- * (Stage 6) can apply the identical rule when choosing a shift, instead of
- * only detecting the violation after the fact. Not a new or looser
- * definition of rest — same math, one implementation.
+ * the shift scheduled for the FOLLOWING calendar day — prevShiftStart/
+ * prevShiftEnd are both on the previous shift's OWN scheduled day's
+ * clock, nextShiftStart is on the day after that.
+ *
+ * Overnight handling: a shift like AP03 (17:45-02:00), AP04
+ * (13:45-02:00), NT01 (17:45-06:15), or N8 (21:00-06:15) crosses
+ * midnight, so its real end DATETIME already falls on the calendar day
+ * AFTER the day it's scheduled for — clock-time subtraction alone (just
+ * comparing "02:00" against another clock time) would silently treat that
+ * end as still being on the shift's own scheduled day, overcounting rest
+ * by a full 24h once the "+24h for next day" below is added on top. This
+ * function detects that case itself (prevShiftEnd <= prevShiftStart means
+ * the shift wrapped past midnight) and adds the missing day before
+ * measuring the gap to nextShiftStart, which is always exactly one
+ * calendar day after prevShift's OWN scheduled day, whether or not
+ * prevShift itself already spilled into that day.
+ *
+ * This is the exact same rest definition lib/planning/validation.ts's
+ * week-level rest check uses (checkRestBetweenDays) and
+ * lib/planning/shift-generation.ts's day-by-day shift SELECTION uses — one
+ * implementation, never a second looser copy of the math.
  */
-export function restHoursBetween(prevShiftEnd: string, nextShiftStart: string): number {
-  const endMin = timeToMinutes(prevShiftEnd);
-  const startMin = timeToMinutes(nextShiftStart) + 24 * 60; // next calendar day
-  return (startMin - endMin) / 60;
+export function restHoursBetween(prevShiftStart: string, prevShiftEnd: string, nextShiftStart: string): number {
+  const prevStartMin = timeToMinutes(prevShiftStart);
+  let prevEndMin = timeToMinutes(prevShiftEnd);
+  if (prevEndMin <= prevStartMin) prevEndMin += 24 * 60; // overnight: real end is the following calendar day
+  const nextStartMin = timeToMinutes(nextShiftStart) + 24 * 60; // the day after prevShift's own scheduled day
+  return (nextStartMin - prevEndMin) / 60;
 }

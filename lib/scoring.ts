@@ -81,6 +81,22 @@ export function scoreCandidates(
     if (isFixedPlanningTeam(e.assignment)) return false;
     if (isTransitTeam(e.assignment) && role !== "Transit") return false;
     if ((occupiedWindows[e.id] ?? []).some((occupied) => windowsOverlap(occupied, window))) return false;
+    // Hard containment gate: a candidate whose shift doesn't overlap the
+    // requirement's window AT ALL is not "a shift extension away" from
+    // covering it -- they are simply not working anywhere near this flight,
+    // and must never enter scoring. Previously this function only compared
+    // shift END against window END (see extensionNeeded below), which
+    // never rejected a candidate whose shift didn't overlap the window in
+    // the first place -- e.g. a 13:45-22:45 shift was scored as eligible
+    // for a 06:15-07:15 flight, because 22:45 >= 07:15 satisfied the only
+    // check that existed. That is how duties ended up persisted outside
+    // the employee's actual working interval (assignment.requirement_window
+    // must be ⊆ roster_shift_window for anything auto-recommended). A
+    // shift extension (late end, or now, early start -- see
+    // earlyStartNeeded below) is still tolerated as a FLAGGED,
+    // human-reviewed case, since the two windows genuinely overlap; total
+    // non-overlap is excluded outright, never flagged.
+    if (!windowsOverlap(window, { start: e.shift_start, end: e.shift_end })) return false;
     if (requiredAuthorization) return e.foreign_company_authorizations.includes(requiredAuthorization);
     return e.skills.includes(role);
   });
@@ -88,12 +104,24 @@ export function scoreCandidates(
   const results: CandidateResult[] = eligiblePool.map((employee) => {
     const shiftEndMin = timeToMinutes(employee.shift_end);
     const windowEndMin = timeToMinutes(window.end);
+    // A shift starting somewhat after the window's own start is normal and
+    // expected, not a bug: the RAM window rule (getRequirementWindow) opens
+    // a full T-1h/T-1h30 before departure as the IDEAL coverage start, but
+    // an employee clocking in partway through that lead time and covering
+    // the window through departure is exactly how real shift coverage
+    // works -- that's what the hard eligiblePool overlap gate above already
+    // protects (total non-overlap is excluded outright); only the shift
+    // ending before the window ends is a genuine unplanned extension worth
+    // flagging for human review.
     const extensionNeeded = shiftEndMin < windowEndMin;
-    // fairness_ceiling_hours may be "unconfirmed" (see lib/labor-rules.ts)
-    // — an unconfirmed ceiling is never enforced or used to flag anyone,
-    // rather than compared against an invented number.
-    const nearCeiling =
-      config.fairness_ceiling_hours !== "unconfirmed" && employee.weekly_hours >= config.fairness_ceiling_hours - 5;
+    // maximum_weekly_working_hours is now a confirmed, always-a-number
+    // ceiling (see lib/labor-rules.ts) — approaching it (within 5h) still
+    // only flags a candidate for human review here; the HARD 42h cap
+    // itself is enforced earlier, at shift generation/selection time (see
+    // lib/planning/shift-generation.ts) and again at final validation
+    // (lib/planning/validation.ts's checkWeeklyHoursCeiling), never
+    // rescued by scoring.
+    const nearCeiling = employee.weekly_hours >= config.maximum_weekly_working_hours - 5;
     const rested = employee.rest_before_shift_hours >= config.minimum_rest_hours;
 
     // Eligibility basis, stated honestly: a real trained skill for every
@@ -106,13 +134,13 @@ export function scoreCandidates(
       return {
         employee,
         status: "recommended",
-        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within fairness range. No extension required.`,
+        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within the ${config.maximum_weekly_working_hours}h weekly ceiling. No extension required.`,
       };
     }
 
     const reasons: string[] = [];
     if (extensionNeeded) reasons.push("would require an unplanned shift extension with no rest window");
-    if (nearCeiling) reasons.push(`weekly hours (${employee.weekly_hours}h) approaching the ${config.fairness_ceiling_hours}h fairness ceiling`);
+    if (nearCeiling) reasons.push(`weekly hours (${employee.weekly_hours}h) approaching the ${config.maximum_weekly_working_hours}h weekly ceiling`);
     if (!rested) reasons.push(`insufficient rest (${employee.rest_before_shift_hours}h, below the ${config.minimum_rest_hours}h minimum required)`);
 
     return {

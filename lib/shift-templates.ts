@@ -72,6 +72,45 @@ export function getShiftTimesAs(code: string): { shift_start: string; shift_end:
 }
 
 /**
+ * Real counted working duration of a shift code, in hours — the single
+ * implementation every weekly-hours calculation (generation-time and
+ * validation-time alike) must use, rather than each caller re-deriving
+ * its own start/end diff. Correctly handles an overnight code (AP03,
+ * AP04, NT01, N8) whose sortie clock-time is numerically earlier than its
+ * entree: that's a same-shift wrap past midnight, not a negative
+ * duration, so 24h is added back.
+ */
+export function getShiftDurationHours(code: string): number {
+  const { entree, sortie } = getShiftTimes(code);
+  const [eh, em] = entree.split(":").map(Number);
+  const [sh, sm] = sortie.split(":").map(Number);
+  let minutes = sh * 60 + sm - (eh * 60 + em);
+  if (minutes <= 0) minutes += 24 * 60;
+  return minutes / 60;
+}
+
+/**
+ * The single shared derivation for Employee.rest_before_shift_hours — the
+ * static field scoring.ts reads as its "rested" eligibility signal
+ * (`employee.rest_before_shift_hours >= config.minimum_rest_hours`).
+ * Every caller that builds an Employee for a shift code that repeats
+ * identically on consecutive working days (lib/employee-generator.ts,
+ * lib/seed-data.ts's scripted/example employees) must derive this value
+ * from the shift's own catalog duration — never hand-pick an
+ * independent placeholder number, which is exactly how the old 9-13h
+ * values drifted out of sync with the confirmed 15h rest floor.
+ *
+ * For a shift that repeats identically day after day with no OFF day in
+ * between, the rest gap before the next occurrence is the remainder of
+ * the 24h day after this one's duration: `24 - duration`. This mirrors
+ * restHoursBetween's own model for that same common case (see
+ * roster-generation.ts).
+ */
+export function restHoursForDailyRepeatingShift(code: string): number {
+  return Math.round((24 - getShiftDurationHours(code)) * 100) / 100;
+}
+
+/**
  * Builds the day-by-day weekly_shifts array for an employee. Currently
  * uniform (same shift_code every working day, "off" on off_days) — this
  * reflects that no per-day variation exists in the dataset yet. The

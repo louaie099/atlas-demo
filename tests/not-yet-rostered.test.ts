@@ -36,7 +36,9 @@ describe("scoreCandidates — employees with no roster yet", () => {
       shift_code: "AP01",
       shift_start: "13:45",
       shift_end: "22:45",
-      rest_before_shift_hours: 12,
+      // AP01's real derived rest (24h - 9h duration) is 15h, exactly at
+      // the confirmed floor -- not the old 12h placeholder.
+      rest_before_shift_hours: 15,
       weekly_hours: 10,
     });
     const results = scoreCandidates("Boarding", { start: "13:50", end: "14:20" }, [employee], CONFIG);

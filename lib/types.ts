@@ -251,11 +251,19 @@ export interface ResolutionRecommendation {
 }
 
 export interface Config {
+  // Confirmed: minimum hours between the end of one working shift and the
+  // start of the next (see lib/labor-rules.ts's minimumRestHours) — 15h,
+  // computed from real shift timestamps including overnight shifts.
   minimum_rest_hours: number;
-  // "unconfirmed" is a real, literal state (see lib/labor-rules.ts) — never
-  // a guessed number. Code reading this must skip/disable the ceiling
-  // check rather than compare against an invented value.
-  fairness_ceiling_hours: number | "unconfirmed";
+  // Confirmed: the maximum total counted working duration across one
+  // employee's normal week (see lib/labor-rules.ts's
+  // maximumWeeklyWorkingHours) — 42h. Previously "unconfirmed" (the old
+  // 40h prototype value was never carried forward); now a real, active,
+  // HARD constraint — a roster exceeding this must not be generated as a
+  // normal valid plan (see lib/planning/shift-generation.ts's
+  // generation-time gate and lib/planning/validation.ts's
+  // checkWeeklyHoursCeiling final-validation gate).
+  maximum_weekly_working_hours: number;
   baseline_checkin_requirement: number;
   overbooking_checkin_reinforcement: number;
   // Resolved labor-rule values (see lib/labor-rules.ts) — the single

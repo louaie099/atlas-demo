@@ -1,23 +1,24 @@
 import { Employee, Flight, Config, WeeklyShiftEntry } from "./types";
 import { generateEmployees, generateFixedCycleEmployees } from "./employee-generator";
 import { generateWeeklyFlights } from "./flight-generator";
-import { getShiftTimesAs, buildUniformWeeklySchedule } from "./shift-templates";
+import { getShiftTimesAs, buildUniformWeeklySchedule, restHoursForDailyRepeatingShift } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
 
-// minimum_rest_hours and fairness_ceiling_hours are sourced from
-// lib/labor-rules.ts, not hand-picked here — see that file for which of
-// these is confirmed vs. an honestly-labeled prototype placeholder.
-// fairness_ceiling_hours resolves to "unconfirmed" today: it is NOT a
-// number, and nothing may substitute a guessed one in its place.
+// minimum_rest_hours and maximum_weekly_working_hours are sourced from
+// lib/labor-rules.ts, not hand-picked here — both are now confirmed
+// management-policy values (15h rest, 42h weekly ceiling); see that file
+// for source metadata. Never duplicate these numbers elsewhere — every
+// generator/validator reads them from this CONFIG object (itself read
+// from the resolver), not a hardcoded 15/42 of its own.
 const DEFAULT_RULES = resolveDefaultLaborRules();
 
 export const CONFIG: Config = {
   minimum_rest_hours: DEFAULT_RULES.minimumRestHours,
-  fairness_ceiling_hours: DEFAULT_RULES.weeklyHoursCeiling,
+  maximum_weekly_working_hours: DEFAULT_RULES.maximumWeeklyWorkingHours,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
   normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
@@ -42,12 +43,22 @@ export const DAYS_WITH_DATA = ["Monday", "Tuesday", "Wednesday", "Thursday", "Fr
 // week is fixed, not live.
 export const DEMO_TODAY = "Wednesday";
 
-// The 8 scripted employees below are protected — rest_before_shift_hours
-// and weekly_hours must not change, since 02-scenario-script.md and the
-// test suite depend on exact values (Nadia's 11h rest, Karim's 38h weekly
-// hours, etc.). Shift times are sourced from the authoritative shift
-// catalog (lib/shift-templates.ts) wherever a real code produces the same
-// tested behavior. Karim is the one deliberate exception — see his comment.
+// The 8 scripted employees below are protected — weekly_hours (Karim's
+// 38h, etc.) must not change, since 02-scenario-script.md and the test
+// suite depend on those exact values. rest_before_shift_hours is the ONE
+// exception: it is now always DERIVED from each employee's real shift
+// code via restHoursForDailyRepeatingShift (lib/shift-templates.ts),
+// never an independently hand-picked number — the previous flat 10-13h
+// values predated the confirmed 15h rest floor and were never
+// reconciled against it. Some of these scripted employees' derived rest
+// now falls below the confirmed 15h floor (Nadia's NR02: 13.75h; Youssef
+// and Rania's AP02/MT02: 14.5h/13.75h) — this is the honest, reportable
+// consequence of the confirmed rule, not something to paper over by
+// picking a different shift code just to preserve the old narrative
+// outcome; see the delivered report. Shift times are sourced from the
+// authoritative shift catalog (lib/shift-templates.ts) wherever a real
+// code produces the same tested behavior. Karim is the one deliberate
+// exception — see his comment.
 // Nadia's roles previously included "Transit" — removed here, since Transit
 // is an assignment (where she'd be placed), not a skill (what she can do);
 // this was exactly the confusion the skill/assignment split corrects.
@@ -77,7 +88,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "AP01",
     ...getShiftTimesAs("AP01"),
-    rest_before_shift_hours: 12,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01"),
     weekly_hours: 24,
     is_duty_officer: false,
     off_days: scriptedOffDays(0),
@@ -91,7 +102,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "AP02",
     ...getShiftTimesAs("AP02"),
-    rest_before_shift_hours: 12,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP02"),
     weekly_hours: 26,
     is_duty_officer: false,
     off_days: scriptedOffDays(1),
@@ -105,7 +116,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "NR02",
     ...getShiftTimesAs("NR02"),
-    rest_before_shift_hours: 11,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("NR02"),
     weekly_hours: 22,
     is_duty_officer: false,
     off_days: scriptedOffDays(2),
@@ -132,7 +143,12 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     shift_code: null,
     shift_start: "06:00",
     shift_end: "14:00",
-    rest_before_shift_hours: 10,
+    // Not a catalog code, so restHoursForDailyRepeatingShift can't be
+    // called directly -- derived by hand using the same 24-duration
+    // formula against his actual custom 06:00-14:00 (8h) shift: 24-8=16h,
+    // comfortably above the confirmed 15h floor (unlike several of the
+    // scripted employees above, whose real catalog shift falls short).
+    rest_before_shift_hours: 16,
     weekly_hours: 38,
     is_duty_officer: false,
     off_days: ["Saturday", "Sunday"],
@@ -146,7 +162,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "AP01",
     ...getShiftTimesAs("AP01"),
-    rest_before_shift_hours: 13,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01"),
     weekly_hours: 20,
     is_duty_officer: false,
     off_days: scriptedOffDays(3),
@@ -161,7 +177,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     // JR01 — matches "Leaders/Duty Officers use fixed JR/NT-type planning."
     shift_code: "JR01",
     ...getShiftTimesAs("JR01"),
-    rest_before_shift_hours: 12,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("JR01"),
     weekly_hours: 30,
     is_duty_officer: true,
     off_days: scriptedOffDays(4),
@@ -175,7 +191,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "MT01",
     ...getShiftTimesAs("MT01"),
-    rest_before_shift_hours: 11,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01"),
     weekly_hours: 30,
     is_duty_officer: false,
     off_days: scriptedOffDays(5),
@@ -189,7 +205,7 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "MT02",
     ...getShiftTimesAs("MT02"),
-    rest_before_shift_hours: 12,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT02"),
     weekly_hours: 18,
     is_duty_officer: false,
     off_days: scriptedOffDays(6),
@@ -244,7 +260,7 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "General T1 Pool",
     shift_code: "MT01", // matches Wednesday's entry in the pattern below
     ...getShiftTimesAs("MT01"),
-    rest_before_shift_hours: 11,
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01"),
     weekly_hours: 24,
     is_duty_officer: false,
     // off_days now truthfully matches ROTATING_SHIFT_PATTERN_A above:
@@ -360,11 +376,13 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
   if (!CONFIGURED_COMPANIES.includes(employee.assignment)) return employee;
 
   const weekly_shifts: WeeklyShiftEntry[] = [];
+  let prevShiftStart: string | null = null;
   let prevShiftEnd: string | null = null;
 
   for (const entry of employee.weekly_shifts) {
     if (entry.status === "off") {
       weekly_shifts.push(entry);
+      prevShiftStart = null;
       prevShiftEnd = null;
       continue;
     }
@@ -373,6 +391,7 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
       employee.assignment,
       entry.day_of_week,
       FLIGHTS,
+      prevShiftStart,
       prevShiftEnd,
       CONFIG.minimum_rest_hours
     );
@@ -380,6 +399,7 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
     if (restAwarePlan) {
       if (restAwarePlan.shiftCode) {
         weekly_shifts.push({ ...entry, shift_code: restAwarePlan.shiftCode, status: "working" });
+        prevShiftStart = getShiftTimesAs(restAwarePlan.shiftCode).shift_start;
         prevShiftEnd = getShiftTimesAs(restAwarePlan.shiftCode).shift_end;
       } else {
         // A real company flight exists today, but no catalog shift both
@@ -398,12 +418,14 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
         const coverageOnlyPlan = planForeignCompanyDay(employee.assignment, entry.day_of_week, FLIGHTS);
         if (coverageOnlyPlan?.shiftCode) {
           weekly_shifts.push({ ...entry, shift_code: coverageOnlyPlan.shiftCode, status: "working" });
+          prevShiftStart = getShiftTimesAs(coverageOnlyPlan.shiftCode).shift_start;
           prevShiftEnd = getShiftTimesAs(coverageOnlyPlan.shiftCode).shift_end;
         } else {
           // No catalog shift covers the protected window at all, rest
           // aside — a genuine coverage gap (no shift exists, not "no
           // rested shift exists"), so OFF is the honest state here.
           weekly_shifts.push({ ...entry, shift_code: null, status: "off" });
+          prevShiftStart = null;
           prevShiftEnd = null;
         }
       }
@@ -418,6 +440,7 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
     // shortfall is left to surface as a rest_violation Plan Warning via
     // checkRestBetweenDays, exactly like every other employee's schedule.
     weekly_shifts.push(entry);
+    prevShiftStart = entry.shift_code ? getShiftTimesAs(entry.shift_code).shift_start : null;
     prevShiftEnd = entry.shift_code ? getShiftTimesAs(entry.shift_code).shift_end : null;
   }
 

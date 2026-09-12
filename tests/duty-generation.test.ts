@@ -6,7 +6,9 @@ import { Employee, Flight, StaffingRequirement, Assignment, WeeklyPlanRosterEntr
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
     id: "emp", name: "Test", skills: ["Boarding"], assignment: "General T1 Pool",
-    shift_code: "AP01", shift_start: "13:45", shift_end: "22:45", rest_before_shift_hours: 12,
+    // AP01's real derived rest (24h - 9h duration) is 15h, exactly at the
+    // confirmed floor -- not the old 12h placeholder, which predated it.
+    shift_code: "AP01", shift_start: "13:45", shift_end: "22:45", rest_before_shift_hours: 15,
     weekly_hours: 10, is_duty_officer: false, off_days: [], foreign_company_authorizations: [],
     active: true, weekly_shifts: [{ day_of_week: "Wednesday", shift_code: "AP01", status: "working" }],
     ...overrides,

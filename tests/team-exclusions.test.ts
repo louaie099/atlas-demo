@@ -12,7 +12,9 @@ function makeEmployee(overrides: Partial<Employee>): Employee {
     shift_code: "MT01",
     shift_start: "06:00",
     shift_end: "14:00",
-    rest_before_shift_hours: 12,
+    // MT01's real derived rest (24h - 9h duration) is 15h, exactly at the
+    // confirmed floor -- not the old 12h placeholder.
+    rest_before_shift_hours: 15,
     weekly_hours: 20,
     is_duty_officer: false,
     off_days: [],

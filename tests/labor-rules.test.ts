@@ -30,14 +30,15 @@ describe("resolved default labor rules — confirmed management policy values", 
     expect(resolved.maxConsecutiveOffDaysSource).toBe("confirmed_management_policy");
   });
 
-  it("minimumRestHours stays honestly unconfirmed_prototype (10h) — never upgraded silently", () => {
-    expect(resolved.minimumRestHours).toBe(10);
-    expect(resolved.minimumRestHoursSource).toBe("unconfirmed_prototype");
+  it("minimumRestHours is confirmed at 15h — the old 10h unconfirmed_prototype placeholder is gone", () => {
+    expect(resolved.minimumRestHours).toBe(15);
+    expect(resolved.minimumRestHoursSource).toBe("confirmed_management_policy");
   });
 
-  it("weeklyHoursCeiling stays the literal 'unconfirmed' — the old 40h ceiling is never reintroduced", () => {
-    expect(resolved.weeklyHoursCeiling).toBe("unconfirmed");
-    expect(resolved.weeklyHoursCeilingSource).toBe("unconfirmed_prototype");
+  it("maximumWeeklyWorkingHours is confirmed at 42h — the old 40h ceiling is never reintroduced, and it's no longer 'unconfirmed'", () => {
+    expect(resolved.maximumWeeklyWorkingHours).toBe(42);
+    expect(resolved.maximumWeeklyWorkingHours).not.toBe(40);
+    expect(resolved.maximumWeeklyWorkingHoursSource).toBe("confirmed_management_policy");
   });
 
   it("DEFAULT_LABOR_RULES has exactly one (default/unscoped) rule set", () => {
@@ -52,5 +53,11 @@ describe("Config (lib/seed-data.ts) — threads the resolved labor rules through
     expect(CONFIG.normal_weekly_off_days).toBe(resolved.normalWeeklyOffDays);
     expect(CONFIG.max_consecutive_off_days).toBe(resolved.maxConsecutiveOffDays);
     expect(CONFIG.renfort_weekly_off_days).toBe(resolved.renfortWeeklyOffDays);
+  });
+
+  it("CONFIG.minimum_rest_hours / maximum_weekly_working_hours mirror the resolved labor rules exactly — never a hardcoded 15/42 of CONFIG's own", () => {
+    const resolved = resolveDefaultLaborRules();
+    expect(CONFIG.minimum_rest_hours).toBe(resolved.minimumRestHours);
+    expect(CONFIG.maximum_weekly_working_hours).toBe(resolved.maximumWeeklyWorkingHours);
   });
 });

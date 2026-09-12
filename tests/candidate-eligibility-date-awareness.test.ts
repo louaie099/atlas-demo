@@ -12,7 +12,10 @@ function makeEmployee(overrides: Partial<Employee>): Employee {
     shift_code: "NR02",
     shift_start: "08:00",
     shift_end: "18:00",
-    rest_before_shift_hours: 12,
+    // Not testing rest here -- set at the confirmed 15h floor so this
+    // employee's eligibility in every case below turns only on the
+    // foreign-commitment window logic under test, never on rest.
+    rest_before_shift_hours: 15,
     weekly_hours: 20,
     is_duty_officer: false,
     off_days: [],

@@ -9,10 +9,14 @@ import { Employee } from "./types";
  * rotation-generation input by itself.
  *
  * Every rule value carries its own `source` so "confirmed" vs "prototype
- * placeholder, pending a real number" is never lost once a value is read —
- * this is what lets `weeklyHoursCeiling` stay honestly "unconfirmed"
- * (never a guessed number) while `normalWeeklyOffDays` is genuinely
- * confirmed and active.
+ * placeholder, pending a real number" is never lost once a value is read.
+ * As of this revision every field below is confirmed_management_policy —
+ * `minimumRestHours` (15h) and `maximumWeeklyWorkingHours` (42h) were the
+ * last two still marked "unconfirmed_prototype"/"unconfirmed"; both are
+ * now real, active, hard constraints. The `unconfirmed_prototype` source
+ * value itself is kept in the LaborRuleSource union below only so a
+ * FUTURE genuinely-unconfirmed rule can still be represented honestly —
+ * it does not describe anything in DEFAULT_LABOR_RULES today.
  */
 export type LaborRuleSource =
   | "confirmed_management_policy"
@@ -45,6 +49,12 @@ export interface LaborRules {
   scope: LaborRuleScope;
   effectiveFrom: string; // ISO date
   effectiveTo: string | null;
+  // Confirmed: at least this many hours between the END of one working
+  // shift and the START of the employee's next working shift, computed
+  // from real shift timestamps (including overnight shifts that cross
+  // midnight — see roster-generation.ts's restHoursBetween). Previously
+  // an "unconfirmed_prototype" placeholder at 10h; now a real, confirmed
+  // management policy value.
   minimumRestHours: RuleValue<number>;
   // The confirmed rule: a normal week has exactly 2 OFF/rest days.
   normalWeeklyOffDays: RuleValue<number>;
@@ -61,11 +71,17 @@ export interface LaborRules {
   // lib/fixed-cycle-rotation.ts) is validated AGAINST this value, but the
   // sequence itself lives in the rotation engine, never here.
   maxConsecutiveOffDays: RuleValue<number>;
-  // "unconfirmed" is a real, literal state — never replaced with a guessed
-  // number. Code that reads this must treat "unconfirmed" as "do not
-  // enforce, do not use to drive generation," not as a missing value to
-  // fill in.
-  weeklyHoursCeiling: RuleValue<number | "unconfirmed">;
+  // Confirmed: the maximum total counted working duration (sum of
+  // scheduled shift durations, overnight shifts counted correctly) across
+  // one employee's normal week. Previously "unconfirmed" (the old 40h
+  // prototype value was deliberately never carried forward as a number);
+  // now a real, confirmed 42h ceiling. This is a HARD constraint a roster
+  // must satisfy BEFORE it is generated, never a number a plan is allowed
+  // to exceed and merely get flagged for afterward — see
+  // lib/planning/validation.ts's checkWeeklyHoursCeiling (final-validation
+  // gate) and lib/planning/shift-generation.ts (generation-time gate for
+  // the flexible pool, the only place shift SELECTION happens day-by-day).
+  maximumWeeklyWorkingHours: RuleValue<number>;
 }
 
 /**
@@ -73,25 +89,20 @@ export interface LaborRules {
  * has confirmed values. Do not add a scoped entry speculatively — add one
  * only once a real, confirmed, role/contract-specific rule exists.
  *
- * minimumRestHours (10h) is carried over UNCHANGED from the previous
- * prototype value — not invented, not silently confirmed either. It is
- * explicitly marked "unconfirmed_prototype" so nothing downstream can
- * mistake it for a confirmed labor-code number. It still functions as the
- * operative rest constraint (rest protection has to mean something even
- * before a real number is confirmed), it's just honestly labeled.
+ * minimumRestHours (15h) and maximumWeeklyWorkingHours (42h) are now BOTH
+ * confirmed management-policy values, replacing the old 10h
+ * "unconfirmed_prototype" rest placeholder and the "unconfirmed" hours
+ * ceiling respectively. Do not restore the old 10h or 40h values anywhere
+ * — those numbers no longer exist in this codebase as anything other than
+ * history in comments like this one.
  *
  * normalWeeklyOffDays (2), renfortWeeklyOffDays (1), and
- * maxConsecutiveOffDays (2) ARE confirmed — stated explicitly as the real
- * rules. maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
+ * maxConsecutiveOffDays (2) remain confirmed and unchanged.
+ * maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
  * consecutive-OFF check and the hard feasibility gate the Rotation
  * Feasibility Engine applies to candidate rotations (see
  * lib/rotation-feasibility.ts) — one resolved number, one source of truth,
  * never a value re-declared at either call site.
- *
- * weeklyHoursCeiling stays "unconfirmed" — the old 40h prototype value is
- * deliberately NOT carried forward as a number. It must never again drive
- * OFF-day count or rotation generation; see roster-generation.ts and
- * employee-generator.ts, which no longer read a ceiling for that purpose.
  */
 export const DEFAULT_LABOR_RULES: LaborRules[] = [
   {
@@ -99,11 +110,11 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     scope: {},
     effectiveFrom: "2026-01-01",
     effectiveTo: null,
-    minimumRestHours: { value: 10, source: "unconfirmed_prototype" },
+    minimumRestHours: { value: 15, source: "confirmed_management_policy" },
     normalWeeklyOffDays: { value: 2, source: "confirmed_management_policy" },
     renfortWeeklyOffDays: { value: 1, source: "confirmed_management_policy" },
     maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
-    weeklyHoursCeiling: { value: "unconfirmed", source: "unconfirmed_prototype" },
+    maximumWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
   },
 ];
 
@@ -116,8 +127,8 @@ export interface ResolvedLaborRules {
   renfortWeeklyOffDaysSource: LaborRuleSource;
   maxConsecutiveOffDays: number;
   maxConsecutiveOffDaysSource: LaborRuleSource;
-  weeklyHoursCeiling: number | "unconfirmed";
-  weeklyHoursCeilingSource: LaborRuleSource;
+  maximumWeeklyWorkingHours: number;
+  maximumWeeklyWorkingHoursSource: LaborRuleSource;
 }
 
 function isEffective(rule: LaborRules, date: string): boolean {
@@ -174,8 +185,8 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     renfortWeeklyOffDaysSource: rule.renfortWeeklyOffDays.source,
     maxConsecutiveOffDays: rule.maxConsecutiveOffDays.value,
     maxConsecutiveOffDaysSource: rule.maxConsecutiveOffDays.source,
-    weeklyHoursCeiling: rule.weeklyHoursCeiling.value,
-    weeklyHoursCeilingSource: rule.weeklyHoursCeiling.source,
+    maximumWeeklyWorkingHours: rule.maximumWeeklyWorkingHours.value,
+    maximumWeeklyWorkingHoursSource: rule.maximumWeeklyWorkingHours.source,
   };
 }
 

@@ -6,7 +6,9 @@ import { Employee, Flight, StaffingRequirement, Assignment } from "../lib/types"
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
     id: "emp", name: "Test", skills: ["Boarding"], assignment: "General T1 Pool",
-    shift_code: "AP01", shift_start: "13:45", shift_end: "22:45", rest_before_shift_hours: 12,
+    // AP01's real derived rest (24h - 9h duration) is 15h, exactly at the
+    // confirmed floor -- not the old 12h placeholder, which predated it.
+    shift_code: "AP01", shift_start: "13:45", shift_end: "22:45", rest_before_shift_hours: 15,
     weekly_hours: 10, is_duty_officer: false, off_days: [], foreign_company_authorizations: [],
     active: true, weekly_shifts: [{ day_of_week: "Wednesday", shift_code: "AP01", status: "working" }],
     ...overrides,
@@ -133,7 +135,7 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
   });
 
   it("a rest_violation issue is indexed onto the specific day it was violated into; a weekly_hours_violation is kept week-level, not attached to any single day", () => {
-    // AP02 ends 23:15 Monday; MT02 starts 04:30 Tuesday -> 5.25h rest, below the 10h minimum.
+    // AP02 ends 23:15 Monday; MT02 starts 04:30 Tuesday -> 5.25h rest, below the confirmed 15h minimum.
     const restViolator = makeEmployee({
       id: "e1",
       assignment: "Duty Officers", // fixed team: guarantees weekly_shifts is used as-is, not overridden by Stage 6 generation

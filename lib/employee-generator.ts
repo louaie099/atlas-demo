@@ -1,5 +1,5 @@
 import { Employee } from "./types";
-import { getShiftTimesAs } from "./shift-templates";
+import { getShiftTimesAs, restHoursForDailyRepeatingShift } from "./shift-templates";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { companyOperatingDays } from "./flight-generator";
 import { getCompanyRequiredAgents } from "./company-config";
@@ -20,6 +20,12 @@ const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satur
  * duration-based.
  */
 const LABOR_RULES = resolveDefaultLaborRules();
+
+// Employee-level rest_before_shift_hours is always derived from the
+// shift's own catalog duration via restHoursForDailyRepeatingShift
+// (lib/shift-templates.ts) — see that function's doc comment. Never an
+// independently hand-picked placeholder.
+const restBeforeShiftFor = restHoursForDailyRepeatingShift;
 
 // Synthetic name pools — clearly generated, not real personnel. Combined
 // deterministically by index (never Math.random()) so the dataset is
@@ -55,7 +61,9 @@ interface GenSpec {
   skills: string[];
   assignment: string; // internal RAM service (see teams.ts) OR a foreign company name (see company-config.ts)
   shift_code: string; // authoritative code from shift-templates.ts
-  rest_before_shift_hours: number;
+  // rest_before_shift_hours is NOT declared here -- it is always derived
+  // from shift_code via restBeforeShiftFor(), never independently
+  // hand-picked (see that function's doc comment).
   weekly_hours: number;
   foreign_company_authorizations?: string[];
   // Categories whose skills are queried by a live requirement today
@@ -111,45 +119,45 @@ const CATEGORIES: GenSpec[] = [
   // ---- General T1 Pool (~96) — the flexible, unrestricted RAM ACE pool ----
   // Newer T1 ACEs — basic skills only. Split into two shift patterns for
   // day-to-day variety. Holds Check-in (queried live) — no Wednesday off.
-  { count: 20, skills: ["Check-in", "Weight Control"], assignment: "General T1 Pool", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 16, keepWednesdayWorking: true },
-  { count: 20, skills: ["Check-in", "Weight Control"], assignment: "General T1 Pool", shift_code: "MT01", rest_before_shift_hours: 12, weekly_hours: 18, keepWednesdayWorking: true },
+  { count: 20, skills: ["Check-in", "Weight Control"], assignment: "General T1 Pool", shift_code: "NR01", weekly_hours: 16, keepWednesdayWorking: true },
+  { count: 20, skills: ["Check-in", "Weight Control"], assignment: "General T1 Pool", shift_code: "MT01", weekly_hours: 18, keepWednesdayWorking: true },
   // Intermediate ACEs — Boarding + Gate. Holds Boarding — no Wednesday.
-  { count: 20, skills: ["Boarding", "Gate"], assignment: "General T1 Pool", shift_code: "AP01", rest_before_shift_hours: 11, weekly_hours: 24, keepWednesdayWorking: true },
+  { count: 20, skills: ["Boarding", "Gate"], assignment: "General T1 Pool", shift_code: "AP01", weekly_hours: 24, keepWednesdayWorking: true },
   // Intermediate ACEs — Gate + Care Point + Check-in.
-  { count: 16, skills: ["Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "AP02", rest_before_shift_hours: 11, weekly_hours: 22, keepWednesdayWorking: true },
+  { count: 16, skills: ["Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "AP02", weekly_hours: 22, keepWednesdayWorking: true },
   // Experienced, multi-skilled ACEs — weekly hours intentionally near the
   // fairness ceiling, demonstrating a genuine fairness constraint beyond
   // Karim. Holds Boarding/Check-in — no Wednesday.
-  { count: 10, skills: ["Boarding", "Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "NR02", rest_before_shift_hours: 10, weekly_hours: 36, keepWednesdayWorking: true },
-  { count: 10, skills: ["Boarding", "Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "JR01", rest_before_shift_hours: 10, weekly_hours: 34, keepWednesdayWorking: true },
+  { count: 10, skills: ["Boarding", "Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "NR02", weekly_hours: 36, keepWednesdayWorking: true },
+  { count: 10, skills: ["Boarding", "Gate", "Care Point", "Check-in"], assignment: "General T1 Pool", shift_code: "JR01", weekly_hours: 34, keepWednesdayWorking: true },
 
   // ---- Specialized/fixed teams ----
   // Transit and Leaders MOVED to FIXED_CYCLE_GROUPS below — both now
   // follow the confirmed continuous JR → NT → OFF → OFF cycle
   // (lib/fixed-cycle-rotation.ts), not this flat 2-OFF-days path.
   // Profiling — document verification. Real Profiling skill, some also Boarding.
-  { count: 7, skills: ["Profiling"], assignment: "Profiling", shift_code: "NR02", rest_before_shift_hours: 11, weekly_hours: 22, keepWednesdayWorking: true },
-  { count: 5, skills: ["Profiling", "Boarding"], assignment: "Profiling", shift_code: "AP02", rest_before_shift_hours: 11, weekly_hours: 24, keepWednesdayWorking: true },
+  { count: 7, skills: ["Profiling"], assignment: "Profiling", shift_code: "NR02", weekly_hours: 22, keepWednesdayWorking: true },
+  { count: 5, skills: ["Profiling", "Boarding"], assignment: "Profiling", shift_code: "AP02", weekly_hours: 24, keepWednesdayWorking: true },
   // Mesure — carry-on inspection at the gate. Real Mesure skill; a subset
   // also Profiling-qualified, per the explicit instruction. Rest hours
   // intentionally tight for one sub-group, demonstrating a rest
   // constraint within a specialized assignment, not only General T1.
-  { count: 8, skills: ["Mesure"], assignment: "Mesure", shift_code: "MT02", rest_before_shift_hours: 9, weekly_hours: 30 },
-  { count: 4, skills: ["Mesure", "Profiling"], assignment: "Mesure", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 24, keepWednesdayWorking: true },
+  { count: 8, skills: ["Mesure"], assignment: "Mesure", shift_code: "MT02", weekly_hours: 30 },
+  { count: 4, skills: ["Mesure", "Profiling"], assignment: "Mesure", shift_code: "NR01", weekly_hours: 24, keepWednesdayWorking: true },
   // Caisse/BCB — the payment desk. Fixed planning, excluded from general
   // allocation regardless of off-status. Real rotation TBD — placeholder
   // OFF-day distribution only.
-  { count: 6, skills: ["Caisse/BCB"], assignment: "Caisse/BCB", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 20 },
+  { count: 6, skills: ["Caisse/BCB"], assignment: "Caisse/BCB", shift_code: "NR01", weekly_hours: 20 },
   // Baggage Claim — no confirmed dedicated skill exists yet (see module
   // comment); "Weight Control" used as the closest defensible baseline.
-  { count: 6, skills: ["Weight Control"], assignment: "Baggage Claim", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 20 },
+  { count: 6, skills: ["Weight Control"], assignment: "Baggage Claim", shift_code: "NR01", weekly_hours: 20 },
   // Service Plus — T1-based premium/VIP/business-class/lounge activity.
-  { count: 6, skills: ["Service Plus"], assignment: "Service Plus", shift_code: "AP02", rest_before_shift_hours: 12, weekly_hours: 18, keepWednesdayWorking: true },
+  { count: 6, skills: ["Service Plus"], assignment: "Service Plus", shift_code: "AP02", weekly_hours: 18, keepWednesdayWorking: true },
   // Duty Officers — confirmed fixed NT/JR-type planning (night/day
   // coverage). Kept working Wednesday so the narrative (Mohammed Alaoui
   // approving on Wednesday) doesn't read oddly next to others being off
   // the same day.
-  { count: 4, skills: ["Boarding"], assignment: "Duty Officers", shift_code: "NT01", rest_before_shift_hours: 12, weekly_hours: 30, keepWednesdayWorking: true },
+  { count: 4, skills: ["Boarding"], assignment: "Duty Officers", shift_code: "NT01", weekly_hours: 30, keepWednesdayWorking: true },
 ];
 
 interface FixedCycleSpec {
@@ -157,7 +165,10 @@ interface FixedCycleSpec {
   skills: string[];
   assignment: string;
   cycle: FixedCycleDefinition;
-  rest_before_shift_hours: number;
+  // rest_before_shift_hours is NOT declared here -- see
+  // generateFixedCycleEmployees, which derives it from the cycle's
+  // reference (JR) shift code via restBeforeShiftFor(), same as every
+  // other employee.
   weekly_hours: number;
 }
 
@@ -176,8 +187,8 @@ interface FixedCycleSpec {
  * the rest), so that split is no longer needed; merged into one group.
  */
 const FIXED_CYCLE_GROUPS: FixedCycleSpec[] = [
-  { count: 14, skills: ["Transit"], assignment: "Transit", cycle: JR_NT_OFF_OFF_CYCLE, rest_before_shift_hours: 11, weekly_hours: 28 },
-  { count: 5, skills: ["Boarding"], assignment: "Leaders", cycle: JR_NT_OFF_OFF_CYCLE, rest_before_shift_hours: 12, weekly_hours: 32 },
+  { count: 14, skills: ["Transit"], assignment: "Transit", cycle: JR_NT_OFF_OFF_CYCLE, weekly_hours: 28 },
+  { count: 5, skills: ["Boarding"], assignment: "Leaders", cycle: JR_NT_OFF_OFF_CYCLE, weekly_hours: 32 },
 ];
 
 // Generation-time sanity check, not a rotation-generation input: the
@@ -251,7 +262,7 @@ export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeS
           shift_code: referenceCode,
           shift_start,
           shift_end,
-          rest_before_shift_hours: spec.rest_before_shift_hours,
+          rest_before_shift_hours: referenceCode ? restBeforeShiftFor(referenceCode) : 0,
           weekly_hours: spec.weekly_hours,
           is_duty_officer: false,
           off_days,
@@ -281,10 +292,10 @@ export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeS
  * from a skill (see the "Ramp Team" retirement note above CATEGORIES).
  */
 const FOREIGN_GROUPS: GenSpec[] = [
-  { count: 9, skills: ["Boarding"], assignment: "Emirates", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 26, foreign_company_authorizations: ["Emirates", "Etihad"], keepWednesdayWorking: true },
-  { count: 7, skills: ["Boarding"], assignment: "Qatar Airways", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Qatar Airways", "Gulf Air"], keepWednesdayWorking: true },
-  { count: 6, skills: ["Boarding"], assignment: "Gulf Air", shift_code: "MT02", rest_before_shift_hours: 11, weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
-  { count: 5, skills: ["Boarding"], assignment: "Etihad", shift_code: "NR02", rest_before_shift_hours: 12, weekly_hours: 23, foreign_company_authorizations: ["Etihad", "Emirates"], keepWednesdayWorking: true },
+  { count: 9, skills: ["Boarding"], assignment: "Emirates", shift_code: "NR01", weekly_hours: 26, foreign_company_authorizations: ["Emirates", "Etihad"], keepWednesdayWorking: true },
+  { count: 7, skills: ["Boarding"], assignment: "Qatar Airways", shift_code: "NR01", weekly_hours: 24, foreign_company_authorizations: ["Qatar Airways", "Gulf Air"], keepWednesdayWorking: true },
+  { count: 6, skills: ["Boarding"], assignment: "Gulf Air", shift_code: "MT02", weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
+  { count: 5, skills: ["Boarding"], assignment: "Etihad", shift_code: "NR02", weekly_hours: 23, foreign_company_authorizations: ["Etihad", "Emirates"], keepWednesdayWorking: true },
   // Corrected: baseline was AP01 (13:45-22:45). AF1234 departs 10:30, so
   // its protected window (~06:00-10:30) requires an early-morning shift
   // on flight days (Tue/Thu/Sat) — but ending a non-flight day on AP01
@@ -298,11 +309,11 @@ const FOREIGN_GROUPS: GenSpec[] = [
   // early-morning flight-compatible code the next day, so it no longer
   // cascades into forced extra OFF days. This is a baseline-data fix
   // (this spec's own parameter), not an engine or rest-rule change.
-  { count: 5, skills: ["Boarding"], assignment: "Air France", shift_code: "NR01", rest_before_shift_hours: 12, weekly_hours: 24, foreign_company_authorizations: ["Air France"], keepWednesdayWorking: true },
+  { count: 5, skills: ["Boarding"], assignment: "Air France", shift_code: "NR01", weekly_hours: 24, foreign_company_authorizations: ["Air France"], keepWednesdayWorking: true },
   // Authorized for a foreign company but currently placed in the General
   // T1 Pool — proves authorization doesn't imply placement, at a
   // slightly larger scale than the original single example.
-  { count: 4, skills: ["Boarding"], assignment: "General T1 Pool", shift_code: "NR01", rest_before_shift_hours: 11, weekly_hours: 22, foreign_company_authorizations: ["Air France", "Qatar Airways"] },
+  { count: 4, skills: ["Boarding"], assignment: "General T1 Pool", shift_code: "NR01", weekly_hours: 22, foreign_company_authorizations: ["Air France", "Qatar Airways"] },
 ];
 
 /**
@@ -416,7 +427,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
         shift_code: spec.shift_code,
         shift_start,
         shift_end,
-        rest_before_shift_hours: spec.rest_before_shift_hours,
+        rest_before_shift_hours: restBeforeShiftFor(spec.shift_code),
         weekly_hours: spec.weekly_hours,
         is_duty_officer: spec.assignment === "Duty Officers",
         off_days,
@@ -441,7 +452,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
         shift_code: spec.shift_code,
         shift_start,
         shift_end,
-        rest_before_shift_hours: spec.rest_before_shift_hours,
+        rest_before_shift_hours: restBeforeShiftFor(spec.shift_code),
         weekly_hours: spec.weekly_hours,
         is_duty_officer: spec.assignment === "Duty Officers",
         off_days: offDaysByMember[n],
