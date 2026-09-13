@@ -185,6 +185,107 @@ export async function persistDraftPlanBundle(supabase: SupabaseClient, bundle: D
     const { error: assignErr } = await supabase.from("assignments").insert(bundle.assignments);
     if (assignErr) throw new Error(`Persisting plan assignments failed: ${assignErr.message}`);
   }
+
+  // See verifyPlanPersisted's doc comment: a client library reporting no
+  // `error` is NOT proof the write is actually visible to the very next
+  // read (a silently-filtering RLS policy on the read/write path, a
+  // schema-cache/connection-pooling quirk, or any other infra-level gap
+  // between "the client thinks this succeeded" and "the database will
+  // hand this back" all look identical from here otherwise) -- verify by
+  // reading it straight back, in the same request, before telling any
+  // caller this plan exists.
+  await verifyPlanPersisted(supabase, bundle, "persistDraftPlanBundle");
+}
+
+/**
+ * Paginates past PostgREST's default 1000-row `.select()` cap -- see
+ * fetchAllRosterEntriesForPlan's doc comment below for the full
+ * explanation; this is the same pattern applied to `assignments` too, so
+ * the verification step below (and any other assignments-count check)
+ * can't be fooled by the exact same silent-truncation failure mode.
+ */
+async function fetchAllAssignmentsForPlan(supabase: SupabaseClient, planId: string): Promise<Assignment[]> {
+  const PAGE_SIZE = 1000;
+  const all: Assignment[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase.from("assignments").select("*").eq("plan_id", planId).range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`Fetching plan assignments failed: ${error.message}`);
+    const page = (data ?? []) as Assignment[];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
+
+/**
+ * READ-YOUR-OWN-WRITE verification, run at the end of every operation
+ * that persists a plan revision (persistDraftPlanBundle above and
+ * regenerateDraftPlan's own update+replace below). This is the direct fix
+ * for the read-after-write bug traced in this milestone: Make Planning
+ * was reporting a persisted revision (e.g. 2) that a client library call
+ * had returned no `error` for, while the very next read of the SAME row
+ * -- through the SAME service-role client, moments later -- still showed
+ * the previous revision (1), with the previous revision's roster/
+ * assignment rows still in place underneath it. The three most likely
+ * causes for a Postgres UPDATE/DELETE+INSERT sequence to silently not
+ * "take" while returning no client-visible error are: (1) a Row Level
+ * Security USING policy on weekly_plans/weekly_plan_roster_entries/
+ * assignments that silently filters the UPDATE/DELETE to zero affected
+ * rows -- Postgres does NOT error on an UPDATE/DELETE that matches zero
+ * rows, RLS-filtered or otherwise; (2) two logically "the same" plan
+ * existing as two distinct rows (mismatched `id` from an earlier code
+ * path, a migration that didn't enforce the primary key it declares, or
+ * similar); (3) the write and the subsequent read genuinely landing on
+ * different underlying data stores/connections. This function can't
+ * distinguish which of those it is from inside the app -- what it CAN do
+ * is refuse to report success for a revision that a same-process,
+ * immediate re-read does not actually confirm, which is the honest
+ * behavior "silently trust the insert/update call's own reported success"
+ * was missing. A failure here surfaces as a hard 500 from the Make
+ * Planning endpoint -- exactly what should happen instead of a plan
+ * lifecycle function claiming a revision is live when it demonstrably
+ * is not.
+ */
+async function verifyPlanPersisted(supabase: SupabaseClient, bundle: DraftPlanBundle, calledFrom: string): Promise<void> {
+  const planId = bundle.plan.id;
+
+  const { data: rows, error: planErr } = await supabase.from("weekly_plans").select("*").eq("id", planId);
+  if (planErr) throw new Error(`${calledFrom}: verifying persisted plan failed: ${planErr.message}`);
+  const persisted = rows?.[0] as WeeklyPlan | undefined;
+  if (!persisted) {
+    throw new Error(
+      `${calledFrom}: persistence verification failed for plan "${planId}" -- expected revision ${bundle.plan.revision} to exist immediately after writing it, but a fresh read found NO row at all. The insert/update reported no error, but the row is not actually visible to the very next read through this same client -- do not trust this write as committed.`
+    );
+  }
+  if (persisted.revision !== bundle.plan.revision) {
+    throw new Error(
+      `${calledFrom}: persistence verification failed for plan "${planId}" -- expected revision ${bundle.plan.revision} to be committed, but a fresh read reports revision ${persisted.revision} instead. The write that should have advanced this plan to revision ${bundle.plan.revision} did not actually take effect (a Row Level Security policy silently filtering the UPDATE, a stale/duplicate row under this same id, or some other write-visibility gap are the likely causes -- this needs investigating against the actual database, not papered over here). Refusing to report success for a revision that was never really committed.`
+    );
+  }
+
+  const persistedRoster = await fetchAllRosterEntriesForPlan(supabase, planId);
+  if (persistedRoster.length !== bundle.rosterEntries.length) {
+    throw new Error(
+      `${calledFrom}: persistence verification failed for plan "${planId}" revision ${bundle.plan.revision} -- expected ${bundle.rosterEntries.length} roster entries, but a fresh read found ${persistedRoster.length}. ${
+        persistedRoster.length > bundle.rosterEntries.length
+          ? "MORE rows than expected means an earlier revision's roster entries were not actually deleted before this revision's rows were inserted -- the two revisions' data is now mixed in the same table."
+          : "FEWER rows than expected means this revision's insert did not fully take effect."
+      } Refusing to report success for a revision whose persisted roster does not match what was just generated.`
+    );
+  }
+
+  const persistedAssignments = await fetchAllAssignmentsForPlan(supabase, planId);
+  if (persistedAssignments.length !== bundle.assignments.length) {
+    throw new Error(
+      `${calledFrom}: persistence verification failed for plan "${planId}" revision ${bundle.plan.revision} -- expected ${bundle.assignments.length} assignments, but a fresh read found ${persistedAssignments.length}. ${
+        persistedAssignments.length > bundle.assignments.length
+          ? "MORE rows than expected means an earlier revision's assignments were not actually deleted before this revision's rows were inserted -- the two revisions' data is now mixed in the same table."
+          : "FEWER rows than expected means this revision's insert did not fully take effect."
+      } Refusing to report success for a revision whose persisted assignments do not match what was just generated.`
+    );
+  }
 }
 
 /**
@@ -413,6 +514,18 @@ export async function regenerateDraftPlan(
     const { error } = await supabase.from("assignments").insert(bundle.assignments);
     if (error) throw new Error(`Persisting plan assignments failed: ${error.message}`);
   }
+
+  // Read-your-own-write verification -- see verifyPlanPersisted's doc
+  // comment. This is the exact step that closes the traced read-after-
+  // write bug: the UPDATE above reporting no client-visible `error` is
+  // NOT proof the row this same request will read back next actually
+  // shows revision `bundle.plan.revision` -- Postgres does not error on
+  // an UPDATE that matches zero rows (the classic silent-RLS-filter or
+  // stale/duplicate-row failure mode), so this re-reads the plan and its
+  // roster/assignment counts before this function is allowed to report
+  // success, and throws a specific, diagnostic error the moment any of
+  // them disagrees with what was just generated.
+  await verifyPlanPersisted(supabase, bundle, "regenerateDraftPlan");
 
   return { plan: { ...existing, ...bundle.plan }, summary: bundle.summary };
 }

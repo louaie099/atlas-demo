@@ -30,6 +30,35 @@ interface FakeRow {
   [key: string]: unknown;
 }
 
+// Supports .select("*").eq(...).range(...) as a thenable -- needed since
+// persistDraftPlanBundle (called by resetDatabase) now performs a
+// read-your-own-write verification (verifyPlanPersisted in
+// lib/planning/weekly-plan-service.ts) immediately after every insert; see
+// tests/plan-persistence-verification.test.ts for the dedicated coverage
+// of that verification step itself.
+class FakeQuery implements PromiseLike<{ data: FakeRow[]; error: null }> {
+  constructor(private table: FakeTable, private filters: [string, unknown][] = []) {}
+  private rangeBounds: [number, number] | null = null;
+
+  eq(col: string, val: unknown): FakeQuery {
+    return new FakeQuery(this.table, [...this.filters, [col, val]]);
+  }
+
+  range(from: number, to: number): FakeQuery {
+    const next = new FakeQuery(this.table, this.filters);
+    next.rangeBounds = [from, to];
+    return next;
+  }
+
+  then<TResult1 = { data: FakeRow[]; error: null }, TResult2 = never>(
+    onfulfilled?: ((value: { data: FakeRow[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null
+  ): PromiseLike<TResult1 | TResult2> {
+    let rows = this.table.rows.filter((r) => this.filters.every(([c, v]) => r[c] === v));
+    rows = this.rangeBounds ? rows.slice(this.rangeBounds[0], this.rangeBounds[1] + 1) : rows.slice(0, 1000);
+    return Promise.resolve({ data: rows, error: null }).then(onfulfilled as any);
+  }
+}
+
 class FakeTable {
   rows: FakeRow[] = [];
 
@@ -37,6 +66,10 @@ class FakeTable {
     const arr = Array.isArray(records) ? records : [records];
     this.rows.push(...arr);
     return Promise.resolve({ data: arr, error: null });
+  }
+
+  select(_cols: string): FakeQuery {
+    return new FakeQuery(this);
   }
 
   delete() {
