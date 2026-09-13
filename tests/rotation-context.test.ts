@@ -67,26 +67,51 @@ describe("deriveTransitionContextFromPriorPlan", () => {
 });
 
 describe("deriveFallbackBoundaryContext", () => {
-  function employeeWithSunday(shift: WeeklyShiftEntry): Employee {
+  function employeeWithSunday(assignment: string, shift: WeeklyShiftEntry): Employee {
     const weekly_shifts: WeeklyShiftEntry[] = DAYS_WITH_DATA.map((d) =>
       d === "Sunday" ? shift : { day_of_week: d, status: "off", shift_code: null }
     );
     return {
-      id: "e1", name: "Test", skills: [], assignment: "General T1", shift_code: shift.shift_code,
+      id: "e1", name: "Test", skills: [], assignment, shift_code: shift.shift_code,
       shift_start: null, shift_end: null, rest_before_shift_hours: null, weekly_hours: null,
       is_duty_officer: false, off_days: [], foreign_company_authorizations: [], active: true,
       weekly_shifts,
     };
   }
 
-  it("uses the employee's own static baseline for daysOrder's LAST day as the boundary seed, when they work that day", () => {
-    const employee = employeeWithSunday({ day_of_week: "Sunday", status: "working", shift_code: "MT02" });
+  // NON-flexible employees (Transit/Leaders/fixed/foreign-committed) still
+  // have a real, authoritative static weekly_shifts commitment under
+  // their own dedicated planning model (unchanged by the Task E
+  // demand-driven correction — see duty-generation.ts's
+  // effectiveShiftForDay), so the fallback boundary seed still correctly
+  // reads it for them.
+  it("uses a NON-flexible employee's own static baseline for daysOrder's LAST day as the boundary seed, when they work that day", () => {
+    const employee = employeeWithSunday("Transit", { day_of_week: "Sunday", status: "working", shift_code: "MT02" });
     const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
     expect(map.get("e1")).toEqual(getShiftTimesAs("MT02"));
   });
 
-  it("returns null when the employee's baseline has them OFF on daysOrder's last day", () => {
-    const employee = employeeWithSunday({ day_of_week: "Sunday", status: "off", shift_code: null });
+  it("returns null when a NON-flexible employee's baseline has them OFF on daysOrder's last day", () => {
+    const employee = employeeWithSunday("Transit", { day_of_week: "Sunday", status: "off", shift_code: null });
+    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
+    expect(map.get("e1")).toBeNull();
+  });
+
+  // FLEXIBLE (General T1) employees' static weekly_shifts is durable
+  // legacy/fallback DATA, not an authoritative commitment any more (Task
+  // E) — effectiveShiftForDay never reads it for this population (see
+  // duty-generation.ts). deriveFallbackBoundaryContext is a thin wrapper
+  // around effectiveShiftForDay, so for a flexible employee it correctly
+  // returns null regardless of what their static baseline says: there is
+  // genuinely no reliable "what did they last do" data to seed from for
+  // this population until a real prior plan exists (see
+  // deriveTransitionContextFromPriorPlan above for that case) — an honest
+  // "no data", never a fabricated one, and never treated as a rest
+  // violation (a missing entry, not a null-shift entry, would be — see
+  // PriorDayShiftMap's own doc comment — but this always explicitly sets
+  // null, which the forward rest gate correctly skips).
+  it("returns null for a FLEXIBLE (General T1) employee even when their static baseline says they work that day — that baseline is no longer authoritative for this population", () => {
+    const employee = employeeWithSunday("General T1", { day_of_week: "Sunday", status: "working", shift_code: "MT02" });
     const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
     expect(map.get("e1")).toBeNull();
   });

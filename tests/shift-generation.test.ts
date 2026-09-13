@@ -50,17 +50,28 @@ describe("generateFlexiblePoolShifts", () => {
     expect(result).toHaveLength(2);
   });
 
-  it("never assigns an employee who is OFF that day", () => {
+  it("DEMAND-DRIVEN, not template-driven: assigns an employee even when their static weekly_shifts baseline marks them OFF that day — that baseline is durable fallback/legacy data now, never authoritative for whether a flexible employee is available (see duty-generation.ts's effectiveShiftForDay)", () => {
     const flight = makeFlight({});
     const requirement = makeRequirement({ total_requirement: 1 });
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
 
-    const offEmployee = makeEmployee({
-      id: "off-1",
+    const staticallyOffEmployee = makeEmployee({
+      id: "e1",
       skills: ["Boarding"],
       weekly_shifts: [{ day_of_week: "Wednesday", shift_code: null, status: "off" }],
     });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [offEmployee]);
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [staticallyOffEmployee]);
+    expect(result).toHaveLength(1);
+    expect(result[0].employeeId).toBe("e1");
+  });
+
+  it("never assigns an INACTIVE employee, regardless of demand — active is a real hard exclusion, unlike the static weekly_shifts template", () => {
+    const flight = makeFlight({});
+    const requirement = makeRequirement({ total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+
+    const inactiveEmployee = makeEmployee({ id: "inactive-1", skills: ["Boarding"], active: false });
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [inactiveEmployee]);
     expect(result).toHaveLength(0);
   });
 
@@ -89,6 +100,24 @@ describe("generateFlexiblePoolShifts", () => {
     expect(result).toHaveLength(1); // one shift, not two separate assignments
     expect(result[0].coversRoles).toContain("Boarding");
     expect(result[0].coversRoles).toContain("Gate");
+  });
+
+  it("RANKED SHIFT-CODE FALLBACK: tries every compatible candidate code before giving up, but the rest gate applies identically to every candidate — a rest-blocked employee is never rescued by trying a worse-fit code (a later-ranked candidate never starts LATER than the top choice, so backward rest can only be equal or worse)", () => {
+    // Window 05:45-14:45 matches MT01 exactly (top-ranked); MT03 and JR01
+    // are also compatible (same entree, longer duration) — real fallback
+    // candidates, not fabricated ones.
+    const flight = makeFlight({ scheduled_departure: "14:45", boarding_window_start: "05:45", boarding_window_end: "14:45" });
+    const requirement = makeRequirement({ total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+
+    const employee = makeEmployee({ id: "e1", skills: ["Boarding"] });
+    // Ended a shift at 23:00 the day before -- only 6h45 before 05:45,
+    // hard-blocked no matter which compatible code (all share the same
+    // 05:45 entree) is tried.
+    const priorDayShift = new Map([["e1", { shift_start: "13:45", shift_end: "23:00" }]]);
+
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee], priorDayShift, 15);
+    expect(result).toHaveLength(0); // genuine shortfall, never a rest-violating assignment from a fallback candidate
   });
 
   it("never fabricates a shift for a demand window no catalog code can cover", () => {

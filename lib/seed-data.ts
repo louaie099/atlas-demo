@@ -7,6 +7,7 @@ import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
+import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
 // from lib/labor-rules.ts, not hand-picked here — 15h rest is confirmed
@@ -23,6 +24,7 @@ export const CONFIG: Config = {
   working_hours_reference_period_days: DEFAULT_RULES.workingHoursReferencePeriodDays,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
+  checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,
   normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
   max_consecutive_off_days: DEFAULT_RULES.maxConsecutiveOffDays,
   renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,

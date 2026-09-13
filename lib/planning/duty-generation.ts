@@ -25,36 +25,36 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 }
 
 /**
- * Builds each employee's EFFECTIVE shift for a specific day. For a
- * FLEXIBLE POOL employee, the freshly GENERATED demand-driven shift
- * (Stage 6) takes priority over whatever static baseline code they carry
- * in weekly_shifts — that baseline is a pre-planning placeholder, not a
- * real commitment, and letting it win would silently reproduce exactly
- * the "one static shift for the whole week" pattern the brief explicitly
- * rules out. If generation didn't select them that day (not needed for
- * tracked demand), they fall back to their existing entry so they're not
- * simply erased from the day.
+ * Builds each employee's EFFECTIVE shift for a specific day.
+ *
+ * For a FLEXIBLE POOL employee, the day's outcome is DEMAND-DRIVEN and
+ * comes ENTIRELY from Stage 6's generated shift for that day — there is
+ * no more fallback to their static baseline `weekly_shifts` code. That
+ * baseline is retained only as durable/legacy compatibility data (see
+ * lib/types.ts's Employee doc comment) — it must not dictate an actual
+ * planned work/OFF day for this population any more. If Stage 6 didn't
+ * select this employee for this day, they are genuinely OFF, exactly as
+ * demand determined; that is a normal, expected planning outcome now, not
+ * something to paper over with a template shift.
  *
  * For a NON-flexible employee (foreign-committed, fixed/specialized team,
- * Transit), the existing weekly_shifts entry IS their real, already-
- * established commitment and is used as-is — generation never touches
- * these employees, so there's nothing to prioritize over.
+ * Transit/Leaders), the existing `weekly_shifts` entry IS their real,
+ * already-established commitment under their own dedicated planning model
+ * and is used as-is — Stage 6 never touches these employees, so nothing
+ * here changes for them.
  */
 export function effectiveShiftForDay(
   employee: Employee,
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): { shift_start: string; shift_end: string } | null {
-  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
-  if (existing?.status === "off") return null;
-
   if (isFlexibleGeneralPool(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
-    if (generated) return getShiftTimesAs(generated.shiftCode);
-    if (existing?.shift_code) return getShiftTimesAs(existing.shift_code);
-    return null;
+    return generated ? getShiftTimesAs(generated.shiftCode) : null;
   }
 
+  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
+  if (existing?.status === "off") return null;
   if (existing?.shift_code) return getShiftTimesAs(existing.shift_code);
   return null; // not rostered this day — never a candidate for a duty that day
 }
@@ -71,15 +71,13 @@ export function effectiveShiftCodeForDay(
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): string | null {
-  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
-  if (existing?.status === "off") return null;
-
   if (isFlexibleGeneralPool(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
-    if (generated) return generated.shiftCode;
-    return existing?.shift_code ?? null;
+    return generated?.shiftCode ?? null;
   }
 
+  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
+  if (existing?.status === "off") return null;
   return existing?.shift_code ?? null;
 }
 
@@ -90,31 +88,31 @@ export function effectiveShiftCodeForDay(
  * alike (fixed-cycle, foreign-committed, flexible General T1 Pool). Same
  * effective-shift logic as effectiveShiftForDay/effectiveShiftCodeForDay
  * above, restated here to also produce the explicit "working"/"off"
- * status a roster row needs (those two functions return null for both
- * "off" and "not rostered at all", which is the right behavior for
- * candidate-pool building but not enough to persist a row).
+ * status a roster row needs.
  *
- * This is generation-time input resolution -- it reads Employee.weekly_shifts
- * as the baseline/template it still legitimately is (see lib/types.ts's
- * Employee doc comment). Once the result is persisted as a
- * WeeklyPlanRosterEntry, THAT row -- not a re-read of Employee.weekly_shifts
- * -- is what every later read of this plan must use.
+ * For the FLEXIBLE pool, this is now the single authoritative
+ * demand-driven answer: Stage 6's generated shift, or OFF — never a
+ * re-read of `Employee.weekly_shifts` as a fallback (see
+ * effectiveShiftForDay's doc comment above; that field is durable
+ * compatibility/legacy data for this population now, not this week's
+ * plan). For every other employee group, `weekly_shifts` remains their
+ * real, already-established commitment, read as-is. Once persisted as a
+ * WeeklyPlanRosterEntry, THAT row -- not a re-read of
+ * Employee.weekly_shifts -- is what every later read of this plan must
+ * use, for every employee group alike.
  */
 export function resolvePlanRosterEntry(
   employee: Employee,
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): { status: "working" | "off"; shift_code: string | null } {
-  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
-  if (existing?.status === "off") return { status: "off", shift_code: null };
-
   if (isFlexibleGeneralPool(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
-    if (generated) return { status: "working", shift_code: generated.shiftCode };
-    if (existing?.shift_code) return { status: "working", shift_code: existing.shift_code };
-    return { status: "off", shift_code: null }; // not selected for a generated shift and no baseline -- not planned to work
+    return generated ? { status: "working", shift_code: generated.shiftCode } : { status: "off", shift_code: null };
   }
 
+  const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
+  if (existing?.status === "off") return { status: "off", shift_code: null };
   if (existing?.shift_code) return { status: "working", shift_code: existing.shift_code };
   return { status: "off", shift_code: null }; // no roster entry at all for this day -- treated the same as off, matching AgentDayEntry's existing isOff semantics
 }
@@ -196,7 +194,8 @@ export function computeBusyWindowsForDay(
   existingAssignments: Assignment[],
   requirements: StaffingRequirement[],
   flights: Flight[],
-  allEmployees: Employee[]
+  allEmployees: Employee[],
+  checkinPolicy?: import("./checkin-demand").CheckinDemandPolicy
 ): Record<string, TimeWindow[]> {
   const busyWindows: Record<string, TimeWindow[]> = {};
 
@@ -212,7 +211,7 @@ export function computeBusyWindowsForDay(
     if (!requirement) continue;
     const flight = flights.find((f) => f.id === requirement.flight_id);
     if (!flight || flight.day_of_week !== dayOfWeek) continue;
-    const window = getRequirementWindow(requirement, flight);
+    const window = getRequirementWindow(requirement, flight, checkinPolicy);
     busyWindows[assignment.employee_id] = [...(busyWindows[assignment.employee_id] ?? []), window];
   }
 
@@ -234,13 +233,13 @@ export function generateDutiesForDay(
     .map((r) => ({ requirement: r, flight: flights.find((f) => f.id === r.flight_id)! }))
     .sort((a, b) => a.flight.scheduled_departure.localeCompare(b.flight.scheduled_departure));
 
-  const busyWindows = computeBusyWindowsForDay(dayOfWeek, existingAssignments, requirements, flights, allEmployees);
+  const busyWindows = computeBusyWindowsForDay(dayOfWeek, existingAssignments, requirements, flights, allEmployees, config.checkin_demand_policy);
 
   const duties: GeneratedDuty[] = [];
   const unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
   for (const { requirement, flight } of dayRequirements) {
-    const window = getRequirementWindow(requirement, flight);
+    const window = getRequirementWindow(requirement, flight, config.checkin_demand_policy);
     const alreadyAssignedToThisRequirement = existingAssignments.filter(
       (a) => a.staffing_requirement_id === requirement.id
     ).length;

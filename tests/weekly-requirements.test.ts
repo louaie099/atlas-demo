@@ -17,13 +17,15 @@ function makeFlight(overrides: Partial<Flight>): Flight {
 }
 
 describe("classifyFlightRequirements — a flight now produces MULTIPLE concurrent requirements, not one merged number", () => {
-  it("Europe/Schengen, standard aircraft: Gate x1 + Boarding x1 + Profiling x1", () => {
+  it("Europe/Schengen, standard aircraft: Gate x1 + Boarding x1 + Profiling x1 + Check-in (generalized, every RAM flight)", () => {
     const reqs = classifyFlightRequirements(makeFlight({}), CONFIG);
     const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
-    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate", "Profiling"]);
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Check-in", "Gate", "Profiling"]);
     expect(byRole.Gate.total_requirement).toBe(1);
     expect(byRole.Boarding.total_requirement).toBe(1);
     expect(byRole.Profiling.total_requirement).toBe(1);
+    expect(byRole["Check-in"].source).toBe("demand_forecast");
+    expect(byRole["Check-in"].total_requirement).toBeGreaterThan(0);
     expect(reqs.every((r) => r.needs_configuration === false)).toBe(true);
   });
 
@@ -35,10 +37,10 @@ describe("classifyFlightRequirements — a flight now produces MULTIPLE concurre
     expect(byRole.Profiling.total_requirement).toBe(2);
   });
 
-  it("Africa, standard aircraft: Gate x1 + Boarding x1 only — no Profiling row at all (not applicable, not a gap)", () => {
+  it("Africa, standard aircraft: Gate x1 + Boarding x1 + Check-in — no Profiling row at all (not applicable, not a gap)", () => {
     const reqs = classifyFlightRequirements(makeFlight({ destination_category: "Africa" }), CONFIG);
     const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
-    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate"]);
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Check-in", "Gate"]);
     expect(byRole.Gate.total_requirement).toBe(1);
     expect(byRole.Boarding.total_requirement).toBe(1);
   });
@@ -51,10 +53,10 @@ describe("classifyFlightRequirements — a flight now produces MULTIPLE concurre
     expect(byRole.Profiling).toBeUndefined();
   });
 
-  it("UK/USA, standard aircraft: Gate x1 + Boarding x1 + Profiling x1 + Mesure x4 (all real, confirmed requirements)", () => {
+  it("UK/USA, standard aircraft: Gate x1 + Boarding x1 + Profiling x1 + Mesure x4 (all real, confirmed requirements) + Check-in", () => {
     const reqs = classifyFlightRequirements(makeFlight({ destination_category: "UK/USA" }), CONFIG);
     const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
-    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate", "Mesure", "Profiling"]);
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Check-in", "Gate", "Mesure", "Profiling"]);
     expect(byRole.Gate.total_requirement).toBe(1);
     expect(byRole.Boarding.total_requirement).toBe(1);
     expect(byRole.Profiling.total_requirement).toBe(1);
@@ -73,11 +75,15 @@ describe("classifyFlightRequirements — a flight now produces MULTIPLE concurre
     expect(byRole.Mesure.needs_configuration).toBe(false);
   });
 
-  it("an entirely unconfigured destination category collapses to ONE needs_configuration row, not one per role", () => {
+  it("an entirely unconfigured destination category still gets its Check-in requirement (independent of the Gate/Boarding/Profiling matrix), plus ONE needs_configuration row for Gate/Boarding/Profiling/Mesure — not one gap row per role", () => {
     const reqs = classifyFlightRequirements(makeFlight({ destination_category: "Domestic" }), CONFIG);
-    expect(reqs).toHaveLength(1);
-    expect(reqs[0].needs_configuration).toBe(true);
-    expect(reqs[0].total_requirement).toBe(0);
+    expect(reqs).toHaveLength(2);
+    const checkin = reqs.find((r) => r.role === "Check-in")!;
+    const gap = reqs.find((r) => r.role !== "Check-in")!;
+    expect(checkin.needs_configuration).toBe(false);
+    expect(checkin.total_requirement).toBeGreaterThan(0);
+    expect(gap.needs_configuration).toBe(true);
+    expect(gap.total_requirement).toBe(0);
   });
 
   it("self-managed (foreign carrier) flights are untouched by the RAM matrix — still one company_config row", () => {
@@ -89,10 +95,10 @@ describe("classifyFlightRequirements — a flight now produces MULTIPLE concurre
     expect(reqs[0].source).toBe("company_config");
   });
 
-  it("Canada: same confirmed treatment as UK/USA — Gate x1 + Boarding x1 + Profiling x1 + Mesure x4, all real requirements", () => {
+  it("Canada: same confirmed treatment as UK/USA — Gate x1 + Boarding x1 + Profiling x1 + Mesure x4, all real requirements, plus Check-in", () => {
     const reqs = classifyFlightRequirements(makeFlight({ destination_category: "Canada" }), CONFIG);
     const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
-    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate", "Mesure", "Profiling"]);
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Check-in", "Gate", "Mesure", "Profiling"]);
     expect(byRole.Gate.total_requirement).toBe(1);
     expect(byRole.Boarding.total_requirement).toBe(1);
     expect(byRole.Profiling.total_requirement).toBe(1);

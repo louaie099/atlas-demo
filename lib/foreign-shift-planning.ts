@@ -51,6 +51,36 @@ export function selectCompatibleShiftCode(
   adjacentShiftEnd?: string | null,
   minimumRestHours?: number
 ): string | null {
+  return selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours)[0]?.code ?? null;
+}
+
+/**
+ * Same matching/ranking rule as selectCompatibleShiftCode, but returns the
+ * FULL ranked candidate list instead of only the top match. This exists
+ * for demand-driven capacity planning (see shift-generation.ts): the
+ * single nearest-fit code is still tried first, but if no employee who's
+ * otherwise eligible (skill, availability) can actually take it without
+ * breaking rest, the NEXT-best compatible code is a genuinely different,
+ * still-valid way to cover the same demand window — falling straight to
+ * "understaffed" after only one candidate would be needlessly
+ * pessimistic. `selectCompatibleShiftCode` above stays the thin
+ * single-answer wrapper every existing caller keeps using unchanged.
+ *
+ * NOTE: the optional adjacent-shift/rest filter here is a coarse,
+ * SINGLE-employee pre-filter (kept for backward compatibility with
+ * existing callers) — a real per-employee rest check against each
+ * candidate's actual entree time still happens in shift-generation.ts's
+ * greedy loop, since different employees have different prior/next
+ * shifts. Don't rely on this parameter to guarantee rest for a whole pool
+ * of employees; pass it only when ranking for one specific person.
+ */
+export function selectCompatibleShiftCodes(
+  windowStart: string,
+  windowEnd: string,
+  adjacentShiftStart?: string | null,
+  adjacentShiftEnd?: string | null,
+  minimumRestHours?: number
+): { code: string; entree: string; sortie: string }[] {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
 
@@ -69,8 +99,6 @@ export function selectCompatibleShiftCode(
     );
   }
 
-  if (candidates.length === 0) return null;
-
   candidates.sort((a, b) => {
     const gapA = windowStartMin - a.entreeMin;
     const gapB = windowStartMin - b.entreeMin;
@@ -80,7 +108,7 @@ export function selectCompatibleShiftCode(
     return durationA - durationB;
   });
 
-  return candidates[0].code;
+  return candidates.map((c) => ({ code: c.code, entree: minutesToTime(c.entreeMin), sortie: minutesToTime(c.sortieMin) }));
 }
 
 /**

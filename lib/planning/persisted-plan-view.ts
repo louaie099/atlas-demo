@@ -61,7 +61,16 @@ export function buildPersistedWeeklyPlanView(
   }));
 
   const roster = buildRosterViewsFromItems(requirements, flights, employees, items);
-  const schedule = buildPersistedAgentScheduleEntries(employees, assignments, requirements, flights, daysOrder, plan.issues, rosterEntries);
+  const schedule = buildPersistedAgentScheduleEntries(
+    employees,
+    assignments,
+    requirements,
+    flights,
+    daysOrder,
+    plan.issues,
+    rosterEntries,
+    plan.config_snapshot.checkin_demand_policy
+  );
 
   return { plan, flights, roster, schedule };
 }
@@ -73,7 +82,8 @@ function buildPersistedAgentScheduleEntries(
   flights: Flight[],
   daysOrder: string[],
   planIssues: PlanIssue[],
-  rosterEntries: WeeklyPlanRosterEntry[]
+  rosterEntries: WeeklyPlanRosterEntry[],
+  checkinPolicy: import("./checkin-demand").CheckinDemandPolicy
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
@@ -130,7 +140,7 @@ function buildPersistedAgentScheduleEntries(
             flightId: flight.id,
             flightNumber: flight.flight_number,
             role: requirement.role,
-            window: getRequirementWindow(requirement, flight),
+            window: getRequirementWindow(requirement, flight, checkinPolicy),
             status: a.source === "human_modified" ? "confirmed" : "assigned",
           });
         }

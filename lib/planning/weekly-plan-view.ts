@@ -182,7 +182,8 @@ function buildAgentScheduleEntries(
   allDuties: GeneratedDuty[],
   daysOrder: string[],
   planIssues: PlanIssue[],
-  generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>
+  generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
+  checkinPolicy: import("./checkin-demand").CheckinDemandPolicy
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
@@ -249,18 +250,21 @@ function buildAgentScheduleEntries(
       const foreignCommitmentsAll = getEmployeeForeignCommitments(employee.id, assignments, requirements, flights);
 
       const days: AgentDayEntry[] = daysOrder.map((day) => {
-        const weeklyShift = employee.weekly_shifts.find((s) => s.day_of_week === day) ?? null;
-        const isOff = !weeklyShift || weeklyShift.status === "off";
-
         // The REAL effective shift for this day — for a flexible General T1
-        // Pool employee this is the freshly generated demand-driven shift
-        // (Stage 6), not the static/uniform weekly_shifts baseline; for
-        // everyone else (foreign-committed, fixed/specialized, Transit) it's
-        // their real weekly_shifts entry, unchanged. This is exactly what
-        // duty-generation.ts itself uses to decide who's even a candidate
-        // that day, so the grid can never show a shift the plan didn't
-        // actually use.
-        const shiftCode = isOff ? null : effectiveShiftCodeForDay(employee, day, generatedShiftsByDay[day] ?? []);
+        // Pool employee this is ENTIRELY the freshly generated demand-driven
+        // shift (Stage 6); Employee.weekly_shifts is durable legacy/fallback
+        // data for this population now and is never consulted for "is this
+        // employee off today" any more (see duty-generation.ts's
+        // effectiveShiftCodeForDay/effectiveShiftForDay doc comments) — an
+        // employee not selected by Stage 6 is genuinely OFF, not merely
+        // "off per an outdated read of their own weekly_shifts". For
+        // everyone else (foreign-committed, fixed/specialized, Transit)
+        // this is still their real weekly_shifts entry, unchanged. This is
+        // exactly what duty-generation.ts itself uses to decide who's even
+        // a candidate that day, so the grid can never show a shift the plan
+        // didn't actually use.
+        const shiftCode = effectiveShiftCodeForDay(employee, day, generatedShiftsByDay[day] ?? []);
+        const isOff = shiftCode === null;
         const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode) : null;
 
         const dayDuties: AgentScheduleDuty[] = [];
@@ -273,7 +277,7 @@ function buildAgentScheduleEntries(
             flightId: flight.id,
             flightNumber: flight.flight_number,
             role: requirement.role,
-            window: getRequirementWindow(requirement, flight),
+            window: getRequirementWindow(requirement, flight, checkinPolicy),
             status: "confirmed",
           });
         }
@@ -341,7 +345,8 @@ export function buildWeeklyPlanView(
     allDuties,
     daysOrder,
     draftPlan.issues,
-    draftPlan.generatedShiftsByDay
+    draftPlan.generatedShiftsByDay,
+    config.checkin_demand_policy
   );
 
   return { draftPlan, roster, schedule };

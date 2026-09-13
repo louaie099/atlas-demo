@@ -41,8 +41,13 @@ describe("generateDutiesForDay", () => {
     const flight = makeFlight({});
     const requirement = makeRequirement({});
     const employee = makeEmployee({ id: "e1" });
+    // Flexible-pool employees now resolve SOLELY from Stage 6's generated
+    // shift for the day (see effectiveShiftForDay) -- their static
+    // weekly_shifts baseline is durable fallback data only, so this
+    // generatedShift entry is what actually makes "e1" a candidate.
+    const generatedShift = [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "AP01", coversRoles: ["Boarding"] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], [], [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("e1");
     expect(unfilled).toHaveLength(0);
@@ -58,13 +63,14 @@ describe("generateDutiesForDay", () => {
 
     // Only one qualified, rostered employee exists.
     const employee = makeEmployee({ id: "only-one" });
+    const generatedShift = [{ employeeId: "only-one", dayOfWeek: "Wednesday", shiftCode: "AP01", coversRoles: ["Boarding"] }];
 
     const { duties, unfilled } = generateDutiesForDay(
       "Wednesday",
       [reqA, reqB],
       [flightA, flightB],
       [employee],
-      [],
+      generatedShift,
       [],
       CONFIG
     );
@@ -103,13 +109,14 @@ describe("generateDutiesForDay", () => {
     const requirement = makeRequirement({ total_requirement: 2 });
     const alreadyAssigned: Assignment = { id: "a1", plan_id: "plan-test", staffing_requirement_id: "r1", employee_id: "existing-1", source: "atlas_generated", created_by: null, assigned_at: "" };
     const newCandidate = makeEmployee({ id: "e2" });
+    const generatedShift = [{ employeeId: "e2", dayOfWeek: "Wednesday", shiftCode: "AP01", coversRoles: ["Boarding"] }];
 
     const { duties, unfilled } = generateDutiesForDay(
       "Wednesday",
       [requirement],
       [flight],
       [newCandidate],
-      [],
+      generatedShift,
       [alreadyAssigned],
       CONFIG
     );

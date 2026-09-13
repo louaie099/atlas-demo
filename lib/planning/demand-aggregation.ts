@@ -1,5 +1,6 @@
 import { Flight, StaffingRequirement } from "../types";
 import { getRequirementWindow } from "./requirement-window";
+import { CheckinDemandPolicy, DEFAULT_CHECKIN_DEMAND_POLICY } from "./checkin-demand";
 
 const BUCKET_MINUTES = 30;
 const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
@@ -45,7 +46,8 @@ export interface DailyDemand {
 export function aggregateDailyDemand(
   dayOfWeek: string,
   flights: Flight[],
-  requirements: StaffingRequirement[]
+  requirements: StaffingRequirement[],
+  checkinPolicy: CheckinDemandPolicy = DEFAULT_CHECKIN_DEMAND_POLICY
 ): DailyDemand {
   const buckets: DemandBucket[] = Array.from({ length: BUCKETS_PER_DAY }, (_, i) => ({
     start: minutesToTime(i * BUCKET_MINUTES),
@@ -59,7 +61,7 @@ export function aggregateDailyDemand(
 
   for (const requirement of dayRequirements) {
     const flight = dayFlights.find((f) => f.id === requirement.flight_id)!;
-    const window = getRequirementWindow(requirement, flight);
+    const window = getRequirementWindow(requirement, flight, checkinPolicy);
     const startMin = timeToMinutes(window.start);
     const endMin = timeToMinutes(window.end);
 
@@ -88,11 +90,73 @@ export function peakDemandForRole(dailyDemand: DailyDemand, role: string): numbe
 
 /**
  * The overall time span during which a role has any demand at all that
- * day — the window shift generation must cover. Returns null if there's
- * no demand for that role that day.
+ * day. Returns null if there's no demand for that role that day.
+ *
+ * NOT what shift generation should feed to shift-code selection when a
+ * role's demand is spread across the day in separate clusters (e.g. an
+ * early-morning departure and a separate evening one, with a long
+ * demand-free gap between) — collapsing to first-active-bucket through
+ * last-active-bucket would produce a single all-day span no real shift
+ * code can cover, understating coverage entirely for that role. Kept for
+ * callers that genuinely want the single overall span (e.g. reporting);
+ * shift generation uses demandClustersForRole below instead.
  */
 export function demandWindowForRole(dailyDemand: DailyDemand, role: string): { start: string; end: string } | null {
   const activeBuckets = dailyDemand.buckets.filter((b) => (b.demandByRole[role] ?? 0) > 0);
   if (activeBuckets.length === 0) return null;
   return { start: activeBuckets[0].start, end: activeBuckets[activeBuckets.length - 1].end };
+}
+
+export interface DemandCluster {
+  start: string;
+  end: string;
+  peak: number; // max simultaneous demand within this cluster only
+}
+
+/**
+ * Splits a role's demand for the day into separate CONTIGUOUS clusters —
+ * maximal runs of consecutive 30-min buckets with nonzero demand for that
+ * role — rather than one span covering the whole day. This is what shift
+ * generation (Stage 6) actually needs: real airport demand for a role is
+ * routinely bursty (a handful of early-morning departures, a gap, then an
+ * evening bank), and a single merged window across a gap like that would
+ * force shift-code selection to try to cover a span no real shift is long
+ * enough for, silently producing zero coverage for the whole role instead
+ * of the several separate, individually-coverable windows that actually
+ * exist. Each cluster is later covered independently, so different
+ * employees can be selected for the morning bank and the evening bank
+ * rather than requiring one person to somehow span both.
+ *
+ * Deliberately simple and bounded (one linear pass over the day's fixed
+ * 48 buckets) — not a general interval-optimization; a bucket with zero
+ * demand always ends the current cluster, however small the gap.
+ */
+export function demandClustersForRole(dailyDemand: DailyDemand, role: string): DemandCluster[] {
+  const clusters: DemandCluster[] = [];
+  let currentStart: string | null = null;
+  let currentEnd: string | null = null;
+  let currentPeak = 0;
+
+  const flush = () => {
+    if (currentStart !== null && currentEnd !== null) {
+      clusters.push({ start: currentStart, end: currentEnd, peak: currentPeak });
+    }
+    currentStart = null;
+    currentEnd = null;
+    currentPeak = 0;
+  };
+
+  for (const bucket of dailyDemand.buckets) {
+    const demand = bucket.demandByRole[role] ?? 0;
+    if (demand > 0) {
+      if (currentStart === null) currentStart = bucket.start;
+      currentEnd = bucket.end;
+      currentPeak = Math.max(currentPeak, demand);
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  return clusters;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getRequirementWindow } from "../lib/planning/requirement-window";
+import { DEFAULT_CHECKIN_DEMAND_POLICY } from "../lib/planning/checkin-demand";
 import { Flight, StaffingRequirement } from "../lib/types";
 
 function makeFlight(overrides: Partial<Flight>): Flight {
@@ -63,19 +64,29 @@ describe("getRequirementWindow — RAM operation-rule roles (Gate/Boarding/Profi
   });
 });
 
-describe("getRequirementWindow — everything else (Check-in, foreign-company) keeps the previous approximation", () => {
-  it("still uses the flight's real boarding window when set, for a non-RAM-operation-rule requirement", () => {
-    const flight = makeFlight({ boarding_window_start: "08:50", boarding_window_end: "09:20" });
+describe("getRequirementWindow — Check-in gets its own generalized window (checkin-demand.ts), independent of boarding_window/RAM lead time", () => {
+  it("ignores the flight's boarding_window_start/end entirely for Check-in — that field predates the generalized model and is not authoritative for it", () => {
+    const flight = makeFlight({ scheduled_departure: "14:00", boarding_window_start: "08:50", boarding_window_end: "09:20" });
     const requirement = makeRequirement({ role: "Check-in", source: "demand_forecast" });
-    expect(getRequirementWindow(requirement, flight)).toEqual({ start: "08:50", end: "09:20" });
+    // DEFAULT_CHECKIN_DEMAND_POLICY: opens 180min before, closes 45min before.
+    expect(getRequirementWindow(requirement, flight)).toEqual({ start: "11:00", end: "13:15" });
   });
 
-  it("falls back to 45-15 minutes before departure when no explicit boarding window exists", () => {
+  it("computes purely from scheduled_departure and the (default, prototype) checkin_demand_policy offsets", () => {
     const flight = makeFlight({ scheduled_departure: "09:00", boarding_window_start: null, boarding_window_end: null });
     const requirement = makeRequirement({ role: "Check-in", source: "demand_forecast" });
-    expect(getRequirementWindow(requirement, flight)).toEqual({ start: "08:15", end: "08:45" });
+    expect(getRequirementWindow(requirement, flight)).toEqual({ start: "06:00", end: "08:15" });
   });
 
+  it("accepts an explicit checkinPolicy override, e.g. a shorter open/close window", () => {
+    const flight = makeFlight({ scheduled_departure: "09:00" });
+    const requirement = makeRequirement({ role: "Check-in", source: "demand_forecast" });
+    const policy = { ...DEFAULT_CHECKIN_DEMAND_POLICY, open_minutes_before_departure: 60, close_minutes_before_departure: 30 };
+    expect(getRequirementWindow(requirement, flight, policy)).toEqual({ start: "08:00", end: "08:30" });
+  });
+});
+
+describe("getRequirementWindow — everything else (foreign-company) keeps the previous approximation", () => {
   it("a company_config (foreign-carrier) requirement also keeps the previous fallback, not the RAM aircraft-class rule", () => {
     const flight = makeFlight({ scheduled_departure: "09:00", boarding_window_start: null, boarding_window_end: null, aircraft: "Boeing 787-9" });
     const requirement = makeRequirement({ role: "Ramp Team", source: "company_config" });

@@ -1,8 +1,8 @@
 import { Flight, StaffingRequirement, Config } from "../types";
-import { computeCheckinRequirement } from "../demand-forecast";
 import { classifyRamGateAndBoardingRequirements, missingOperationRuleRequirement } from "../operation-rules";
 import { classifyProfilingRequirement, classifyMesureRequirement } from "./specialized-demand";
 import { classifyCompanyRequirement } from "../company-config";
+import { isCheckinApplicable, computeGeneralizedCheckinRequirement } from "./checkin-demand";
 
 /**
  * Classifies a single flight into its staffing requirement(s), using the
@@ -17,9 +17,20 @@ import { classifyCompanyRequirement } from "../company-config";
  *
  * RAM/atlas_managed flights go through operation-rules.ts (Gate +
  * Boarding) plus specialized-demand.ts (Profiling, and Mesure where
- * applicable), or demand-forecast.ts (Check-in — AT535 is the one
- * demand-forecast case in the seed data by design). Self-managed (foreign
- * carrier) flights go through company-config.ts.
+ * applicable) plus checkin-demand.ts (Check-in — GENERALIZED to every
+ * atlas_managed flight via a configurable/prototype policy, never a
+ * single hardcoded flight id; see that file's doc comment for what's
+ * confirmed vs prototype). Self-managed (foreign carrier) flights go
+ * through company-config.ts instead, and never also get a RAM Check-in
+ * row — see isCheckinApplicable.
+ *
+ * Check-in is intentionally NOT gated on the RAM Gate/Boarding/Profiling
+ * matrix having an established rule for this flight's (destination
+ * category, aircraft) pair — Check-in demand exists independently of
+ * whether that separate security-staffing matrix happens to be
+ * configured for this destination, so a flight can have a real Check-in
+ * requirement even while its Gate/Boarding is reported as
+ * needs_configuration.
  *
  * MANAGED vs SCHEDULED: a flight existing in the weekly schedule does not
  * by itself mean ATLAS generates workforce coverage for it. A self-managed
@@ -42,23 +53,27 @@ export function classifyFlightRequirements(
     return companyRequirement ? [companyRequirement] : [];
   }
 
-  if (flight.id === "at535") {
-    return [computeCheckinRequirement(flight, config)];
-  }
+  const checkin = isCheckinApplicable(flight)
+    ? [computeGeneralizedCheckinRequirement(flight, config.checkin_demand_policy)]
+    : [];
 
   const gateAndBoarding = classifyRamGateAndBoardingRequirements(flight);
   if (!gateAndBoarding) {
     // No established rule at all for this (aircraft, destination category)
-    // combination — one honest "needs configuration" row for the whole
-    // flight, not a separate fabricated row per role.
-    return [missingOperationRuleRequirement(flight)];
+    // combination — one honest "needs configuration" row for Gate/
+    // Boarding/Profiling/Mesure, not a separate fabricated row per role.
+    // Check-in is reported alongside it regardless (see the module doc
+    // comment above) rather than being swallowed by the same
+    // needs_configuration placeholder — they are genuinely independent
+    // facts about this flight.
+    return [...checkin, missingOperationRuleRequirement(flight)];
   }
 
   const specialized = [classifyProfilingRequirement(flight), classifyMesureRequirement(flight)].filter(
     (r): r is Omit<StaffingRequirement, "id" | "flight_id"> => r !== null
   );
 
-  return [...gateAndBoarding, ...specialized];
+  return [...checkin, ...gateAndBoarding, ...specialized];
 }
 
 /**

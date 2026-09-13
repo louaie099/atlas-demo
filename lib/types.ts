@@ -291,8 +291,21 @@ export interface Config {
   // lib/planning/average-hours.ts's evaluateAverageWorkingHours. Do not
   // treat null as "assume 7 days."
   working_hours_reference_period_days: number | null;
+  // DEPRECATED — superseded by checkin_demand_policy below, which
+  // generalizes Check-in demand to every RAM flight (see
+  // lib/planning/checkin-demand.ts). Kept only because some UI/demand-
+  // forecast code paths outside the seeded RAM pipeline (the "Add Flight"
+  // manual form) still read these two directly; the generated weekly plan
+  // itself no longer uses them.
   baseline_checkin_requirement: number;
   overbooking_checkin_reinforcement: number;
+  // Generalized Check-in demand model — applies to every atlas_managed
+  // (RAM) flight, not one hardcoded flight id. See
+  // lib/planning/checkin-demand.ts for the full model and its doc comment
+  // on which values are confirmed vs prototype/configurable (currently:
+  // ALL of them are prototype — none has been confirmed as real
+  // management policy yet).
+  checkin_demand_policy: import("./planning/checkin-demand").CheckinDemandPolicy;
   // Resolved labor-rule values (see lib/labor-rules.ts) — the single
   // source every generator/validator must read instead of hardcoding its
   // own copy of the confirmed OFF-day protections. normal_weekly_off_days

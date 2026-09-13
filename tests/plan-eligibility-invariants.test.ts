@@ -114,16 +114,29 @@ describe("weekly plan eligibility invariants (generated demo plan)", () => {
       else bucket.working++;
     }
 
+    // Under demand-driven generation (Task E), an employee's OFF/working
+    // status for ANY day -- weekend included -- is a legitimate outcome of
+    // real demand + feasibility, not a guaranteed majority-working split
+    // any more (the flexible pool can genuinely be mostly unneeded some
+    // days, weekday or weekend alike -- see the delivered report's
+    // whole-demo utilization finding). So this test no longer asserts
+    // "most of the workforce works the weekend" -- it instead keeps its
+    // real regression target: a HARDCODED "weekend = off" rule would zero
+    // out weekend working counts specifically, disproportionately to
+    // weekdays. A weekend day merely having fewer working people than off
+    // (because demand is genuinely lower, exactly like some weekdays) is
+    // not that bug.
     for (const day of ["Saturday", "Sunday"]) {
-      const { working, off } = byDay.get(day)!;
-      // Working weekends are valid and expected -- most of the workforce
-      // must actually be working, not off, on both weekend days.
-      expect(working, `${day}: expected most employees working, got ${working} working / ${off} off`).toBeGreaterThan(off);
+      const { working } = byDay.get(day)!;
+      expect(working, `${day}: zero employees working -- looks like a hardcoded weekend-off rule`).toBeGreaterThan(0);
     }
 
-    // Off-day counts should be in the same rough band across all 7 days
-    // (a flat 2-day-per-week stagger) -- no day should be a dramatic
-    // outlier the way "every employee off" would be.
+    // Off-day counts should be in the same rough band across all 7 days --
+    // no day should be a dramatic outlier the way a hardcoded "every
+    // employee off on this specific day" bug would produce. The bound is
+    // wide because demand-driven generation can legitimately swing day to
+    // day with the real flight schedule (see the delivered report), not a
+    // fixed 2-day-per-week stagger any more.
     const offCounts = DAYS_WITH_DATA.map((d) => byDay.get(d)!.off);
     const maxOff = Math.max(...offCounts);
     const minOff = Math.min(...offCounts);
