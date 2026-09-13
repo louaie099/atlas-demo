@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Flight, RosterRequirementView, AgentScheduleEntry } from "@/lib/types";
+import { Flight, RosterRequirementView, AgentScheduleEntry, WeeklyPlan } from "@/lib/types";
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
@@ -10,6 +10,7 @@ import { WeekNav } from "@/components/week-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
+import { MakePlanningButton } from "@/components/make-planning-button";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
 // ATLAS generated for it (Flight Coverage) -> see the resulting employee
@@ -73,6 +74,7 @@ export default function PlanningPage() {
   const [roster, setRoster] = useState<RosterRequirementView[] | null>(null);
   const [schedule, setSchedule] = useState<AgentScheduleEntry[] | null>(null);
   const [issues, setIssues] = useState<PlanIssue[]>([]);
+  const [plan, setPlan] = useState<WeeklyPlan | null | undefined>(undefined); // undefined = not loaded yet
   const [openRequirementId, setOpenRequirementId] = useState<string | null>(null);
 
   // Week navigation is real infrastructure, but only one week currently has
@@ -96,6 +98,7 @@ export default function PlanningPage() {
         setRoster(data.roster ?? []);
         setSchedule(data.schedule ?? []);
         setIssues(data.issues ?? []);
+        setPlan(data.plan ?? null);
       });
   }
 
@@ -113,18 +116,19 @@ export default function PlanningPage() {
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-semibold text-ink">Weekly Planning</h1>
             <span className="px-2.5 py-1 rounded-full bg-gray-100 text-gray-600 text-xs font-medium uppercase tracking-wide">
-              Draft Weekly Plan
+              {plan === undefined ? "Loading…" : plan === null ? "No Plan Yet" : plan.status === "published" ? "Published Plan" : "Draft Weekly Plan"}
             </span>
           </div>
           <p className="text-muted mt-1 max-w-2xl">
-            ATLAS generated this plan from the weekly flight program -- every requirement traces back
-            to a flight and a rule. Normal staffing below is assigned directly as part of the draft
-            plan; management can still review and edit the whole draft before publishing. Only
-            exceptional situations -- a renfort decision, a live-operational reassignment -- are
-            surfaced as recommendations awaiting a human decision.
+            {plan === null
+              ? "No plan has been generated for this week yet. Click Make Planning to generate one from the current flight schedule."
+              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the draft plan; management can still review and edit the whole draft before publishing. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
           </p>
         </div>
-        <DraftLifecycle />
+        <div className="flex flex-col items-end gap-2">
+          <DraftLifecycle />
+          <MakePlanningButton onDone={loadWeeklyPlan} />
+        </div>
       </div>
 
       <WeekNav

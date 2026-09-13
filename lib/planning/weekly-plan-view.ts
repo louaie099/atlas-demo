@@ -11,8 +11,8 @@ import {
   AgentScheduleDuty,
 } from "../types";
 import { generateDraftWeeklyPlan, DraftWeeklyPlan } from "./generate-draft-plan";
-import { GeneratedDuty, effectiveShiftCodeForDay } from "./duty-generation";
-import { GeneratedShiftAssignment } from "./shift-generation";
+import { GeneratedDuty } from "./duty-generation";
+import { PlanRosterEntryDraft } from "./generate-draft-plan";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { getShiftTimesAs } from "../shift-templates";
@@ -182,11 +182,21 @@ function buildAgentScheduleEntries(
   allDuties: GeneratedDuty[],
   daysOrder: string[],
   planIssues: PlanIssue[],
-  generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
+  rosterEntries: PlanRosterEntryDraft[],
   checkinPolicy: import("./checkin-demand").CheckinDemandPolicy
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
+  // The single authoritative source for "is this employee working, and
+  // with what shift, on this day" — generateDraftWeeklyPlan's OWN final,
+  // already-hard-rest-validated roster (see enforceRestInvariantAcrossWeek's
+  // universal pass in generate-draft-plan.ts), for EVERY population alike
+  // (flexible General T1 and every specialized/fixed team). Never
+  // recomputed independently from raw Employee.weekly_shifts here — doing
+  // so previously let this live preview show a specialized team's
+  // pre-repair, still-illegal static pattern even though the persisted
+  // plan itself had already corrected it (a real bug this replaces).
+  const rosterByKey = new Map(rosterEntries.map((r) => [`${r.employee_id}|${r.day_of_week}`, r]));
 
   // Issues are per-employee, and are either day-specific (rest_violation
   // carries dayOfWeek — the day rest was violated INTO) or week-level
@@ -263,8 +273,9 @@ function buildAgentScheduleEntries(
         // exactly what duty-generation.ts itself uses to decide who's even
         // a candidate that day, so the grid can never show a shift the plan
         // didn't actually use.
-        const shiftCode = effectiveShiftCodeForDay(employee, day, generatedShiftsByDay[day] ?? []);
-        const isOff = shiftCode === null;
+        const rosterEntry = rosterByKey.get(`${employee.id}|${day}`);
+        const shiftCode = rosterEntry?.shift_code ?? null;
+        const isOff = !rosterEntry || rosterEntry.status === "off";
         const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode) : null;
 
         const dayDuties: AgentScheduleDuty[] = [];
@@ -345,7 +356,7 @@ export function buildWeeklyPlanView(
     allDuties,
     daysOrder,
     draftPlan.issues,
-    draftPlan.generatedShiftsByDay,
+    draftPlan.rosterEntries,
     config.checkin_demand_policy
   );
 

@@ -237,3 +237,114 @@ export function generateFlexiblePoolShifts(
 
   return Array.from(assignments.values());
 }
+
+export interface DroppedShiftForRest {
+  employeeId: string;
+  dayOfWeek: string;
+  shiftCode: string;
+  restHours: number;
+}
+
+/**
+ * Like roster-generation.ts's restHoursBetween, but for two shifts that
+ * are not necessarily on literally ADJACENT calendar days —
+ * restHoursBetween always assumes exactly one calendar day separates the
+ * two shifts (it adds a single 24h to the next shift's start), which is
+ * correct for a same-day/next-day pair but silently UNDERSTATES real rest
+ * by 24h for every extra intervening OFF day skipped over (a genuine bug
+ * found while building enforceRestInvariantAcrossWeek's carry-forward-
+ * across-OFF-days logic below: a perfectly legal multi-day gap was being
+ * misreported as a violation). `gapDays` is the number of calendar days
+ * from the previous shift's OWN day to the next shift's day (1 for
+ * literally adjacent days, matching restHoursBetween exactly).
+ */
+function restHoursBetweenAcrossGap(
+  prevShiftStart: string,
+  prevShiftEnd: string,
+  nextShiftStart: string,
+  gapDays: number
+): number {
+  const prevStartMin = timeToMinutes(prevShiftStart);
+  let prevEndMin = timeToMinutes(prevShiftEnd);
+  if (prevEndMin <= prevStartMin) prevEndMin += 24 * 60; // overnight: real end is the following calendar day
+  const nextStartMin = timeToMinutes(nextShiftStart) + gapDays * 24 * 60;
+  return (nextStartMin - prevEndMin) / 60;
+}
+
+/**
+ * Final, whole-week HARD safety net for the 15h rest rule — a second,
+ * independent enforcement layer on top of the per-day eligibility gate
+ * already inside generateFlexiblePoolShifts above. The per-day gate
+ * checks each candidate against the immediately preceding day's shift AT
+ * THE MOMENT it's chosen; this function re-walks the ENTIRE week's real
+ * outcome afterward and re-checks every consecutive pair from scratch,
+ * carrying forward each employee's true LAST WORKED shift (not just
+ * "yesterday") across any number of intervening OFF days. This catches
+ * anything the per-day heuristic could ever miss (a future change to the
+ * greedy fill order, an untested code path, a candidate ranking edge
+ * case) — belt and suspenders, not a substitute for the per-day gate.
+ *
+ * Never mutates a violating pair into something "close enough" — a
+ * shift that fails this check is DROPPED entirely (never persisted),
+ * leaving that employee genuinely OFF that day. The role/day they would
+ * have covered simply goes back to being real, uncovered demand — Stage
+ * 9 (duty generation) runs on the REPAIRED result, so an uncovered role
+ * surfaces honestly as an `unfilled_duty` issue, never a silently
+ * fabricated illegal roster. This is intentionally NOT a warning-only
+ * pass: a dropped shift is removed from the data itself, not flagged and
+ * kept.
+ *
+ * `priorWeekBoundaryContext` seeds "last worked shift" for the week's own
+ * Monday, exactly like generateFlexiblePoolShifts's own priorDayShift —
+ * so a violation spanning the previous week's real Sunday shift into
+ * this week's Monday is caught too, not just violations wholly inside
+ * this displayed week.
+ */
+export function enforceRestInvariantAcrossWeek(
+  daysOrder: string[],
+  generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
+  minimumRestHours: number,
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
+): { repaired: Record<string, GeneratedShiftAssignment[]>; dropped: DroppedShiftForRest[] } {
+  const repaired: Record<string, GeneratedShiftAssignment[]> = {};
+  const dropped: DroppedShiftForRest[] = [];
+  // Each employee's most recent REAL (kept) worked shift so far this walk,
+  // ALONGSIDE the calendar day index it was worked on — deliberately NOT
+  // reset to "no data" on an intervening OFF day (an OFF day always
+  // provides ample rest on its own; what matters is the true last shift
+  // actually worked, however many OFF days ago). The day index is what
+  // lets restHoursBetweenAcrossGap compute the REAL number of elapsed
+  // calendar days instead of always assuming exactly one.
+  const lastRealShift = new Map<string, { shift_start: string; shift_end: string; dayIndex: number }>();
+  for (const [employeeId, shift] of priorWeekBoundaryContext) {
+    if (shift) lastRealShift.set(employeeId, { ...shift, dayIndex: -1 }); // the day immediately before daysOrder[0]
+  }
+
+  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
+    const day = daysOrder[dayIndex];
+    const dayShifts = generatedShiftsByDay[day] ?? [];
+    const keep: GeneratedShiftAssignment[] = [];
+
+    for (const assignment of dayShifts) {
+      const times = getShiftTimesAs(assignment.shiftCode);
+      const prior = lastRealShift.get(assignment.employeeId);
+      const rest = prior
+        ? restHoursBetweenAcrossGap(prior.shift_start, prior.shift_end, times.shift_start, dayIndex - prior.dayIndex)
+        : null;
+
+      if (rest !== null && rest < minimumRestHours) {
+        dropped.push({ employeeId: assignment.employeeId, dayOfWeek: day, shiftCode: assignment.shiftCode, restHours: rest });
+        continue; // never persisted -- genuinely OFF today instead
+      }
+
+      keep.push(assignment);
+    }
+
+    repaired[day] = keep;
+    for (const assignment of keep) {
+      lastRealShift.set(assignment.employeeId, { ...getShiftTimesAs(assignment.shiftCode), dayIndex });
+    }
+  }
+
+  return { repaired, dropped };
+}

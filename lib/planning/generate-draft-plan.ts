@@ -1,7 +1,7 @@
 import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../types";
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
-import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
+import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest } from "./shift-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool } from "./workforce-pools";
@@ -39,6 +39,13 @@ export interface DraftWeeklyPlan {
   // routine Weekly Planning UI today.
   configurationIssues: ConfigurationIssue[];
   generatedAt: string;
+  // Shifts the whole-week hard rest-invariant safety net (see
+  // enforceRestInvariantAcrossWeek) had to DROP after the two-pass
+  // generation produced them, because they would have violated the 15h
+  // minimum against that employee's true last-worked shift. Never
+  // persisted; kept here purely for transparency/reporting — an empty
+  // array is the expected, normal case.
+  restViolationsPrevented: DroppedShiftForRest[];
 }
 
 /**
@@ -260,7 +267,93 @@ export function generateDraftWeeklyPlan(
     demandByDay[day] = aggregateDailyDemand(day, flights, requirements, config.checkin_demand_policy);
   }
 
-  const { generatedShiftsByDay } = runTwoPassShiftGeneration(daysOrder, employees, demandByDay, config, priorWeekBoundaryContext);
+  const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(daysOrder, employees, demandByDay, config, priorWeekBoundaryContext);
+
+  // HARD safety net (see enforceRestInvariantAcrossWeek's doc comment):
+  // re-walks the whole week's real Stage 6 outcome one more time and
+  // drops any shift that would violate the 15h minimum against that
+  // employee's true last-worked shift, carrying forward across any
+  // number of intervening OFF days and across the previous week's real
+  // boundary shift. Everything downstream (duty generation, roster
+  // persistence) runs on this REPAIRED result, never the raw one -- a
+  // role a dropped shift would have covered becomes genuine, honestly
+  // reported uncovered demand instead of an illegal roster.
+  const { repaired: generatedShiftsByDay, dropped: flexibleRestDropped } = enforceRestInvariantAcrossWeek(
+    daysOrder,
+    rawGeneratedShiftsByDay,
+    config.minimum_rest_hours,
+    priorWeekBoundaryContext
+  );
+
+  // UNIVERSAL hard rest gate — the repair above only ever touches the
+  // flexible General T1 pool, since that's the only population Stage 6
+  // itself decides day-by-day. But the confirmed 15h minimum is a hard
+  // EMPLOYEE constraint, not a Stage-6-specific one: a specialized/fixed
+  // team's OWN static weekly_shifts pattern can also be internally
+  // rest-infeasible (auditStaticShiftRestFeasibility below already
+  // DETECTS this as a reported capacity finding, but until now nothing
+  // stopped the infeasible sequence itself from reaching persistence —
+  // see the delivered incident report). This second pass re-runs the
+  // exact same safety-net mechanism across EVERY employee's real week
+  // (the flexible pool's already-repaired result, plus every other
+  // employee's own static baseline) so an intrinsically-infeasible
+  // specialized rotation can never be persisted either.
+  const combinedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
+  for (const day of daysOrder) {
+    const dayShifts = [...(generatedShiftsByDay[day] ?? [])];
+    for (const employee of employees) {
+      if (isFlexibleGeneralPool(employee)) continue; // already included above
+      const existing = employee.weekly_shifts.find((s) => s.day_of_week === day);
+      if (existing?.status === "working" && existing.shift_code) {
+        dayShifts.push({ employeeId: employee.id, dayOfWeek: day, shiftCode: existing.shift_code, coversRoles: [] });
+      }
+    }
+    combinedShiftsByDay[day] = dayShifts;
+  }
+
+  const { dropped: universallyDropped } = enforceRestInvariantAcrossWeek(
+    daysOrder,
+    combinedShiftsByDay,
+    config.minimum_rest_hours,
+    priorWeekBoundaryContext
+  );
+
+  // Anything newly dropped in THIS pass beyond the flexible-pool repair
+  // above can only belong to a non-flexible employee — the flexible
+  // pool's own result was already internally rest-consistent going in.
+  // This is a specialized/fixed team's CONFIGURED rotation genuinely
+  // failing to satisfy 15h rest on its own, independent of any demand.
+  const employeesById = new Map(employees.map((e) => [e.id, e]));
+  const specializedRestConflicts = universallyDropped.filter(
+    (d) => !isFlexibleGeneralPool(employeesById.get(d.employeeId)!)
+  );
+
+  // Patch a working copy of only the AFFECTED non-flexible employees'
+  // weekly_shifts so every downstream step (duty generation,
+  // resolvePlanRosterEntry, validation) sees the corrected week instead
+  // of the illegal one. Deliberately narrow: only the specific offending
+  // day(s) are touched — this never rewrites a specialized team's own
+  // configured rotation wholesale, per the delivered report's explicit
+  // instruction not to arbitrarily rewrite specialized rotations without
+  // understanding them. The underlying structural finding is still
+  // reported in full via auditStaticShiftRestFeasibility below (against
+  // the ORIGINAL, unpatched employees) so the real fix — correcting that
+  // team's configured cycle — stays visible, not papered over.
+  const droppedDaysByEmployee = new Map<string, Set<string>>();
+  for (const d of specializedRestConflicts) {
+    if (!droppedDaysByEmployee.has(d.employeeId)) droppedDaysByEmployee.set(d.employeeId, new Set());
+    droppedDaysByEmployee.get(d.employeeId)!.add(d.dayOfWeek);
+  }
+  const employeesForPipeline: Employee[] = employees.map((employee) => {
+    const droppedDays = droppedDaysByEmployee.get(employee.id);
+    if (!droppedDays) return employee;
+    return {
+      ...employee,
+      weekly_shifts: employee.weekly_shifts.map((s) =>
+        droppedDays.has(s.day_of_week) ? { ...s, status: "off" as const, shift_code: null } : s
+      ),
+    };
+  });
 
   const dutiesByDay: Record<string, GeneratedDuty[]> = {};
   const allUnfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
@@ -270,7 +363,7 @@ export function generateDraftWeeklyPlan(
       day,
       requirements,
       flights,
-      employees,
+      employeesForPipeline,
       generatedShiftsByDay[day] ?? [],
       existingAssignments,
       config
@@ -281,7 +374,7 @@ export function generateDraftWeeklyPlan(
 
   const rosterEntries: PlanRosterEntryDraft[] = [];
   for (const day of daysOrder) {
-    for (const employee of employees) {
+    for (const employee of employeesForPipeline) {
       const resolved = resolvePlanRosterEntry(employee, day, generatedShiftsByDay[day] ?? []);
       rosterEntries.push({ employee_id: employee.id, day_of_week: day, ...resolved });
     }
@@ -298,13 +391,28 @@ export function generateDraftWeeklyPlan(
   // from their static template on any given day. This rebuild is a
   // uniform, safe no-op for every non-flexible employee (their
   // rosterEntries already mirror weekly_shifts exactly).
-  const employeesWithPlannedRoster: Employee[] = employees.map((employee) => ({
+  const employeesWithPlannedRoster: Employee[] = employeesForPipeline.map((employee) => ({
     ...employee,
     weekly_shifts: daysOrder.map((day) => {
       const entry = rosterEntries.find((r) => r.employee_id === employee.id && r.day_of_week === day)!;
       return { day_of_week: day, status: entry.status, shift_code: entry.shift_code };
     }),
   }));
+
+  // BLOCKING findings for this run's own specialized-rest conflicts —
+  // distinct from auditStaticShiftRestFeasibility's general structural
+  // finding below (which reports the underlying configured-rotation
+  // problem regardless of whether this particular week happened to
+  // trigger it). Never silently folded into an ordinary unfilled_duty —
+  // this is a workforce-design conflict in a FIXED configuration, not an
+  // ordinary demand/coverage shortfall.
+  const specializedRestConflictIssues: ConfigurationIssue[] = specializedRestConflicts.map((d) => {
+    const employee = employeesById.get(d.employeeId)!;
+    return {
+      requirementId: `specialized-rest-conflict-${d.employeeId}-${d.dayOfWeek}`,
+      description: `BLOCKING: ${employee.name} (${employee.assignment})'s configured fixed rotation would only provide ${d.restHours}h rest before ${d.dayOfWeek}'s ${d.shiftCode} shift — below the confirmed ${config.minimum_rest_hours}h minimum. This day has been left OFF rather than persisting an illegal sequence; the plan is intentionally incomplete here. Resolve by adjusting this specialized team's configured rotation — not something ATLAS can fix automatically.`,
+    };
+  });
 
   const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config);
   const configurationIssues = [
@@ -315,6 +423,7 @@ export function generateDraftWeeklyPlan(
     // Uses the real planned roster too, for the same reason as above.
     ...auditAverageWeeklyHoursFeasibility(employeesWithPlannedRoster, isFlexibleGeneralPool, config),
     ...auditStaticShiftRestFeasibility(employees, isFlexibleGeneralPool, config),
+    ...specializedRestConflictIssues,
   ];
 
   return {
@@ -327,5 +436,6 @@ export function generateDraftWeeklyPlan(
     issues,
     configurationIssues,
     generatedAt: new Date().toISOString(),
+    restViolationsPrevented: [...flexibleRestDropped, ...specializedRestConflicts],
   };
 }

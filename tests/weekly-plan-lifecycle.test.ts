@@ -8,6 +8,7 @@ import {
   loadPersistedPlanView,
   planIdForWeek,
   hashPlanInputs,
+  makePlanning,
 } from "../lib/planning/weekly-plan-service";
 import { Assignment, WeeklyPlan, WeeklyPlanRosterEntry, AssignmentModification } from "../lib/types";
 
@@ -150,6 +151,27 @@ describe("weekly-plan-service — Generate Draft", () => {
     const assignments = fake.table("assignments") as unknown as Assignment[];
     expect(assignments.length).toBeGreaterThan(0);
     expect(assignments.every((a) => a.plan_id === plan.id && a.source === "atlas_generated" && a.created_by === null)).toBe(true);
+  });
+
+  it("returns a PlanSummary whose counts match what was actually persisted -- never a client-recomputable-but-different set of numbers", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+
+    const result = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in result) throw new Error("unreachable");
+    expect(result.summary).toBeDefined();
+
+    const managedFlights = FLIGHTS.filter((f) => f.operator_type === "atlas_managed").length;
+    expect(result.summary!.managedFlights).toBe(managedFlights);
+    expect(result.summary!.managedFlights).toBeGreaterThan(0);
+
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    expect(result.summary!.dutiesAssigned).toBe(assignments.length);
+
+    // The hard rest gate is expected to already have kept this at zero --
+    // a real violation would mean a bug upstream, not a healthy summary.
+    expect(result.summary!.hardRestViolations).toBe(0);
+    expect(result.summary!.staffingGaps).toBeGreaterThanOrEqual(0);
   });
 
   it("is blocked (never silently overwrites) if a plan already exists for the week", async () => {
@@ -324,5 +346,88 @@ describe("weekly-plan-service — loadPersistedPlanView", () => {
     const lastSunday = lastEntry!.days.find((d) => d.dayOfWeek === "Sunday")!;
     const expectedSunday = lastEmployee.weekly_shifts.find((s) => s.day_of_week === "Sunday")!;
     expect(lastSunday.status).toBe(expectedSunday.status);
+  });
+});
+
+describe("weekly-plan-service — Make Planning (the button's state machine)", () => {
+  // makePlanning is a thin composition over generateDraftPlan/regenerateDraftPlan
+  // -- see its doc comment. These tests exercise the four states a planner can
+  // find the week in when they click the button, not the generation logic
+  // itself (already covered above and in rest-invariant-hard.test.ts).
+
+  it("creates a new draft when no plan exists yet for the week", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+
+    const result = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    expect("blocked" in result).toBe(false);
+    if ("blocked" in result) throw new Error("unreachable");
+
+    expect(result.plan.status).toBe("draft");
+    expect(result.plan.revision).toBe(1);
+    expect(fake.table("weekly_plans")).toHaveLength(1);
+  });
+
+  it("regenerates a clean existing draft in place, bumping revision, when clicked again with no manual changes", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+
+    const first = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in first) throw new Error("setup failed");
+
+    const second = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    expect("blocked" in second).toBe(false);
+    if ("blocked" in second) throw new Error("unreachable");
+
+    expect(second.plan.id).toBe(first.plan.id); // same plan, not a duplicate
+    expect(second.plan.revision).toBe(2);
+    expect(fake.table("weekly_plans")).toHaveLength(1);
+  });
+
+  it("blocks and explains rather than discarding, when the existing draft carries a manual modification", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+
+    const first = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in first) throw new Error("setup failed");
+
+    fake.from("assignment_modifications").insert({
+      id: "mod-mp-1",
+      plan_id: first.plan.id,
+      plan_revision: 1,
+      staffing_requirement_id: "some-requirement",
+      action: "added",
+      previous_employee_id: null,
+      new_employee_id: "some-employee",
+      changed_by: "Mohammed Alaoui",
+      changed_at: new Date().toISOString(),
+      reason: null,
+    } satisfies AssignmentModification);
+
+    const result = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    expect("blocked" in result).toBe(true);
+    if (!("blocked" in result)) throw new Error("unreachable");
+    expect(result.reason).toBe("This draft contains manual modifications and cannot be regenerated without discarding them.");
+
+    // Nothing discarded -- still revision 1.
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    expect(plans[0].revision).toBe(1);
+  });
+
+  it("blocks and explains rather than touching a published plan", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+
+    const first = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in first) throw new Error("setup failed");
+    await publishPlan(fake as unknown as SupabaseClient, first.plan.id);
+
+    const result = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    expect("blocked" in result).toBe(true);
+    if (!("blocked" in result)) throw new Error("unreachable");
+    expect(result.reason).toMatch(/already published/);
+
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    expect(plans[0].status).toBe("published");
   });
 });

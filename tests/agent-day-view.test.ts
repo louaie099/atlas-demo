@@ -134,11 +134,11 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
     expect(monday.foreignCommitments).toHaveLength(0); // never bleeds into a day with no real commitment
   });
 
-  it("a rest_violation issue is indexed onto the specific day it was violated into; a weekly_hours_violation is kept week-level, not attached to any single day", () => {
+  it("a specialized/fixed team's OWN configured pattern that would violate 15h rest is HARD-BLOCKED before it ever reaches this view -- the offending day is dropped to OFF, never persisted/displayed as an illegal working day and never merely flagged as a rest_violation warning (see enforceRestInvariantAcrossWeek's universal, all-employees pass in generate-draft-plan.ts, added after a real incident where this exact case only produced a warning)", () => {
     // AP02 ends 23:15 Monday; MT02 starts 04:30 Tuesday -> 5.25h rest, below the confirmed 15h minimum.
     const restViolator = makeEmployee({
       id: "e1",
-      assignment: "Duty Officers", // fixed team: guarantees weekly_shifts is used as-is, not overridden by Stage 6 generation
+      assignment: "Duty Officers", // fixed team: guarantees weekly_shifts is the source, not Stage 6 generation
       is_duty_officer: false,
       weekly_shifts: [
         { day_of_week: "Monday", shift_code: "AP02", status: "working" },
@@ -150,10 +150,20 @@ describe("AgentScheduleEntry.days — day-keyed reshape used by the Agent Schedu
     const { schedule } = buildWeeklyPlanView([], [restViolator], [], [], CONFIG, DAYS, "Test Week");
     const entry = schedule.find((s) => s.employee.id === "e1")!;
 
-    const tuesday = entry.days.find((d) => d.dayOfWeek === "Tuesday")!;
     const monday = entry.days.find((d) => d.dayOfWeek === "Monday")!;
-    expect(tuesday.issues.some((i) => i.type === "rest_violation")).toBe(true);
-    expect(monday.issues).toHaveLength(0); // the violation is INTO Tuesday, not on Monday
-    expect(entry.weeklyIssues).toHaveLength(0); // this employee's total hours are still fine
+    const tuesday = entry.days.find((d) => d.dayOfWeek === "Tuesday")!;
+    // Monday is the first occurrence -- nothing before it to violate, so it's kept as-is.
+    expect(monday.status).toBe("working");
+    expect(monday.shiftCode).toBe("AP02");
+    // Tuesday's MT02 would only give 5.25h rest -- dropped to OFF rather
+    // than persisted/displayed as a working day at all.
+    expect(tuesday.status).toBe("off");
+    expect(tuesday.shiftCode).toBeNull();
+    // No rest_violation issue anywhere -- there is no illegal adjacent
+    // pair left to detect once the offending day was removed. A hard
+    // block, not a warning alongside an unchanged illegal roster.
+    expect(monday.issues.some((i) => i.type === "rest_violation")).toBe(false);
+    expect(tuesday.issues.some((i) => i.type === "rest_violation")).toBe(false);
+    expect(entry.weeklyIssues.some((i) => i.type === "rest_violation")).toBe(false);
   });
 });

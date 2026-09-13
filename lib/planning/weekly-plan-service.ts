@@ -44,10 +44,31 @@ export function hashPlanInputs(flights: Flight[], employees: Employee[], config:
   return (hash >>> 0).toString(16);
 }
 
+/**
+ * The concise, human-facing readout of one generation run -- what the
+ * Make Planning button shows after it finishes (see
+ * components/make-planning-button.tsx). Deliberately just four counts,
+ * all derived from the SAME `draft` the persisted plan/roster/assignment
+ * rows come from (buildDraftPlanBundle below) -- never a separate
+ * recomputation that could disagree with what was actually persisted.
+ * `hardRestViolations` is expected to always read 0: the whole point of
+ * the hard rest gate (generate-draft-plan.ts's enforceRestInvariantAcrossWeek,
+ * run for the flexible pool AND universally across every employee) is
+ * that an illegal transition is dropped/blocked before it ever reaches
+ * this summary, never persisted and then merely reported.
+ */
+export interface PlanSummary {
+  managedFlights: number;
+  dutiesAssigned: number;
+  staffingGaps: number;
+  hardRestViolations: number;
+}
+
 export interface DraftPlanBundle {
   plan: WeeklyPlan;
   rosterEntries: WeeklyPlanRosterEntry[];
   assignments: Assignment[];
+  summary: PlanSummary;
 }
 
 export interface BuildDraftPlanBundleInput {
@@ -122,7 +143,14 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     assigned_at: draft.generatedAt,
   }));
 
-  return { plan, rosterEntries, assignments };
+  const summary: PlanSummary = {
+    managedFlights: flights.filter((f) => f.operator_type === "atlas_managed").length,
+    dutiesAssigned: assignments.length,
+    staffingGaps: draft.issues.filter((i) => i.type === "unfilled_duty").length,
+    hardRestViolations: draft.issues.filter((i) => i.type === "rest_violation").length,
+  };
+
+  return { plan, rosterEntries, assignments, summary };
 }
 
 /** The actual I/O for a freshly-built bundle -- shared by generateDraftPlan below AND lib/reset-database.ts, so Reset Demo persists through this exact same step, never a parallel insert path. */
@@ -181,7 +209,13 @@ export async function fetchAllRosterEntriesForPlan(
   return all;
 }
 
-export type PlanLifecycleResult = { plan: WeeklyPlan } | { blocked: true; reason: string };
+// `summary` is optional: generateDraftPlan/regenerateDraftPlan (and
+// makePlanning, which composes them) always provide it -- a real
+// generation run happened, so there's something to summarize. publishPlan
+// below shares this same result type (it's also a plan lifecycle
+// transition) but is a pure status/timestamp flip with no generation
+// step, so it has nothing to summarize and omits the field.
+export type PlanLifecycleResult = { plan: WeeklyPlan; summary?: PlanSummary } | { blocked: true; reason: string };
 
 /**
  * Generate Draft. Refuses (blocked, never silently overwrites) if a plan
@@ -233,7 +267,7 @@ export async function generateDraftPlan(
   });
   await persistDraftPlanBundle(supabase, bundle);
 
-  return { plan: bundle.plan };
+  return { plan: bundle.plan, summary: bundle.summary };
 }
 
 /**
@@ -362,7 +396,54 @@ export async function regenerateDraftPlan(
     if (error) throw new Error(`Persisting plan assignments failed: ${error.message}`);
   }
 
-  return { plan: { ...existing, ...bundle.plan } };
+  return { plan: { ...existing, ...bundle.plan }, summary: bundle.summary };
+}
+
+/**
+ * Make Planning — the single user-facing action behind the Weekly
+ * Planning page's "Make Planning" button. This is deliberately NOT a
+ * third generation implementation: it is a thin state-machine that picks
+ * between the two lifecycle functions already above, based on what
+ * currently exists for this week, so there is exactly one real answer to
+ * "what does clicking Make Planning actually do":
+ *
+ *  - No plan exists yet for this week -> generateDraftPlan creates one
+ *    from the CURRENT flight schedule/employees/config.
+ *  - A draft exists with no human modification recorded against its
+ *    current revision -> regenerateDraftPlan replaces it cleanly, running
+ *    the full current pipeline (flight schedule -> requirements -> demand
+ *    aggregation -> shift capacity -> roster -> duties -> hard rest
+ *    validation) against the CURRENT inputs -- so a planner who changed
+ *    the flight schedule and clicks Make Planning gets a plan that
+ *    reflects it, never a stale cached one.
+ *  - A draft exists WITH a human modification against its current
+ *    revision -> regenerateDraftPlan's own existing guard blocks it
+ *    (returns `blocked`, never silently discards the manual work).
+ *  - The plan is already published -> regenerateDraftPlan's own existing
+ *    guard blocks it too (a published plan is immutable via this path).
+ *
+ * A normal page load/refresh never calls this -- see
+ * loadPersistedPlanView's own doc comment: reading the Weekly Planning
+ * page only ever reads whatever was last persisted, it never runs the
+ * pipeline. Only an explicit POST to /api/planning/make-planning (the
+ * button click) can create or change a plan.
+ */
+export async function makePlanning(
+  supabase: SupabaseClient,
+  weekStart: string,
+  weekLabel: string,
+  daysOrder: string[],
+  config: Config
+): Promise<PlanLifecycleResult> {
+  const planId = planIdForWeek(weekStart);
+  const { data: rows, error } = await supabase.from("weekly_plans").select("*").eq("id", planId);
+  if (error) throw new Error(error.message);
+  const existing = rows?.[0] as WeeklyPlan | undefined;
+
+  if (!existing) {
+    return generateDraftPlan(supabase, weekStart, weekLabel, daysOrder, config);
+  }
+  return regenerateDraftPlan(supabase, planId, daysOrder, config);
 }
 
 /**
