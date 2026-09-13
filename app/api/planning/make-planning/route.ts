@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { getSupabaseServerClient } from "@/lib/supabase-server";
+import { getSupabaseServerClient, getSupabaseProjectRefForDiagnostics } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { makePlanning } from "@/lib/planning/weekly-plan-service";
+import { makePlanning, planIdForWeek } from "@/lib/planning/weekly-plan-service";
 import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
@@ -37,13 +37,44 @@ import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "
 export async function POST() {
   const supabase = getSupabaseServerClient();
 
-  const result = await makePlanning(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
-  if ("blocked" in result) {
-    return NextResponse.json({ error: result.reason }, { status: 409, headers: { "Cache-Control": "no-store" } });
-  }
+  // TEMPORARY: identifies which Supabase project this specific request's
+  // service-role client is actually configured against -- non-secret (see
+  // getSupabaseProjectRefForDiagnostics), included on every branch below
+  // (including a thrown error, via the catch) so a live comparison
+  // against /api/planning/weekly-view's own reported project ref is
+  // possible from the response bodies alone. Part of the deployed
+  // read-after-write investigation; remove once resolved.
+  const supabaseProjectRef = getSupabaseProjectRefForDiagnostics();
+  const planId = planIdForWeek(CURRENT_WEEK_START);
 
-  return NextResponse.json(
-    { plan: result.plan, revision: result.plan.revision, summary: result.summary },
-    { headers: { "Cache-Control": "no-store" } }
-  );
+  try {
+    const result = await makePlanning(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in result) {
+      return NextResponse.json(
+        { error: result.reason, supabaseProjectRef, planId },
+        { status: 409, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        plan: result.plan,
+        revision: result.plan.revision,
+        summary: result.summary,
+        supabaseProjectRef,
+        diagnostics: result.diagnostics ?? null,
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    // A thrown error here (most likely verifyPlanPersisted's own
+    // diagnostic message -- see weekly-plan-service.ts) means the write
+    // did NOT verifiably land; surface the exact message and project
+    // identity instead of a generic 500 with no detail, so the deployed
+    // failure is immediately actionable from the response body alone.
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err), supabaseProjectRef, planId },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 }
