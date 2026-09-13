@@ -28,8 +28,23 @@ interface PlanSummary {
  * shows the same counts the server actually persisted (managedFlights/
  * dutiesAssigned/staffingGaps/hardRestViolations -- see PlanSummary in
  * weekly-plan-service.ts), never a client-side recomputation.
+ *
+ * `onDone` MUST be the page's refetch of /api/planning/weekly-view (see
+ * app/planning/page.tsx's loadWeeklyPlan) and MUST return the promise
+ * that resolves once every dependent view's state (flights/roster/
+ * schedule/issues/plan) has actually been set from the new response --
+ * this component stays in the "loading" state (button disabled, showing
+ * "Generating planning...") through that entire await, not just through
+ * the POST itself. This is deliberate: persisting a new Draft revision
+ * and the UI actually displaying it are two different things, and a
+ * planner must never see "Planning generated" while Agent Schedule /
+ * Flight Coverage / the summary bar are still showing the PREVIOUS
+ * revision underneath. Whatever tab the planner is currently on stays
+ * selected -- this component never switches tabs; the tab's own content
+ * simply re-renders once the page's shared state updates, since it's the
+ * exact same state every tab already reads from.
  */
-export function MakePlanningButton({ onDone }: { onDone: () => void }) {
+export function MakePlanningButton({ onDone }: { onDone: () => Promise<void> }) {
   const [state, setState] = useState<"idle" | "loading" | "done" | "blocked">("idle");
   const [message, setMessage] = useState<string | null>(null);
   const [summary, setSummary] = useState<PlanSummary | null>(null);
@@ -38,20 +53,35 @@ export function MakePlanningButton({ onDone }: { onDone: () => void }) {
     setState("loading");
     setMessage(null);
     setSummary(null);
+    let data: { summary?: PlanSummary; error?: string };
     try {
       const res = await fetch("/api/planning/make-planning", { method: "POST" });
-      const data = await res.json();
+      data = await res.json();
       if (!res.ok) {
         setState("blocked");
         setMessage(data.error ?? "Make Planning was blocked for an unknown reason.");
         return;
       }
-      setState("done");
-      setSummary(data.summary ?? null);
-      onDone();
     } catch {
       setState("blocked");
       setMessage("Make Planning failed -- could not reach the server.");
+      return;
+    }
+
+    // Generation succeeded and is persisted at this point -- but the
+    // summary/success state below must not appear until the page has
+    // actually refetched and rendered it (see the doc comment above).
+    try {
+      await onDone();
+      setState("done");
+      setSummary(data.summary ?? null);
+    } catch {
+      // The new plan IS safely persisted -- only reloading the page's own
+      // view of it failed (e.g. a dropped connection). Never claim
+      // success here: the visible tables could still be showing the old
+      // revision.
+      setState("blocked");
+      setMessage("Planning was generated and saved, but the page could not reload it -- refresh to see the new plan.");
     }
   }
 

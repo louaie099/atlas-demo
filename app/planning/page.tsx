@@ -90,8 +90,19 @@ export default function PlanningPage() {
   // response -- one generateDraftWeeklyPlan() run per load, not two
   // independent ones that could read the database at slightly different
   // moments and silently disagree.
-  function loadWeeklyPlan() {
-    fetch("/api/planning/weekly-view")
+  //
+  // Returns the fetch's own promise (never fire-and-forget) so a caller
+  // that needs to know the new data has actually landed -- specifically
+  // MakePlanningButton, which must not announce success until this
+  // refetch has resolved and every dependent view has re-rendered with
+  // it -- can await it. `cache: "no-store"` is explicit, not just relying
+  // on the route's own `force-dynamic`: this is a normal browser fetch
+  // from client code, not a Next.js server fetch, so nothing else stops
+  // an intermediate HTTP cache from serving a stale response to THIS
+  // specific call the moment it matters most (immediately after Make
+  // Planning just changed what this same URL returns).
+  function loadWeeklyPlan(): Promise<void> {
+    return fetch("/api/planning/weekly-view", { cache: "no-store" })
       .then((r) => r.json())
       .then((data) => {
         setFlights(data.flights ?? []);
