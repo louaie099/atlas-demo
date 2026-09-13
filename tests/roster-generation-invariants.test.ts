@@ -4,22 +4,38 @@ import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { generateDraftWeeklyPlan } from "../lib/planning/generate-draft-plan";
 import { JR_NT_OFF_OFF_CYCLE, cycleStepAt } from "../lib/fixed-cycle-rotation";
 import { generateFixedCycleEmployees } from "../lib/employee-generator";
+import { usesFixedCycleRotation } from "../lib/teams";
 
 /**
  * Regression coverage for the roster-generation correction: (1) a normal
  * (non-fixed-cycle, non-foreign-company) employee must always have exactly
  * the confirmed 2 OFF days — no silent 3-4-OFF exception, implicit or
- * legacy; (2) Transit/Leaders must come from the real continuous
- * JR->NT->OFF->OFF cycle, never a flat/AP01 fallback; (3) a foreign-company
- * rest conflict must never be silently masked by mutating a working day
- * into an extra OFF day — it must surface as a real rest_violation Plan
- * Warning instead.
+ * legacy; (2) Transit/Leaders/Duty Officers must come from the real
+ * continuous JR->NT->OFF->OFF cycle, never a flat/AP01 fallback; (3) a
+ * foreign-company employee's STATIC seed-time baseline (still built by
+ * applyForeignCompanyRoster, retained as durable/legacy data — see
+ * specialized-team-generation.ts) must never silently balloon into extra
+ * OFF days via the old rest-fallback-to-OFF anti-pattern.
+ *
+ * NOTE: what a foreign-company rest conflict actually PRODUCES in the
+ * final generated PLAN changed under the specialized-team-roster
+ * milestone — generate-draft-plan.ts now derives foreign-company rosters
+ * fresh each run (specialized-team-generation.ts), tries every rested/
+ * authorized employee in the company's own group and every compatible
+ * catalog code before accepting a shortfall, and never falls back to a
+ * rest-ignoring shift; a genuine shortfall surfaces as a BLOCKING
+ * configuration conflict, never a persisted rest_violation Plan Warning
+ * (see the last describe block below).
  */
 describe("roster generation — normal employees always have exactly 2 OFF days", () => {
   it("every non-fixed-cycle, non-foreign-company employee has exactly 2 OFF days in the generated week", () => {
-    const normal = EMPLOYEES.filter(
-      (e) => !["Transit", "Leaders"].includes(e.assignment) && !CONFIGURED_COMPANIES.includes(e.assignment)
-    );
+    // usesFixedCycleRotation, not a hardcoded ["Transit","Leaders"] list --
+    // Duty Officers now shares the same confirmed JR/NT/OFF/OFF cycle (see
+    // the specialized-team-roster milestone), and a period-4 cycle
+    // legitimately shows 1-3 OFF cells in a 7-day display window
+    // depending on phase, never exactly 2 by construction -- excluded
+    // here for the same reason Transit/Leaders always were.
+    const normal = EMPLOYEES.filter((e) => !usesFixedCycleRotation(e.assignment) && !CONFIGURED_COMPANIES.includes(e.assignment));
     expect(normal.length).toBeGreaterThan(0);
     for (const e of normal) {
       const offCount = e.weekly_shifts.filter((s) => s.status === "off").length;
@@ -70,14 +86,9 @@ describe("roster generation — no automatic extra-OFF fallback for foreign-comp
     }
   });
 
-  it("a real rest conflict from covering a foreign-company flight surfaces as a rest_violation Plan Warning, never as a masked OFF day", () => {
+  it("a foreign-company coverage shortfall NEVER surfaces as a persisted rest_violation Plan Warning any more — it is either resolved by generation (another rested employee/compatible code) or reported as a real, honest BLOCKING configuration conflict", () => {
     const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "Test Week");
     const restViolations = plan.issues.filter((i) => i.type === "rest_violation");
-    expect(restViolations.length).toBeGreaterThan(0);
-    // Every one of these must be a real, non-empty description naming the
-    // employee and the actual rest shortfall — never a fabricated number.
-    for (const issue of restViolations) {
-      expect(issue.description).toMatch(/rest between/);
-    }
+    expect(restViolations).toHaveLength(0);
   });
 });

@@ -6,6 +6,7 @@ import { checkConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
 import { JR_NT_OFF_OFF_CYCLE, cycleStepAt, maxConsecutiveOffInCycle } from "../lib/fixed-cycle-rotation";
 import { CONFIG } from "../lib/seed-data";
 import { Employee } from "../lib/types";
+import { usesFixedCycleRotation } from "../lib/teams";
 
 /**
  * END-TO-END seed-generation test. This does NOT re-test the helper
@@ -69,15 +70,22 @@ describe("end-to-end seed generation (resetDatabase against a fake DB) — the r
     const employees = fake.table("employees") as unknown as Employee[];
     expect(employees.length).toBeGreaterThan(100); // sanity: a real, full workforce was actually inserted
 
+    // usesFixedCycleRotation, not a hardcoded ["Transit","Leaders"] list --
+    // Duty Officers now shares the same confirmed JR/NT/OFF/OFF cycle (see
+    // the specialized-team-roster milestone), and a period-4 cycle
+    // legitimately shows 1-3 OFF cells in a 7-day display window
+    // depending on phase, never exactly 2 by construction.
     const normal = employees.filter(
-      (e) => !["Transit", "Leaders"].includes(e.assignment) && !CONFIGURED_COMPANIES.includes(e.assignment)
+      (e) => !usesFixedCycleRotation(e.assignment) && !CONFIGURED_COMPANIES.includes(e.assignment)
     );
     const transit = employees.filter((e) => e.assignment === "Transit");
     const leaders = employees.filter((e) => e.assignment === "Leaders");
+    const dutyOfficers = employees.filter((e) => e.assignment === "Duty Officers");
 
     expect(normal.length).toBeGreaterThan(0);
     expect(transit.length).toBeGreaterThan(0);
     expect(leaders.length).toBeGreaterThan(0);
+    expect(dutyOfficers.length).toBeGreaterThan(0);
 
     // --- Normal (non-fixed-cycle, non-foreign) employees ---
     for (const e of normal) {
@@ -93,9 +101,9 @@ describe("end-to-end seed generation (resetDatabase against a fake DB) — the r
     // weekly-snapshot check — see lib/planning/validation.ts). ---
     expect(maxConsecutiveOffInCycle(JR_NT_OFF_OFF_CYCLE)).toBeLessThanOrEqual(CONFIG.max_consecutive_off_days);
 
-    // --- Transit / Leaders: must actually be on the fixed JR->NT->OFF->OFF
-    // cycle, never a flat/uniform shift like AP01. ---
-    for (const e of [...transit, ...leaders]) {
+    // --- Transit / Leaders / Duty Officers: must actually be on the fixed
+    // JR->NT->OFF->OFF cycle, never a flat/uniform shift like AP01. ---
+    for (const e of [...transit, ...leaders, ...dutyOfficers]) {
       for (const shift of e.weekly_shifts) {
         if (shift.status === "working") {
           expect(["JR02", "NT01"]).toContain(shift.shift_code);

@@ -153,11 +153,11 @@ const CATEGORIES: GenSpec[] = [
   { count: 6, skills: ["Weight Control"], assignment: "Baggage Claim", shift_code: "NR01", weekly_hours: 20 },
   // Service Plus — T1-based premium/VIP/business-class/lounge activity.
   { count: 6, skills: ["Service Plus"], assignment: "Service Plus", shift_code: "AP02", weekly_hours: 18, keepWednesdayWorking: true },
-  // Duty Officers — confirmed fixed NT/JR-type planning (night/day
-  // coverage). Kept working Wednesday so the narrative (Mohammed Alaoui
-  // approving on Wednesday) doesn't read oddly next to others being off
-  // the same day.
-  { count: 4, skills: ["Boarding"], assignment: "Duty Officers", shift_code: "NT01", weekly_hours: 30, keepWednesdayWorking: true },
+  // Duty Officers MOVED to FIXED_CYCLE_GROUPS below — the flat single-
+  // repeating-NT01-code template previously here could never satisfy the
+  // confirmed 15h minimum rest (NT01 repeated daily yields only 11.5h);
+  // see FIXED_CYCLE_GROUPS's own comment for why the cycle is the correct
+  // minimum fix rather than swapping in a different arbitrary code.
 ];
 
 interface FixedCycleSpec {
@@ -189,6 +189,13 @@ interface FixedCycleSpec {
 const FIXED_CYCLE_GROUPS: FixedCycleSpec[] = [
   { count: 14, skills: ["Transit"], assignment: "Transit", cycle: JR_NT_OFF_OFF_CYCLE, weekly_hours: 28 },
   { count: 5, skills: ["Boarding"], assignment: "Leaders", cycle: JR_NT_OFF_OFF_CYCLE, weekly_hours: 32 },
+  // Duty Officers — moved from a flat single-repeating-code template (see
+  // the removed CATEGORIES entry above) to this same confirmed,
+  // already-feasible cycle. Every other team's own JR/NT-type-planning
+  // description already pointed here; the only remaining open question is
+  // the exact JR code (JR01 vs JR02), unconfirmed for Leaders too (see
+  // fixed-cycle-rotation.ts).
+  { count: 4, skills: ["Boarding"], assignment: "Duty Officers", cycle: JR_NT_OFF_OFF_CYCLE, weekly_hours: 30 },
 ];
 
 // Generation-time sanity check, not a rotation-generation input: the
@@ -264,7 +271,7 @@ export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeS
           shift_end,
           rest_before_shift_hours: referenceCode ? restBeforeShiftFor(referenceCode) : 0,
           weekly_hours: spec.weekly_hours,
-          is_duty_officer: false,
+          is_duty_officer: spec.assignment === "Duty Officers",
           off_days,
           foreign_company_authorizations: [],
           active: true,

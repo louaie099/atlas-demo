@@ -63,3 +63,23 @@ export function isFlexibleGeneralPool(employee: Employee): boolean {
     !isProfilingOrMesureAssigned(employee)
   );
 }
+
+/**
+ * Every population whose day-by-day work/OFF outcome is decided FRESH at
+ * generation time (some `generatedShiftsByDay` this week), rather than
+ * read as a fixed, already-established commitment from
+ * `Employee.weekly_shifts` — see effectiveShiftForDay/resolvePlanRosterEntry
+ * in duty-generation.ts, which branch on this exact predicate. This is
+ * strictly broader than isFlexibleGeneralPool (Stage 6's own population,
+ * UNCHANGED by this addition): it also covers Profiling/Mesure and every
+ * foreign-company team, now that specialized-team-generation.ts derives
+ * their roster from the plan's own real demand/flight windows each run
+ * instead of a static baseline. Transit/Leaders/Duty Officers (fixed
+ * continuous cycle) and any other still-static team (Caisse/BCB, Baggage
+ * Claim not otherwise flexible) are deliberately NOT included here --
+ * their `weekly_shifts` remains their real, authoritative commitment,
+ * exactly as before.
+ */
+export function isGenerationDrivenPopulation(employee: Employee): boolean {
+  return isFlexibleGeneralPool(employee) || isProfilingOrMesureAssigned(employee) || isForeignCompanyAssigned(employee);
+}

@@ -101,7 +101,13 @@ export default function PlanningPage() {
   // an intermediate HTTP cache from serving a stale response to THIS
   // specific call the moment it matters most (immediately after Make
   // Planning just changed what this same URL returns).
-  function loadWeeklyPlan(): Promise<void> {
+  //
+  // Resolves with the freshly-fetched plan (not just void) so a caller
+  // can verify WHICH revision actually landed in state, not merely that
+  // *a* response came back -- see MakePlanningButton's read-after-write
+  // consistency check, which compares this against the revision Make
+  // Planning itself just persisted before it will show success.
+  function loadWeeklyPlan(): Promise<WeeklyPlan | null> {
     return fetch("/api/planning/weekly-view", { cache: "no-store" })
       .then((r) => r.json())
       .then((data) => {
@@ -110,6 +116,7 @@ export default function PlanningPage() {
         setSchedule(data.schedule ?? []);
         setIssues(data.issues ?? []);
         setPlan(data.plan ?? null);
+        return (data.plan ?? null) as WeeklyPlan | null;
       });
   }
 

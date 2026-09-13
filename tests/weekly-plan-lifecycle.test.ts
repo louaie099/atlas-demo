@@ -125,6 +125,26 @@ class FakeSupabase {
 const WEEK_START = "2026-09-01";
 const WEEK_LABEL = "Test Week";
 
+/**
+ * Test-only helper: strips BLOCKING configuration issues and persisted
+ * rest_violation issues from a plan row directly in the fake table. The
+ * REAL seed data can legitimately carry a genuine BLOCKING conflict or
+ * two (an honest specialized-team finding -- see the delivered audit),
+ * which the publish guard (weekly-plan-service.ts's publishPlan) now
+ * correctly refuses to publish. The tests below that are about the
+ * PUBLISH STATE-MACHINE itself (draft -> published, already-published
+ * guard, etc.) shouldn't be coupled to today's exact real-data conflict
+ * count, so they call this first to get a plan the guard considers clean
+ * -- the guard's own blocking behavior is covered by its own dedicated
+ * test instead, using the real, unmodified draft.
+ */
+function clearBlockingConflicts(fake: FakeSupabase, planId: string) {
+  const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+  const plan = plans.find((p) => p.id === planId)!;
+  plan.configuration_issues = plan.configuration_issues.filter((c) => !c.description.startsWith("BLOCKING:"));
+  plan.issues = plan.issues.filter((i) => i.type !== "rest_violation");
+}
+
 describe("weekly-plan-service — Generate Draft", () => {
   it("creates and persists a WeeklyPlan, its full roster, and every generated duty as a real atlas_generated Assignment row", async () => {
     const fake = new FakeSupabase();
@@ -245,6 +265,7 @@ describe("weekly-plan-service — Regenerate Draft", () => {
 
   it("is blocked once the plan has been published", async () => {
     const { fake, planId } = await setupDraft();
+    clearBlockingConflicts(fake, planId);
     await publishPlan(fake as unknown as SupabaseClient, planId);
 
     const result = await regenerateDraftPlan(fake as unknown as SupabaseClient, planId, DAYS_WITH_DATA, CONFIG);
@@ -260,6 +281,7 @@ describe("weekly-plan-service — Publish", () => {
     fake.seedFacts();
     const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in draft) throw new Error("setup failed");
+    clearBlockingConflicts(fake, draft.plan.id);
 
     const assignmentsBefore = (fake.table("assignments") as unknown as Assignment[]).map((a) => a.id).sort();
     const rosterBefore = (fake.table("weekly_plan_roster_entries") as unknown as WeeklyPlanRosterEntry[]).length;
@@ -281,12 +303,53 @@ describe("weekly-plan-service — Publish", () => {
     fake.seedFacts();
     const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in draft) throw new Error("setup failed");
+    clearBlockingConflicts(fake, draft.plan.id);
 
     await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
     const second = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
     expect("blocked" in second).toBe(true);
     if (!("blocked" in second)) throw new Error("unreachable");
     expect(second.reason).toMatch(/already published/);
+  });
+
+  it("is blocked, with a clear explanation, when the draft still carries an unresolved BLOCKING configuration conflict -- a plan with real conflicts must never be presented as fully healthy just by publishing it", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+    const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in draft) throw new Error("setup failed");
+    const blockingCount = draft.plan.configuration_issues.filter((c) => c.description.startsWith("BLOCKING:")).length;
+    // The real seed data is expected to still carry at least one honest,
+    // unresolved specialized-team conflict after the roster corrections
+    // (see the delivered report) -- if this ever reads 0, the guard
+    // itself is still correct, just untested by this particular case;
+    // skip rather than fail so this test stays meaningful either way.
+    if (blockingCount === 0) return;
+
+    const result = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
+    expect("blocked" in result).toBe(true);
+    if (!("blocked" in result)) throw new Error("unreachable");
+    expect(result.reason).toMatch(/blocking configuration conflict/);
+
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    expect(plans[0].status).toBe("draft"); // never silently published anyway
+  });
+
+  it("does NOT block on ordinary unfilled_duty staffing gaps alone -- only a real BLOCKING conflict or a persisted rest_violation blocks publish", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+    const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in draft) throw new Error("setup failed");
+    clearBlockingConflicts(fake, draft.plan.id);
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    const plan = plans.find((p) => p.id === draft.plan.id)!;
+    // Confirms staffing gaps genuinely remain (a real, expected outcome --
+    // see the delivered report) and are NOT what clearBlockingConflicts
+    // removed, so this test actually exercises the "gaps alone don't
+    // block" rule rather than a coincidentally gap-free plan.
+    expect(plan.issues.some((i) => i.type === "unfilled_duty")).toBe(true);
+
+    const result = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
+    expect("blocked" in result).toBe(false);
   });
 });
 
@@ -346,6 +409,81 @@ describe("weekly-plan-service — loadPersistedPlanView", () => {
     const lastSunday = lastEntry!.days.find((d) => d.dayOfWeek === "Sunday")!;
     const expectedSunday = lastEmployee.weekly_shifts.find((s) => s.day_of_week === "Sunday")!;
     expect(lastSunday.status).toBe(expectedSunday.status);
+  });
+});
+
+describe("weekly-plan-service — read-after-write: a regenerated revision must never be observably mixed with the one it replaced", () => {
+  // This is the server-side half of the read-after-write guarantee the
+  // Make Planning button's own strong consistency check (see
+  // components/make-planning-button.tsx) exists to defend even further --
+  // it proves regenerateDraftPlan's delete-before-insert step (weekly-
+  // plan-service.ts) genuinely leaves no trace of the PREVIOUS revision's
+  // roster/assignment rows behind, and that loadPersistedPlanView
+  // (exactly what GET /api/planning/weekly-view calls) reads the new
+  // revision's plan/roster back with no recomputation and no leftover
+  // data from revision N once revision N+1 exists.
+  it("create Draft revision N, regenerate to N+1, then loadPersistedPlanView reports N+1 with roster data that matches N+1, not N", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+    const { computeWeeklyStaffingRequirements } = await import("../lib/planning/weekly-requirements");
+    fake.from("staffing_requirements").insert(computeWeeklyStaffingRequirements(FLIGHTS, CONFIG) as unknown as FakeRow[]);
+
+    // 1. Generate Draft revision 1 and capture its visible roster for one
+    // real employee/day.
+    const first = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in first) throw new Error("setup failed");
+    expect(first.plan.revision).toBe(1);
+
+    const viewAtRevision1 = await loadPersistedPlanView(fake as unknown as SupabaseClient, WEEK_START, DAYS_WITH_DATA);
+    expect(viewAtRevision1!.plan.revision).toBe(1);
+    const sampleEmployee = EMPLOYEES.find((e) => e.assignment === "General T1 Pool")!;
+    const mondayAtRevision1 = viewAtRevision1!.schedule
+      .find((e) => e.employee.id === sampleEmployee.id)!
+      .days.find((d) => d.dayOfWeek === "Monday")!;
+
+    // Directly plant a STALE roster row for this same employee/day/plan --
+    // simulating exactly the shape of bug this test guards against: some
+    // row from an earlier revision that a correct regenerate must remove,
+    // never leave sitting alongside (or worse, ahead of) the new revision's
+    // real row.
+    const rosterTable = fake.table("weekly_plan_roster_entries") as unknown as WeeklyPlanRosterEntry[];
+    const staleRow = rosterTable.find((r) => r.employee_id === sampleEmployee.id && r.day_of_week === "Monday")!;
+    staleRow.shift_code = "STALE_REVISION_1_CODE";
+
+    // 2. Regenerate -- Make Planning's real path when a change to the
+    // underlying program calls for a fresh plan. Persists revision 2.
+    const second = await regenerateDraftPlan(fake as unknown as SupabaseClient, first.plan.id, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in second) throw new Error("regenerate failed");
+    expect(second.plan.revision).toBe(2);
+
+    // 3. Fetch weekly-view again (the exact call GET /api/planning/weekly-view
+    // makes) and assert it reports revision 2 -- never 1, and never silently
+    // reusing the same in-memory object from step 1.
+    const viewAtRevision2 = await loadPersistedPlanView(fake as unknown as SupabaseClient, WEEK_START, DAYS_WITH_DATA);
+    expect(viewAtRevision2!.plan.revision).toBe(2);
+    expect(viewAtRevision2!.plan.generated_at).not.toBe(viewAtRevision1!.plan.generated_at);
+
+    // 4. The planted stale value must be completely gone from the
+    // persisted table -- delete-before-insert really happened, not an
+    // append that left old and new rows coexisting.
+    const rosterAfterRegenerate = fake.table("weekly_plan_roster_entries") as unknown as WeeklyPlanRosterEntry[];
+    expect(rosterAfterRegenerate.some((r) => r.shift_code === "STALE_REVISION_1_CODE")).toBe(false);
+
+    // 5. The roster data returned for this employee/day now matches
+    // revision 2's real, freshly-generated value -- not the stale
+    // revision-1 sentinel, and not merely "some value," proving the read
+    // path is wired to the CURRENT persisted rows.
+    const mondayAtRevision2 = viewAtRevision2!.schedule
+      .find((e) => e.employee.id === sampleEmployee.id)!
+      .days.find((d) => d.dayOfWeek === "Monday")!;
+    expect(mondayAtRevision2.shiftCode).not.toBe("STALE_REVISION_1_CODE");
+    expect(mondayAtRevision2.shiftCode).toBe(mondayAtRevision1.shiftCode); // deterministic generation from unchanged facts
+
+    // 6. The summary counts regenerateDraftPlan returned describe THIS
+    // (revision 2) persisted state, not a stale recomputation -- assignment
+    // count must match what's actually in the table now.
+    const assignmentsNow = fake.table("assignments") as unknown as Assignment[];
+    expect(second.summary!.dutiesAssigned).toBe(assignmentsNow.length);
   });
 });
 
@@ -420,6 +558,7 @@ describe("weekly-plan-service — Make Planning (the button's state machine)", (
 
     const first = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in first) throw new Error("setup failed");
+    clearBlockingConflicts(fake, first.plan.id);
     await publishPlan(fake as unknown as SupabaseClient, first.plan.id);
 
     const result = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);

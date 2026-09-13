@@ -346,5 +346,44 @@ export function enforceRestInvariantAcrossWeek(
     }
   }
 
+  // Intra-window cyclic wrap: this SAME displayed week's last day -> this
+  // SAME displayed week's first day, exactly the same pseudo-continuity
+  // approximation validation.ts's checkRestBetweenDays already applies
+  // (treating the display window as if it repeats identically) -- without
+  // this, the main walk above (which only ever looks BACKWARD/forward in
+  // real calendar time, day 0 through day N-1) has no way to catch a
+  // violation created only by wrapping the display back onto itself, and
+  // checkRestBetweenDays would then report a rest_violation PlanIssue
+  // this "hard" gate never actually prevented. Only meaningful for a full
+  // 7-day window (see checkRestBetweenDays's own guard); a partial slice
+  // has no real wrap to check. The FIRST day's shift is what gets
+  // dropped on a violation, matching checkRestBetweenDays's own framing
+  // (the violation is reported against the day the rest was insufficient
+  // BEFORE, i.e. the wrapped-to day).
+  if (daysOrder.length === 7) {
+    const firstDay = daysOrder[0];
+    const lastDay = daysOrder[daysOrder.length - 1];
+    const stillKeptOnFirstDay = repaired[firstDay] ?? [];
+    const keptOnLastDay = repaired[lastDay] ?? [];
+    const survivors: GeneratedShiftAssignment[] = [];
+
+    for (const assignment of stillKeptOnFirstDay) {
+      const lastDayAssignment = keptOnLastDay.find((a) => a.employeeId === assignment.employeeId);
+      if (!lastDayAssignment) {
+        survivors.push(assignment);
+        continue;
+      }
+      const lastDayTimes = getShiftTimesAs(lastDayAssignment.shiftCode);
+      const firstDayTimes = getShiftTimesAs(assignment.shiftCode);
+      const rest = restHoursBetweenAcrossGap(lastDayTimes.shift_start, lastDayTimes.shift_end, firstDayTimes.shift_start, 1);
+      if (rest < minimumRestHours) {
+        dropped.push({ employeeId: assignment.employeeId, dayOfWeek: firstDay, shiftCode: assignment.shiftCode, restHours: rest });
+        continue;
+      }
+      survivors.push(assignment);
+    }
+    repaired[firstDay] = survivors;
+  }
+
   return { repaired, dropped };
 }

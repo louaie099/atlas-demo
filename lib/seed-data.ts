@@ -6,7 +6,8 @@ import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
-import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
+import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycle-rotation";
+import { usesFixedCycleRotation } from "./teams";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
@@ -466,9 +467,22 @@ const FIXED_CYCLE_EMPLOYEES = generateFixedCycleEmployees(SCRIPTED_EMPLOYEES.len
 // Foreign-company assigned employees' weekly_shifts are then adjusted to
 // match their company's actual flight schedule.
 export const EMPLOYEES: Employee[] = [
+  // Structural, not by-name: any scripted employee whose ASSIGNMENT uses
+  // the confirmed fixed cycle (usesFixedCycleRotation -- currently
+  // Transit/Leaders/Duty Officers) gets their real weekly_shifts from
+  // that same cycle instead of the flat uniform-schedule model, exactly
+  // like every generated fixed-cycle employee (FIXED_CYCLE_EMPLOYEES
+  // below). This is what fixes the one scripted Duty Officer (a JR01
+  // repeating template previously gave only 11.5h rest on every
+  // consecutive working day) without special-casing them by name or id.
+  // cycleOffset uses their scripted off_days.length as a stable,
+  // deterministic seed for coverage variety -- no significance beyond
+  // that.
   ...SCRIPTED_EMPLOYEES.map((e) => ({
     ...e,
-    weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, DAYS_WITH_DATA),
+    weekly_shifts: usesFixedCycleRotation(e.assignment)
+      ? buildFixedCycleWeeklySchedule(JR_NT_OFF_OFF_CYCLE, e.off_days.length, DAYS_WITH_DATA)
+      : buildUniformWeeklySchedule(e.shift_code, e.off_days, DAYS_WITH_DATA),
   })),
   ...FIXED_CYCLE_EMPLOYEES.map(({ employee, cycle, cycleOffset }) => ({
     ...employee,

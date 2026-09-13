@@ -4,7 +4,7 @@ import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { GeneratedShiftAssignment } from "./shift-generation";
 import { getShiftTimesAs } from "../shift-templates";
-import { isFlexibleGeneralPool } from "./workforce-pools";
+import { isGenerationDrivenPopulation } from "./workforce-pools";
 
 export interface GeneratedDuty {
   requirementId: string;
@@ -27,28 +27,33 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 /**
  * Builds each employee's EFFECTIVE shift for a specific day.
  *
- * For a FLEXIBLE POOL employee, the day's outcome is DEMAND-DRIVEN and
- * comes ENTIRELY from Stage 6's generated shift for that day — there is
- * no more fallback to their static baseline `weekly_shifts` code. That
- * baseline is retained only as durable/legacy compatibility data (see
- * lib/types.ts's Employee doc comment) — it must not dictate an actual
- * planned work/OFF day for this population any more. If Stage 6 didn't
- * select this employee for this day, they are genuinely OFF, exactly as
- * demand determined; that is a normal, expected planning outcome now, not
- * something to paper over with a template shift.
+ * For a GENERATION-DRIVEN employee (isGenerationDrivenPopulation --
+ * Stage 6's own flexible General T1 pool, UNCHANGED, plus Profiling/
+ * Mesure and every foreign-company team, whose own roster is now also
+ * derived fresh each run -- see specialized-team-generation.ts), the
+ * day's outcome comes ENTIRELY from this run's generated shift for that
+ * day -- there is no fallback to their static baseline `weekly_shifts`
+ * code. That baseline is retained only as durable/legacy compatibility
+ * data (see lib/types.ts's Employee doc comment) -- it must not dictate
+ * an actual planned work/OFF day for any of these populations any more.
+ * If generation didn't select this employee for this day, they are
+ * genuinely OFF, exactly as demand (or, for a foreign company, that
+ * day's real flight schedule) determined; that is a normal, expected
+ * planning outcome, not something to paper over with a template shift.
  *
- * For a NON-flexible employee (foreign-committed, fixed/specialized team,
- * Transit/Leaders), the existing `weekly_shifts` entry IS their real,
- * already-established commitment under their own dedicated planning model
- * and is used as-is — Stage 6 never touches these employees, so nothing
- * here changes for them.
+ * For every other employee (Transit/Leaders/Duty Officers' confirmed
+ * fixed cycle, or any other still-static team), the existing
+ * `weekly_shifts` entry IS their real, already-established commitment
+ * under their own dedicated planning model and is used as-is --
+ * generation never touches these employees, so nothing here changes for
+ * them.
  */
 export function effectiveShiftForDay(
   employee: Employee,
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): { shift_start: string; shift_end: string } | null {
-  if (isFlexibleGeneralPool(employee)) {
+  if (isGenerationDrivenPopulation(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
     return generated ? getShiftTimesAs(generated.shiftCode) : null;
   }
@@ -71,7 +76,7 @@ export function effectiveShiftCodeForDay(
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): string | null {
-  if (isFlexibleGeneralPool(employee)) {
+  if (isGenerationDrivenPopulation(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
     return generated?.shiftCode ?? null;
   }
@@ -106,7 +111,7 @@ export function resolvePlanRosterEntry(
   dayOfWeek: string,
   generatedShifts: GeneratedShiftAssignment[]
 ): { status: "working" | "off"; shift_code: string | null } {
-  if (isFlexibleGeneralPool(employee)) {
+  if (isGenerationDrivenPopulation(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
     return generated ? { status: "working", shift_code: generated.shiftCode } : { status: "off", shift_code: null };
   }

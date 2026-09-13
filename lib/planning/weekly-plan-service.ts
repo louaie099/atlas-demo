@@ -61,6 +61,22 @@ export interface PlanSummary {
   managedFlights: number;
   dutiesAssigned: number;
   staffingGaps: number;
+  // Non-blocking operational findings other than a plain staffing gap
+  // (currently: weekly_hours_violation, consecutive_off_violation --
+  // rest_violation is intentionally excluded here, since a persisted one
+  // would be a hard violation, not a warning; see hardRestViolations).
+  warnings: number;
+  // Unresolved BLOCKING configuration/planning conflicts (a specialized
+  // team's rotation or demand that couldn't be made to satisfy the
+  // confirmed 15h minimum -- see generate-draft-plan.ts's
+  // specializedRestConflictIssues/demandConflictIssues). Nonzero here
+  // means the plan is real but INCOMPLETE, not unhealthy noise to hide --
+  // see MakePlanningButton, which changes its own wording accordingly,
+  // and publishPlan, which refuses to publish while this is nonzero.
+  blockingConflicts: number;
+  // Expected to always read 0 -- a real persisted rest_violation would
+  // mean the generation-time hard gate itself failed, not a normal
+  // outcome to report alongside a healthy plan.
   hardRestViolations: number;
 }
 
@@ -147,6 +163,8 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     managedFlights: flights.filter((f) => f.operator_type === "atlas_managed").length,
     dutiesAssigned: assignments.length,
     staffingGaps: draft.issues.filter((i) => i.type === "unfilled_duty").length,
+    warnings: draft.issues.filter((i) => i.type !== "unfilled_duty" && i.type !== "rest_violation").length,
+    blockingConflicts: draft.configurationIssues.filter((c) => c.description.startsWith("BLOCKING:")).length,
     hardRestViolations: draft.issues.filter((i) => i.type === "rest_violation").length,
   };
 
@@ -462,6 +480,32 @@ export async function publishPlan(supabase: SupabaseClient, planId: string): Pro
   if (!existing) return { blocked: true, reason: `No plan found with id "${planId}".` };
   if (existing.status !== "draft") {
     return { blocked: true, reason: "Only a draft plan can be published -- this plan is already published." };
+  }
+
+  // Hard publish guard: a draft carrying an unresolved BLOCKING
+  // configuration conflict (a specialized team's rotation or demand that
+  // couldn't be made to satisfy the confirmed 15h minimum -- see
+  // generate-draft-plan.ts) or an actual persisted rest_violation
+  // (should never happen given the generation-time hard gate, but this is
+  // the last checkpoint, not merely a repeat of an earlier one) must
+  // never be published as if it were a healthy, operationally valid
+  // plan. Ordinary unfilled_duty staffing gaps are NOT blocked here --
+  // those may remain publishable depending on policy; only a confirmed
+  // hard labor-rule or configuration conflict blocks publication.
+  const blockingConfigurationIssues = existing.configuration_issues.filter((c) => c.description.startsWith("BLOCKING:"));
+  const restViolations = existing.issues.filter((i) => i.type === "rest_violation");
+  if (blockingConfigurationIssues.length > 0 || restViolations.length > 0) {
+    const parts: string[] = [];
+    if (blockingConfigurationIssues.length > 0) {
+      parts.push(`${blockingConfigurationIssues.length} unresolved blocking configuration conflict(s)`);
+    }
+    if (restViolations.length > 0) {
+      parts.push(`${restViolations.length} unresolved hard rest violation(s)`);
+    }
+    return {
+      blocked: true,
+      reason: `This draft cannot be published: it still has ${parts.join(" and ")}. Resolve them (or accept the plan is intentionally incomplete for now) before publishing -- staffing gaps alone would not block this, but a confirmed hard labor-rule or configuration conflict must be resolved first.`,
+    };
   }
 
   const publishedAt = new Date().toISOString();

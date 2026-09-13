@@ -246,8 +246,15 @@ describe("cross-plan continuity — Week B continues from Week A rather than reg
     // And no employee the harsh run DID assign on Monday can have
     // violated rest against the harsh 23:45-ending Sunday shift -- the
     // gate must have genuinely filtered on this data, not coincidentally
-    // matched shift codes that happened to already satisfy it.
+    // matched shift codes that happened to already satisfy it. Scoped to
+    // the population harshPriorSunday actually seeded (the flexible
+    // pool) -- generatedShiftsByDay now also carries Profiling/Mesure/
+    // foreign-company entries (see specialized-team-generation.ts), whose
+    // own prior-day context was never set to this harsh value at all, so
+    // checking them against it here would be a test-scoping error, not a
+    // real invariant this test is about.
     for (const assignment of mondayShiftsWithHarshContext) {
+      if (!harshPriorSunday.has(assignment.employeeId)) continue;
       const { shift_start } = getShiftTimesAs(assignment.shiftCode);
       const restHours = restHoursBetween("13:45", "23:45", shift_start);
       expect(restHours).toBeGreaterThanOrEqual(CONFIG.minimum_rest_hours);

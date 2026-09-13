@@ -2,10 +2,12 @@ import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../ty
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest } from "./shift-generation";
+import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict } from "./specialized-team-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
-import { isFlexibleGeneralPool } from "./workforce-pools";
+import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
 import { getShiftDurationHours } from "../shift-templates";
+import { CONFIGURED_COMPANIES } from "../company-config";
 
 /** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
 export interface PlanRosterEntryDraft {
@@ -285,24 +287,62 @@ export function generateDraftWeeklyPlan(
     priorWeekBoundaryContext
   );
 
-  // UNIVERSAL hard rest gate — the repair above only ever touches the
-  // flexible General T1 pool, since that's the only population Stage 6
-  // itself decides day-by-day. But the confirmed 15h minimum is a hard
-  // EMPLOYEE constraint, not a Stage-6-specific one: a specialized/fixed
-  // team's OWN static weekly_shifts pattern can also be internally
-  // rest-infeasible (auditStaticShiftRestFeasibility below already
-  // DETECTS this as a reported capacity finding, but until now nothing
-  // stopped the infeasible sequence itself from reaching persistence —
-  // see the delivered incident report). This second pass re-runs the
-  // exact same safety-net mechanism across EVERY employee's real week
-  // (the flexible pool's already-repaired result, plus every other
-  // employee's own static baseline) so an intrinsically-infeasible
-  // specialized rotation can never be persisted either.
+  // Profiling/Mesure and every foreign-company team now also get a REAL,
+  // generation-time roster instead of a static baseline (see
+  // specialized-team-generation.ts's module comment for the full
+  // rationale) — Profiling/Mesure from the SAME weekly demand aggregation
+  // computed above, foreign companies from their own real flight
+  // schedule. Both are already rest-aware internally (a candidate is only
+  // ever selected if they leave the confirmed minimum rest since their
+  // own real previous day), so by the time their output reaches the
+  // universal safety net below, it should already be clean — the net
+  // stays in place regardless, as a backstop, not the mechanism these
+  // populations rely on to become legal.
+  const { generatedShiftsByDay: profilingMesureShiftsByDay, conflicts: profilingMesureConflicts } = generateProfilingMesureShifts(
+    daysOrder,
+    employees,
+    demandByDay,
+    config.minimum_rest_hours,
+    priorWeekBoundaryContext
+  );
+  const { generatedShiftsByDay: foreignShiftsByDay, conflicts: foreignDemandConflicts } = generateForeignCompanyShifts(
+    daysOrder,
+    employees,
+    flights,
+    CONFIGURED_COMPANIES,
+    config.minimum_rest_hours,
+    priorWeekBoundaryContext
+  );
+
+  // Every population whose day is decided by generation this run, merged
+  // into one set — this, not any single population's own result alone,
+  // is what duty generation and roster persistence must read from (see
+  // isGenerationDrivenPopulation's doc comment).
+  const allGeneratedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
+  for (const day of daysOrder) {
+    allGeneratedShiftsByDay[day] = [
+      ...(generatedShiftsByDay[day] ?? []),
+      ...(profilingMesureShiftsByDay[day] ?? []),
+      ...(foreignShiftsByDay[day] ?? []),
+    ];
+  }
+
+  // UNIVERSAL hard rest gate — everything above (flexible pool, Profiling/
+  // Mesure, foreign companies) is already individually rest-aware, but
+  // the confirmed 15h minimum is a hard EMPLOYEE constraint regardless of
+  // which planning model produced a given day, so this still re-walks
+  // EVERY employee's real week one more time as the final backstop the
+  // milestone calls for — never the mechanism relied on to BECOME legal,
+  // only the guarantee that nothing illegal reaches persistence even if
+  // it somehow did. The remaining population here (still read from
+  // static weekly_shifts) is now only the genuinely fixed teams: the
+  // confirmed JR/NT/OFF/OFF cycle (Transit/Leaders/Duty Officers — see
+  // teams.ts) and any other still-static team (Caisse/BCB, etc.).
   const combinedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
-    const dayShifts = [...(generatedShiftsByDay[day] ?? [])];
+    const dayShifts = [...allGeneratedShiftsByDay[day]];
     for (const employee of employees) {
-      if (isFlexibleGeneralPool(employee)) continue; // already included above
+      if (isGenerationDrivenPopulation(employee)) continue; // already included above
       const existing = employee.weekly_shifts.find((s) => s.day_of_week === day);
       if (existing?.status === "working" && existing.shift_code) {
         dayShifts.push({ employeeId: employee.id, dayOfWeek: day, shiftCode: existing.shift_code, coversRoles: [] });
@@ -321,15 +361,41 @@ export function generateDraftWeeklyPlan(
   // Anything newly dropped in THIS pass beyond the flexible-pool repair
   // above can only belong to a non-flexible employee — the flexible
   // pool's own result was already internally rest-consistent going in.
-  // This is a specialized/fixed team's CONFIGURED rotation genuinely
-  // failing to satisfy 15h rest on its own, independent of any demand.
+  // This is either a genuinely fixed team's configured rotation failing
+  // 15h on its own (shouldn't happen for the confirmed JR/NT/OFF/OFF
+  // cycle — see fixed-cycle-rotation.ts), OR — should also read as zero
+  // in practice — a leftover from Profiling/Mesure/foreign generation
+  // that its own internal rest-awareness somehow missed. Either way, it
+  // is never silently persisted.
   const employeesById = new Map(employees.map((e) => [e.id, e]));
   const specializedRestConflicts = universallyDropped.filter(
     (d) => !isFlexibleGeneralPool(employeesById.get(d.employeeId)!)
   );
 
-  // Patch a working copy of only the AFFECTED non-flexible employees'
-  // weekly_shifts so every downstream step (duty generation,
+  // Two different populations need two different corrections for the
+  // same finding: a STATIC team's authoritative source is
+  // Employee.weekly_shifts (patched below, narrowly, day by day); a
+  // GENERATION-DRIVEN team's authoritative source is
+  // allGeneratedShiftsByDay itself (resolvePlanRosterEntry/
+  // effectiveShiftForDay ignore weekly_shifts for this population
+  // entirely — see isGenerationDrivenPopulation), so the offending
+  // generated entry is removed directly instead.
+  const droppedDaysByEmployee = new Map<string, Set<string>>();
+  for (const d of specializedRestConflicts) {
+    if (!droppedDaysByEmployee.has(d.employeeId)) droppedDaysByEmployee.set(d.employeeId, new Set());
+    droppedDaysByEmployee.get(d.employeeId)!.add(d.dayOfWeek);
+  }
+
+  const finalGeneratedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
+  for (const day of daysOrder) {
+    finalGeneratedShiftsByDay[day] = allGeneratedShiftsByDay[day].filter((g) => {
+      const droppedDays = droppedDaysByEmployee.get(g.employeeId);
+      return !(droppedDays?.has(g.dayOfWeek) && isGenerationDrivenPopulation(employeesById.get(g.employeeId)!));
+    });
+  }
+
+  // Patch a working copy of only the AFFECTED, genuinely-static
+  // employees' weekly_shifts so every downstream step (duty generation,
   // resolvePlanRosterEntry, validation) sees the corrected week instead
   // of the illegal one. Deliberately narrow: only the specific offending
   // day(s) are touched — this never rewrites a specialized team's own
@@ -339,14 +405,9 @@ export function generateDraftWeeklyPlan(
   // reported in full via auditStaticShiftRestFeasibility below (against
   // the ORIGINAL, unpatched employees) so the real fix — correcting that
   // team's configured cycle — stays visible, not papered over.
-  const droppedDaysByEmployee = new Map<string, Set<string>>();
-  for (const d of specializedRestConflicts) {
-    if (!droppedDaysByEmployee.has(d.employeeId)) droppedDaysByEmployee.set(d.employeeId, new Set());
-    droppedDaysByEmployee.get(d.employeeId)!.add(d.dayOfWeek);
-  }
   const employeesForPipeline: Employee[] = employees.map((employee) => {
     const droppedDays = droppedDaysByEmployee.get(employee.id);
-    if (!droppedDays) return employee;
+    if (!droppedDays || isGenerationDrivenPopulation(employee)) return employee;
     return {
       ...employee,
       weekly_shifts: employee.weekly_shifts.map((s) =>
@@ -364,7 +425,7 @@ export function generateDraftWeeklyPlan(
       requirements,
       flights,
       employeesForPipeline,
-      generatedShiftsByDay[day] ?? [],
+      finalGeneratedShiftsByDay[day] ?? [],
       existingAssignments,
       config
     );
@@ -375,7 +436,7 @@ export function generateDraftWeeklyPlan(
   const rosterEntries: PlanRosterEntryDraft[] = [];
   for (const day of daysOrder) {
     for (const employee of employeesForPipeline) {
-      const resolved = resolvePlanRosterEntry(employee, day, generatedShiftsByDay[day] ?? []);
+      const resolved = resolvePlanRosterEntry(employee, day, finalGeneratedShiftsByDay[day] ?? []);
       rosterEntries.push({ employee_id: employee.id, day_of_week: day, ...resolved });
     }
   }
@@ -414,6 +475,18 @@ export function generateDraftWeeklyPlan(
     };
   });
 
+  // BLOCKING findings for a genuine COVERAGE shortfall in Profiling/
+  // Mesure/foreign-company generation — distinct from a rest conflict
+  // above: this is "nobody in the team's own pool could be found who is
+  // both rested and holds a compatible catalog shift for this real
+  // window," reported exactly as such rather than silently persisting a
+  // rest-violating fallback (the previous foreign-company behavior this
+  // milestone removes) or fabricating coverage from nowhere.
+  const demandConflictIssues: ConfigurationIssue[] = [...profilingMesureConflicts, ...foreignDemandConflicts].map((c) => ({
+    requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
+    description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+  }));
+
   const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config);
   const configurationIssues = [
     ...collectConfigurationIssues(requirements),
@@ -421,16 +494,22 @@ export function generateDraftWeeklyPlan(
     // confirmed (see auditAverageWeeklyHoursFeasibility's doc comment in
     // validation.ts) — never emitted from a single displayed week alone.
     // Uses the real planned roster too, for the same reason as above.
-    ...auditAverageWeeklyHoursFeasibility(employeesWithPlannedRoster, isFlexibleGeneralPool, config),
-    ...auditStaticShiftRestFeasibility(employees, isFlexibleGeneralPool, config),
+    // isGenerationDrivenPopulation (not just the flexible pool) is
+    // excluded here -- Profiling/Mesure/foreign employees' STATIC
+    // weekly_shifts baseline is no longer what's actually planned for
+    // them (see specialized-team-generation.ts), so auditing it would
+    // report a stale, no-longer-relevant finding.
+    ...auditAverageWeeklyHoursFeasibility(employeesWithPlannedRoster, isGenerationDrivenPopulation, config),
+    ...auditStaticShiftRestFeasibility(employees, isGenerationDrivenPopulation, config),
     ...specializedRestConflictIssues,
+    ...demandConflictIssues,
   ];
 
   return {
     weekLabel,
     daysOrder,
     requirements,
-    generatedShiftsByDay,
+    generatedShiftsByDay: finalGeneratedShiftsByDay,
     dutiesByDay,
     rosterEntries,
     issues,
