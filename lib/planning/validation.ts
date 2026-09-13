@@ -1,6 +1,7 @@
 import { Employee, StaffingRequirement, Config } from "../types";
 import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
+import { evaluateAverageWorkingHours } from "./average-hours";
 import { usesFixedCycleRotation } from "../teams";
 import { checkConsecutiveOffCyclic } from "./consecutive-off";
 // JR_NT_OFF_OFF_CYCLE is imported directly (not looked up per-team) because
@@ -58,27 +59,6 @@ export function collectConfigurationIssues(requirements: StaffingRequirement[]):
   return requirements
     .filter((r) => r.needs_configuration)
     .map((r) => ({ requirementId: r.id, description: r.reasoning }));
-}
-
-/**
- * Total scheduled hours across the week, computed from each employee's
- * weekly_shifts (real shift codes only — OFF days and days with no
- * assigned code contribute nothing). This is a real computation from the
- * generated/existing roster, not the static Employee.weekly_hours field
- * (which represents a separately-tracked running total, not derived from
- * this week's shifts specifically).
- */
-export function computeScheduledWeeklyHours(employee: Employee): number {
-  let totalHours = 0;
-  for (const entry of employee.weekly_shifts) {
-    if (entry.status !== "working" || !entry.shift_code) continue;
-    // getShiftDurationHours (lib/shift-templates.ts) is the one shared
-    // duration implementation -- handles the overnight wrap (AP03, AP04,
-    // NT01, N8) itself, so this never re-derives its own diff-and-wrap
-    // logic here.
-    totalHours += getShiftDurationHours(entry.shift_code);
-  }
-  return Math.round(totalHours * 10) / 10;
 }
 
 /**
@@ -150,65 +130,93 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
 }
 
 /**
- * Confirmed hard constraint (see lib/labor-rules.ts's
- * maximumWeeklyWorkingHours, 42h): sum of counted working duration across
- * the week must not exceed it. This is the FINAL-VALIDATION half of the
- * gate — it must never be the only place this is checked (a roster that
- * violates 42h must not be generated in the first place and then merely
- * displayed as a warning here); see lib/planning/shift-generation.ts for
- * the generation-time half, which refuses to hand the flexible pool a
- * shift that would push them over the ceiling before it's ever chosen.
- * This function still runs across EVERY employee, including static/
- * fixed-shift categories shift-generation.ts never touches, so a
- * structurally-infeasible existing pattern (a single repeated shift code
- * with no per-day variation) is still reported here even though nothing
- * upstream could have prevented it — see auditStaticShiftHoursFeasibility
- * below for surfacing that as a configuration-level gap instead of a
- * per-week surprise.
+ * NOTE on naming: this still returns "hours scheduled in the displayed
+ * week" — a real, useful DIAGNOSTIC number — but it is NOT, by itself,
+ * sufficient to determine 42h AVERAGE compliance (see
+ * lib/labor-rules.ts's maximumAverageWeeklyWorkingHours and
+ * lib/planning/average-hours.ts). A single high or low displayed week is
+ * expected and valid for a continuous rotation; only evaluateAverageWorkingHours
+ * against a real, confirmed reference period can say whether the
+ * employee's actual average is in or out of bounds. Kept under its
+ * original name (rather than renamed) since it is still exactly what it
+ * always computed — a per-displayed-week sum — just no longer treated
+ * elsewhere as a compliance verdict on its own.
  */
-export function checkWeeklyHoursCeiling(employee: Employee, config: Config): PlanIssue | null {
-  const scheduled = computeScheduledWeeklyHours(employee);
-  if (scheduled > config.maximum_weekly_working_hours) {
-    return {
-      type: "weekly_hours_violation",
-      employeeId: employee.id,
-      description: `${employee.name}: scheduled ${scheduled}h this week, above the confirmed ${config.maximum_weekly_working_hours}h weekly ceiling.`,
-    };
+export function computeScheduledWeeklyHours(employee: Employee): number {
+  let totalHours = 0;
+  for (const entry of employee.weekly_shifts) {
+    if (entry.status !== "working" || !entry.shift_code) continue;
+    totalHours += getShiftDurationHours(entry.shift_code);
   }
-  return null;
+  return Math.round(totalHours * 10) / 10;
 }
 
 /**
- * A CONFIGURATION-level feasibility gap (see ConfigurationIssue's doc
- * comment above), not a per-week Plan Warning: an employee whose weekly
- * schedule is NOT decided day-by-day during plan generation (anyone
- * outside the flexible General T1 pool -- a fixed single shift_code
- * repeated on every working day, a foreign-company commitment pattern
- * baked in at seed time, or a fixed JR/NT/OFF/OFF cycle) cannot have its
- * weekly-hours problem "solved" by generation at all: there is no day-by-
- * day choice left to make once their pattern is already fixed. If that
- * fixed pattern's counted hours exceed the confirmed 42h ceiling, this is
- * a genuine workforce-design/capacity problem (the assigned shift code is
- * simply too long for 5 working days under a flat 2-day-off week, and the
- * shift catalog has no shorter code available for that role) — true
- * regardless of which week you look at, exactly like a missing RAM
- * staffing-matrix rule. It is surfaced here rather than silently
- * resolved by inventing an extra OFF day (explicitly forbidden) or a new
- * shift code that isn't in the authoritative catalog.
+ * Confirmed constraint (see lib/labor-rules.ts's
+ * maximumAverageWeeklyWorkingHours, 42h) — but it is an AVERAGE over a
+ * reference period that is NOT YET CONFIRMED
+ * (config.working_hours_reference_period_days is null), never a
+ * Monday-Sunday calendar-week ceiling. A single displayed week's total
+ * exceeding (or staying under) 42h is NOT, by itself, a violation or a
+ * pass of this rule — normal employee rosters are a continuous rotation
+ * across week boundaries, and the display week is only a slice of it.
+ *
+ * This function therefore delegates to evaluateAverageWorkingHours
+ * (lib/planning/average-hours.ts), which returns `not_evaluable` while
+ * the reference period is unconfigured. It emits a PlanIssue ONLY when
+ * that evaluator returns a real `violation` against a real, confirmed
+ * period — which cannot happen today, by design, until management
+ * confirms the period. This is deliberate: it is preferable to under-warn
+ * here than to keep emitting a false weekly_hours_violation computed
+ * against the wrong reference period. See auditAverageWeeklyHoursFeasibility
+ * below for the equivalent configuration-level (non-per-week) treatment.
  */
-export function auditStaticShiftHoursFeasibility(
+export function checkAverageWeeklyHours(employee: Employee, config: Config): PlanIssue | null {
+  const scheduled = computeScheduledWeeklyHours(employee);
+  const daysCoveredThisWeek = employee.weekly_shifts.length;
+  const result = evaluateAverageWorkingHours(scheduled, daysCoveredThisWeek, config);
+  if (result.status !== "violation") return null;
+  return {
+    type: "weekly_hours_violation",
+    employeeId: employee.id,
+    description: `${employee.name}: averages ${result.averageWeeklyHours}h/week over the confirmed ${result.referencePeriodDays}-day reference period, above the confirmed ${config.maximum_average_weekly_working_hours}h average ceiling.`,
+  };
+}
+
+/**
+ * A CONFIGURATION-level feasibility audit (see ConfigurationIssue's doc
+ * comment above) for the confirmed 42h AVERAGE ceiling — the counterpart
+ * to auditStaticShiftRestFeasibility below, but for hours. Like
+ * checkAverageWeeklyHours above, this can only emit a real violation once
+ * a reference period is confirmed (config.working_hours_reference_period_days
+ * is not null); until then it always returns an empty array — this is
+ * the correct, honest behavior, not a bug: an employee's fixed weekly
+ * pattern totaling, say, 46h in ONE displayed week is not evidence of an
+ * average-hours violation over an unconfirmed longer period, and must
+ * not be reported as a capacity gap on that basis alone (see the
+ * delivered report for the numbers this replaces).
+ *
+ * This function is written against the general evaluator so that once a
+ * real reference period IS confirmed, it starts producing real findings
+ * with no further code change here — only lib/labor-rules.ts's
+ * workingHoursReferencePeriodDays needs to change.
+ */
+export function auditAverageWeeklyHoursFeasibility(
   employees: Employee[],
   isFlexible: (e: Employee) => boolean,
   config: Config
 ): ConfigurationIssue[] {
+  if (config.working_hours_reference_period_days === null) return [];
+
   const issues: ConfigurationIssue[] = [];
   for (const employee of employees) {
-    if (isFlexible(employee)) continue; // day-by-day generation already enforces the ceiling for these
+    if (isFlexible(employee)) continue; // day-by-day generation already enforces this for these, at selection time
     const scheduled = computeScheduledWeeklyHours(employee);
-    if (scheduled > config.maximum_weekly_working_hours) {
+    const result = evaluateAverageWorkingHours(scheduled, employee.weekly_shifts.length, config);
+    if (result.status === "violation") {
       issues.push({
         requirementId: `capacity-${employee.id}`,
-        description: `${employee.name} (${employee.assignment}): fixed weekly pattern totals ${scheduled}h, above the confirmed ${config.maximum_weekly_working_hours}h ceiling, with no per-day shift variation available to reduce it without adding an OFF day beyond the confirmed entitlement. Requires either a shorter compatible shift code for this role or a workforce-design decision — not something ATLAS can resolve automatically.`,
+        description: `${employee.name} (${employee.assignment}): fixed weekly pattern averages ${result.averageWeeklyHours}h/week over the confirmed ${result.referencePeriodDays}-day reference period, above the confirmed ${config.maximum_average_weekly_working_hours}h ceiling, with no per-day shift variation available to reduce it without adding an OFF day beyond the confirmed entitlement. Requires either a shorter compatible shift code for this role or a workforce-design decision — not something ATLAS can resolve automatically.`,
       });
     }
   }
@@ -216,9 +224,9 @@ export function auditStaticShiftHoursFeasibility(
 }
 
 /**
- * The same CONFIGURATION-level treatment as auditStaticShiftHoursFeasibility
+ * The same CONFIGURATION-level treatment as auditAverageWeeklyHoursFeasibility
  * above, but for the confirmed 15h minimum inter-shift rest rule instead
- * of the 42h ceiling. An employee whose weekly schedule isn't decided
+ * of the 42h average. An employee whose weekly schedule isn't decided
  * day-by-day during generation (anyone outside the flexible General T1
  * pool) simply repeats the SAME shift code on every working day with no
  * OFF day in between (Monday->Tuesday, Tuesday->Wednesday, etc.) — if
@@ -333,7 +341,7 @@ export function validateWeeklyPlan(
 
   for (const employee of employees) {
     issues.push(...checkRestBetweenDays(employee, daysOrder, config));
-    const hoursIssue = checkWeeklyHoursCeiling(employee, config);
+    const hoursIssue = checkAverageWeeklyHours(employee, config);
     if (hoursIssue) issues.push(hoursIssue);
     const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);

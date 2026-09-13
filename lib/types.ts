@@ -38,15 +38,38 @@ export interface Employee {
   rest_before_shift_hours: number | null;
   weekly_hours: number | null;
   is_duty_officer: boolean;
-  off_days: string[]; // e.g. ["Thursday"] — days this employee is not working this week
+  // e.g. ["Thursday"] — days this employee's durable BASELINE/TEMPLATE
+  // pattern (see weekly_shifts below) has them not working. NOT
+  // authoritative for what actually gets planned for any given displayed
+  // week: for the flexible General T1 pool, Stage 6
+  // (lib/planning/shift-generation.ts) generates the real day-by-day
+  // choice from operational demand, and the persisted
+  // WeeklyPlanRosterEntry that results is the single source of truth for
+  // "what did this employee actually do on this calendar day" (see
+  // lib/planning/duty-generation.ts's resolvePlanRosterEntry). off_days
+  // is kept as a durable config/fallback default (what an employee falls
+  // back to on a day Stage 6 never touched, and what static/fixed-team
+  // employees' real commitment already legitimately is), not as this
+  // week's real plan.
+  off_days: string[];
   foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're TRAINED/AUTHORIZED to work (capability). Does NOT mean currently placed there — that's what `assignment` represents. Being authorized never removes RAM availability outside an actual protected window (see foreign-company-window.ts).
   active: boolean; // workforce status — editable only by Administrators (see lib/roles.ts). An inactive employee is never a scoring candidate.
-  // Foundation for day-by-day weekly planning: one entry per day of the
-  // current week, each with its own shift code or "off" status. Currently
-  // populated uniformly from shift_code/off_days above (today's Find Agent
-  // logic doesn't read this yet) — the future Weekly Planning redesign is
-  // what will actually vary this day-to-day (different codes per day,
-  // mid-week status changes, etc.), not this step.
+  // Employee-level BASELINE/TEMPLATE pattern — one entry per day of a
+  // generic week, each with its own shift code or "off" status. For a
+  // static/fixed-planning-team/foreign-committed employee this template
+  // already IS their real, established commitment (generation never
+  // touches them). For a FLEXIBLE General T1 pool employee, this is only
+  // a durable FALLBACK default: the day-by-day pattern they'd work if
+  // Stage 6 generation doesn't need/select them for a given day (see
+  // effectiveShiftForDay/resolvePlanRosterEntry in
+  // lib/planning/duty-generation.ts) — it is deliberately NOT re-written
+  // per displayed week and does NOT reset at a Monday boundary; the
+  // employee's actual continuous work/OFF rotation across real calendar
+  // weeks lives in the persisted WeeklyPlanRosterEntry rows for each
+  // WeeklyPlan (see lib/planning/rotation-context.ts for how one week's
+  // plan seeds rest-continuity from the immediately preceding week's real
+  // roster). Do not read this field as "this employee's plan for the
+  // current week" — read the current WeeklyPlan's roster entries instead.
   weekly_shifts: WeeklyShiftEntry[];
 }
 
@@ -255,15 +278,19 @@ export interface Config {
   // start of the next (see lib/labor-rules.ts's minimumRestHours) — 15h,
   // computed from real shift timestamps including overnight shifts.
   minimum_rest_hours: number;
-  // Confirmed: the maximum total counted working duration across one
-  // employee's normal week (see lib/labor-rules.ts's
-  // maximumWeeklyWorkingHours) — 42h. Previously "unconfirmed" (the old
-  // 40h prototype value was never carried forward); now a real, active,
-  // HARD constraint — a roster exceeding this must not be generated as a
-  // normal valid plan (see lib/planning/shift-generation.ts's
-  // generation-time gate and lib/planning/validation.ts's
-  // checkWeeklyHoursCeiling final-validation gate).
-  maximum_weekly_working_hours: number;
+  // Confirmed: 42h is the maximum AVERAGE weekly working duration (see
+  // lib/labor-rules.ts's maximumAverageWeeklyWorkingHours) — NOT a
+  // Monday-Sunday calendar-week ceiling. Normal employee rosters are a
+  // continuous rotation across week boundaries; a displayed WeeklyPlan
+  // is only a 7-day view into it. See working_hours_reference_period_days
+  // below and lib/planning/average-hours.ts for how (and whether) actual
+  // compliance can currently be evaluated.
+  maximum_average_weekly_working_hours: number;
+  // NOT YET CONFIRMED. null = no reference period configured yet, which
+  // means average-hours compliance is not currently evaluable — see
+  // lib/planning/average-hours.ts's evaluateAverageWorkingHours. Do not
+  // treat null as "assume 7 days."
+  working_hours_reference_period_days: number | null;
   baseline_checkin_requirement: number;
   overbooking_checkin_reinforcement: number;
   // Resolved labor-rule values (see lib/labor-rules.ts) — the single

@@ -2,6 +2,8 @@ import { SupabaseClient } from "@supabase/supabase-js";
 import { Employee, Flight, Config, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, Assignment, AssignmentModification } from "../types";
 import { generateDraftWeeklyPlan } from "./generate-draft-plan";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
+import { PriorDayShiftMap } from "./shift-generation";
+import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
 
 /**
  * The Weekly Plan lifecycle service. This is the ONLY place that creates,
@@ -57,6 +59,17 @@ export interface BuildDraftPlanBundleInput {
   employees: Employee[];
   config: Config;
   daysOrder: string[];
+  // Cross-plan Sunday(week N)->Monday(week N+1) continuity seed (see
+  // generateDraftWeeklyPlan's own parameter of the same name). Callers
+  // that have already fetched the immediately preceding week's real
+  // persisted roster (see generateDraftPlan/regenerateDraftPlan below,
+  // which do that I/O) pass it here. Omitted -- e.g. the first-ever plan
+  // for this population, or any caller that hasn't looked up a
+  // predecessor -- falls back to deriveFallbackBoundaryContext, which is
+  // still strictly better than an empty map (see that function's doc
+  // comment): it is never correct to silently skip the Sunday->Monday
+  // rest check just because no prior PLAN row happens to exist yet.
+  priorWeekBoundaryContext?: PriorDayShiftMap;
 }
 
 /**
@@ -71,7 +84,9 @@ export interface BuildDraftPlanBundleInput {
  */
 export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPlanBundle {
   const { planId, weekStart, weekLabel, revision, flights, employees, config, daysOrder } = input;
-  const draft = generateDraftWeeklyPlan(flights, employees, [], config, daysOrder, weekLabel);
+  const priorWeekBoundaryContext =
+    input.priorWeekBoundaryContext ?? deriveFallbackBoundaryContext(employees, daysOrder);
+  const draft = generateDraftWeeklyPlan(flights, employees, [], config, daysOrder, weekLabel, priorWeekBoundaryContext);
 
   const plan: WeeklyPlan = {
     id: planId,
@@ -198,6 +213,13 @@ export async function generateDraftPlan(
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
 
+  const priorWeekBoundaryContext = await lookupPriorWeekBoundaryContext(
+    supabase,
+    weekStart,
+    daysOrder,
+    employees as Employee[]
+  );
+
   const bundle = buildDraftPlanBundle({
     planId,
     weekStart,
@@ -207,10 +229,45 @@ export async function generateDraftPlan(
     employees: employees as Employee[],
     config,
     daysOrder,
+    priorWeekBoundaryContext,
   });
   await persistDraftPlanBundle(supabase, bundle);
 
   return { plan: bundle.plan };
+}
+
+/**
+ * Looks up the immediately preceding calendar week's WeeklyPlan (if one
+ * was ever generated and persisted) and, when found, derives the real
+ * Sunday(week N) -> Monday(week N+1) continuity seed from its actual last
+ * displayed day's roster (see rotation-context.ts). Returns undefined
+ * when no predecessor plan exists -- buildDraftPlanBundle then falls back
+ * to deriveFallbackBoundaryContext on its own, so this never leaves the
+ * boundary check silently empty either way (see that function's doc
+ * comment).
+ *
+ * This deliberately only looks ONE week back -- exactly the "minimum
+ * state that must persist between weeks" the audit asked for, not a full
+ * historical rotation-anchor system. A plan more than one week old is
+ * never consulted.
+ */
+async function lookupPriorWeekBoundaryContext(
+  supabase: SupabaseClient,
+  weekStart: string,
+  daysOrder: string[],
+  employees: Employee[]
+): Promise<PriorDayShiftMap | undefined> {
+  const priorWeekId = planIdForWeek(previousWeekStart(weekStart));
+  const { data: priorPlanRows, error: priorPlanErr } = await supabase
+    .from("weekly_plans")
+    .select("id")
+    .eq("id", priorWeekId);
+  if (priorPlanErr) throw new Error(priorPlanErr.message);
+  if (!priorPlanRows || priorPlanRows.length === 0) return undefined;
+
+  const priorRosterEntries = await fetchAllRosterEntriesForPlan(supabase, priorWeekId);
+  const priorLastDay = daysOrder[daysOrder.length - 1];
+  return deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay);
 }
 
 /**
@@ -251,6 +308,13 @@ export async function regenerateDraftPlan(
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
 
+  const priorWeekBoundaryContext = await lookupPriorWeekBoundaryContext(
+    supabase,
+    existing.week_start,
+    daysOrder,
+    employees as Employee[]
+  );
+
   // Wipe this plan's roster/assignments before re-inserting the new
   // revision's -- the plan row itself (id/week_start/status) is UPDATED,
   // never recreated, so its identity is stable across a regeneration.
@@ -273,6 +337,7 @@ export async function regenerateDraftPlan(
     employees: employees as Employee[],
     config,
     daysOrder,
+    priorWeekBoundaryContext,
   });
 
   const { error: updateErr } = await supabase

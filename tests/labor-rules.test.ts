@@ -35,10 +35,15 @@ describe("resolved default labor rules — confirmed management policy values", 
     expect(resolved.minimumRestHoursSource).toBe("confirmed_management_policy");
   });
 
-  it("maximumWeeklyWorkingHours is confirmed at 42h — the old 40h ceiling is never reintroduced, and it's no longer 'unconfirmed'", () => {
-    expect(resolved.maximumWeeklyWorkingHours).toBe(42);
-    expect(resolved.maximumWeeklyWorkingHours).not.toBe(40);
-    expect(resolved.maximumWeeklyWorkingHoursSource).toBe("confirmed_management_policy");
+  it("maximumAverageWeeklyWorkingHours is confirmed at 42h — the old 40h ceiling is never reintroduced, and it's no longer 'unconfirmed'", () => {
+    expect(resolved.maximumAverageWeeklyWorkingHours).toBe(42);
+    expect(resolved.maximumAverageWeeklyWorkingHours).not.toBe(40);
+    expect(resolved.maximumAverageWeeklyWorkingHoursSource).toBe("confirmed_management_policy");
+  });
+
+  it("workingHoursReferencePeriodDays is NOT confirmed — 42h is a confirmed average, but the period it averages over is deliberately unconfigured (never defaulted to 7/14/28 days)", () => {
+    expect(resolved.workingHoursReferencePeriodDays).toBeNull();
+    expect(resolved.workingHoursReferencePeriodDaysSource).toBe("unconfirmed_prototype");
   });
 
   it("DEFAULT_LABOR_RULES has exactly one (default/unscoped) rule set", () => {
@@ -55,9 +60,11 @@ describe("Config (lib/seed-data.ts) — threads the resolved labor rules through
     expect(CONFIG.renfort_weekly_off_days).toBe(resolved.renfortWeeklyOffDays);
   });
 
-  it("CONFIG.minimum_rest_hours / maximum_weekly_working_hours mirror the resolved labor rules exactly — never a hardcoded 15/42 of CONFIG's own", () => {
+  it("CONFIG.minimum_rest_hours / maximum_average_weekly_working_hours / working_hours_reference_period_days mirror the resolved labor rules exactly — never a hardcoded 15/42 of CONFIG's own, and never a defaulted reference period", () => {
     const resolved = resolveDefaultLaborRules();
     expect(CONFIG.minimum_rest_hours).toBe(resolved.minimumRestHours);
-    expect(CONFIG.maximum_weekly_working_hours).toBe(resolved.maximumWeeklyWorkingHours);
+    expect(CONFIG.maximum_average_weekly_working_hours).toBe(resolved.maximumAverageWeeklyWorkingHours);
+    expect(CONFIG.working_hours_reference_period_days).toBe(resolved.workingHoursReferencePeriodDays);
+    expect(CONFIG.working_hours_reference_period_days).toBeNull();
   });
 });

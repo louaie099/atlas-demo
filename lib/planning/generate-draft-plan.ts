@@ -2,9 +2,8 @@ import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../ty
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
-import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, effectiveShiftCodeForDay, resolvePlanRosterEntry } from "./duty-generation";
-import { validateWeeklyPlan, collectConfigurationIssues, auditStaticShiftHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
-import { getShiftDurationHours } from "../shift-templates";
+import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
+import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 
 /** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
@@ -73,6 +72,23 @@ export interface DraftWeeklyPlan {
  *       for their whole shift.
  *  9.   Individual duty generation, per day, in departure-time order.
  *  10.  Validation across the whole week.
+ *
+ * IMPORTANT — no calendar-week 42h gate: this pipeline used to reject a
+ * candidate shift (and report a configuration gap) whenever it would
+ * push a displayed-week total over the confirmed 42h number. That was
+ * wrong: 42h is a confirmed AVERAGE (lib/labor-rules.ts's
+ * maximumAverageWeeklyWorkingHours), not a Monday-Sunday ceiling, and the
+ * real reference period it averages over is not yet confirmed (see
+ * lib/planning/average-hours.ts). Generation therefore no longer rejects
+ * anything on hours grounds, and validation no longer emits a
+ * weekly_hours_violation or capacity ConfigurationIssue from a single
+ * displayed week's total alone (checkAverageWeeklyHours/
+ * auditAverageWeeklyHoursFeasibility in validation.ts return
+ * not-evaluable/empty until a reference period is confirmed). The 15h
+ * REST rule is unaffected — it is a genuinely continuous, per-transition
+ * constraint (not a weekly sum) and remains hard-enforced exactly as
+ * before, including the forward-looking check against each employee's
+ * fixed baseline for the day after the display window ends.
  */
 export function generateDraftWeeklyPlan(
   flights: Flight[],
@@ -80,7 +96,19 @@ export function generateDraftWeeklyPlan(
   existingAssignments: Assignment[],
   config: Config,
   daysOrder: string[],
-  weekLabel: string
+  weekLabel: string,
+  // Optional cross-plan continuity seed: each employee's REAL effective
+  // shift on the calendar day immediately before this window's first day
+  // (e.g. the immediately preceding WeeklyPlan's actual Sunday roster —
+  // see lib/planning/rotation-context.ts's deriveTransitionContext and
+  // weekly-plan-service.ts's use of it). Without this, priorDayShift
+  // would start empty and this window's Monday would never be
+  // rest-checked against whatever the employee actually worked the day
+  // before, which is exactly the kind of Monday-reset this milestone
+  // corrects. Defaults to empty for a genuinely first-ever window (no
+  // prior plan exists yet) — never a reason to skip the check when a
+  // prior plan DOES exist.
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
 
@@ -89,19 +117,11 @@ export function generateDraftWeeklyPlan(
   const allUnfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
   // Threaded day-to-day: each employee's effective shift on the previous
-  // day, so Stage 6 can enforce rest when selecting today's shift. Empty
-  // on the first day of the week — nothing "before Monday" is modeled,
-  // same scope validation.ts's own week-level rest check already has.
-  let priorDayShift: PriorDayShiftMap = new Map();
-
-  // Threaded day-to-day: each employee's cumulative counted hours from
-  // every day processed so far this week (both Stage-6-generated picks
-  // and static/baseline days alike) — the running total
-  // generateFlexiblePoolShifts checks against the confirmed
-  // maximumWeeklyWorkingHours ceiling BEFORE handing out each new day's
-  // shift, so a 42h-violating roster is never generated in the first
-  // place (see shift-generation.ts's hard gate).
-  const hoursSoFarThisWeek = new Map<string, number>();
+  // day, so Stage 6 can enforce rest when selecting today's shift. Seeded
+  // from priorWeekBoundaryContext for the FIRST day of this window (see
+  // that parameter's doc comment) rather than starting empty — this is
+  // the concrete Sunday(week N) -> Monday(week N+1) continuity fix.
+  let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
 
   for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
     const day = daysOrder[dayIndex];
@@ -110,33 +130,16 @@ export function generateDraftWeeklyPlan(
     // The employee's own static baseline shift for the FOLLOWING day, if
     // one exists in this run -- see generateFlexiblePoolShifts's
     // nextDayBaselineShift doc comment for why this forward-looking
-    // lookup is needed alongside priorDayShift.
-    // Wraps past the end of daysOrder back to its own first day (the
-    // following week's Monday), mirroring checkRestBetweenDays's own
-    // cyclic week-boundary check -- a continuously-operating roster's
-    // Sunday is calendar-adjacent to next week's Monday too, not just
-    // the display week's own edge.
+    // lookup is needed alongside priorDayShift. Wraps past the end of
+    // daysOrder back to its own first day ONLY as a same-window
+    // approximation when no real next window is known; a real prior/next
+    // plan's actual roster (when available) is a strictly better source
+    // and is what priorWeekBoundaryContext threads in from the other
+    // direction for the window's own Monday.
     const nextDay = daysOrder[(dayIndex + 1) % daysOrder.length];
     const nextDayBaselineShift: PriorDayShiftMap = new Map();
     for (const employee of employees) {
       nextDayBaselineShift.set(employee.id, effectiveShiftForDay(employee, nextDay, []));
-    }
-
-    // Conservative worst-case: each employee's own static baseline hours
-    // for every day still ahead of today (this run hasn't decided those
-    // days yet, so assume none of them get overridden) -- see
-    // generateFlexiblePoolShifts's futureBaselineHours doc comment.
-    const futureBaselineHours = new Map<string, number>();
-    const futureDays = daysOrder.slice(dayIndex + 1);
-    for (const employee of employees) {
-      let total = 0;
-      for (const futureDay of futureDays) {
-        const entry = employee.weekly_shifts.find((s) => s.day_of_week === futureDay);
-        if (entry?.status === "working" && entry.shift_code) {
-          total += getShiftDurationHours(entry.shift_code);
-        }
-      }
-      futureBaselineHours.set(employee.id, total);
     }
 
     const generatedShifts = generateFlexiblePoolShifts(
@@ -146,10 +149,7 @@ export function generateDraftWeeklyPlan(
       priorDayShift,
       config.minimum_rest_hours,
       undefined,
-      hoursSoFarThisWeek,
-      config.maximum_weekly_working_hours,
-      nextDayBaselineShift,
-      futureBaselineHours
+      nextDayBaselineShift
     );
     generatedShiftsByDay[day] = generatedShifts;
 
@@ -170,28 +170,15 @@ export function generateDraftWeeklyPlan(
       nextPriorDayShift.set(employee.id, effectiveShiftForDay(employee, day, generatedShifts));
     }
     priorDayShift = nextPriorDayShift;
-
-    // Accrue today's counted hours for EVERY employee (flexible-pool
-    // picks and static/baseline days alike) so tomorrow's Stage 6
-    // selection can see the true running total -- this is what makes the
-    // 42h gate in shift-generation.ts a real WEEK-LEVEL constraint rather
-    // than a per-day one.
-    for (const employee of employees) {
-      const code = effectiveShiftCodeForDay(employee, day, generatedShifts);
-      if (code) {
-        hoursSoFarThisWeek.set(employee.id, (hoursSoFarThisWeek.get(employee.id) ?? 0) + getShiftDurationHours(code));
-      }
-    }
   }
 
   const issues = validateWeeklyPlan(allUnfilled, employees, daysOrder, config);
   const configurationIssues = [
     ...collectConfigurationIssues(requirements),
-    // A structurally-infeasible FIXED weekly pattern (no per-day shift
-    // choice left to make, so generation itself can never resolve it) is
-    // a workforce-design/capacity gap, not a per-week Plan Warning — see
-    // auditStaticShiftHoursFeasibility's doc comment in validation.ts.
-    ...auditStaticShiftHoursFeasibility(employees, isFlexibleGeneralPool, config),
+    // Average-hours feasibility: returns [] until a reference period is
+    // confirmed (see auditAverageWeeklyHoursFeasibility's doc comment in
+    // validation.ts) — never emitted from a single displayed week alone.
+    ...auditAverageWeeklyHoursFeasibility(employees, isFlexibleGeneralPool, config),
     ...auditStaticShiftRestFeasibility(employees, isFlexibleGeneralPool, config),
   ];
 

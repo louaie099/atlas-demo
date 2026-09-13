@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { computeScheduledWeeklyHours, checkRestBetweenDays, checkWeeklyHoursCeiling, validateWeeklyPlan, collectConfigurationIssues } from "../lib/planning/validation";
+import { computeScheduledWeeklyHours, checkRestBetweenDays, checkAverageWeeklyHours, auditAverageWeeklyHoursFeasibility, validateWeeklyPlan, collectConfigurationIssues } from "../lib/planning/validation";
+import { evaluateAverageWorkingHours } from "../lib/planning/average-hours";
 import { CONFIG } from "../lib/seed-data";
 import { Employee, WeeklyShiftEntry } from "../lib/types";
 
@@ -117,32 +118,18 @@ describe("checkRestBetweenDays", () => {
   });
 });
 
-describe("checkWeeklyHoursCeiling", () => {
-  // CONFIG.maximum_weekly_working_hours is now a confirmed 42h (see
-  // lib/labor-rules.ts) — the old 40h prototype value is never reintroduced,
-  // and "unconfirmed" no longer exists as a state for this field at all.
-  it("confirms the real CONFIG ceiling is 42h, never 40h", () => {
-    expect(CONFIG.maximum_weekly_working_hours).toBe(42);
+describe("checkAverageWeeklyHours / evaluateAverageWorkingHours — 42h is a confirmed AVERAGE, not a Monday-Sunday ceiling", () => {
+  // CONFIG.maximum_average_weekly_working_hours is a confirmed 42h AVERAGE
+  // (see lib/labor-rules.ts) — the old 40h prototype value is never
+  // reintroduced. Its reference period, however, is deliberately NOT
+  // confirmed (never defaulted to 7/14/28 days), so a single displayed
+  // week's total can no longer, by itself, prove compliance or violation.
+  it("confirms the real CONFIG average is 42h, never 40h — and the reference period is deliberately unconfigured", () => {
+    expect(CONFIG.maximum_average_weekly_working_hours).toBe(42);
+    expect(CONFIG.working_hours_reference_period_days).toBeNull();
   });
 
-  it("flags an employee scheduled above the confirmed 42h ceiling", () => {
-    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d) => ({
-      day_of_week: d,
-      shift_code: "NR02", // 08:00-18:15 = 10.25h × 5 = 51.25h, well above the confirmed 42h ceiling
-      status: "working" as const,
-    }));
-    const employee = makeEmployee(days);
-    const issue = checkWeeklyHoursCeiling(employee, CONFIG);
-    expect(issue?.type).toBe("weekly_hours_violation");
-    expect(issue?.description).toContain("42h");
-  });
-
-  it("does not flag an employee within the confirmed 42h ceiling", () => {
-    const employee = makeEmployee([{ day_of_week: "Monday", shift_code: "MT01", status: "working" }]);
-    expect(checkWeeklyHoursCeiling(employee, CONFIG)).toBeNull();
-  });
-
-  it("the user's own worked example: five MT02 shifts (10.25h each = 51.25h) exceed the confirmed 42h ceiling", () => {
+  it("a displayed week CAN exceed 42h without automatic violation — the user's own worked example (five MT02 shifts, 10.25h each = 51.25h) is not, by itself, evidence of a violation", () => {
     const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d) => ({
       day_of_week: d,
       shift_code: "MT02", // 04:30-14:45 = 10h15
@@ -150,7 +137,44 @@ describe("checkWeeklyHoursCeiling", () => {
     }));
     const employee = makeEmployee(days);
     expect(computeScheduledWeeklyHours(employee)).toBeCloseTo(51.25, 1);
-    expect(checkWeeklyHoursCeiling(employee, CONFIG)?.type).toBe("weekly_hours_violation");
+    // No PlanIssue is raised solely from this one displayed week's total.
+    expect(checkAverageWeeklyHours(employee, CONFIG)).toBeNull();
+  });
+
+  it("checkAverageWeeklyHours never emits a weekly_hours_violation while the reference period is unconfigured, no matter how high the displayed week's total is", () => {
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d) => ({
+      day_of_week: d,
+      shift_code: "NR02", // 51.25h across 5 days
+      status: "working" as const,
+    }));
+    const employee = makeEmployee(days);
+    expect(checkAverageWeeklyHours(employee, CONFIG)).toBeNull();
+  });
+
+  it("evaluateAverageWorkingHours returns an explicit not_evaluable/reference_period_unconfigured state, never a silent pass or fail, while the period is unconfigured", () => {
+    const result = evaluateAverageWorkingHours(51.25, 5, CONFIG);
+    expect(result).toEqual({ status: "not_evaluable", reason: "reference_period_unconfigured" });
+  });
+
+  it("once a reference period IS configured (hypothetically), the same evaluator computes a real average and can find a violation — proving the foundation works without inventing the real period in production config", () => {
+    const configuredForTest = { ...CONFIG, working_hours_reference_period_days: 7 };
+    const result = evaluateAverageWorkingHours(51.25, 5, configuredForTest);
+    expect(result.status).toBe("violation");
+    if (result.status !== "not_evaluable") {
+      expect(result.averageWeeklyHours).toBeCloseTo((51.25 / 5) * 7, 1);
+      expect(result.referencePeriodDays).toBe(7);
+    }
+  });
+
+  it("auditAverageWeeklyHoursFeasibility returns an empty array while the reference period is unconfigured — no ConfigurationIssue is generated solely from a displayed-week total, even for a structurally long-shift static category", () => {
+    const employees = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((d, i) =>
+      makeEmployee(
+        [{ day_of_week: d, shift_code: "NR02", status: "working" as const }],
+        { id: `static-${i}`, assignment: "Caisse/BCB" }
+      )
+    );
+    const issues = auditAverageWeeklyHoursFeasibility(employees, () => false, CONFIG);
+    expect(issues).toEqual([]);
   });
 });
 

@@ -8,17 +8,19 @@ import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule } from "./fixed-cycle-rotation";
 
-// minimum_rest_hours and maximum_weekly_working_hours are sourced from
-// lib/labor-rules.ts, not hand-picked here — both are now confirmed
-// management-policy values (15h rest, 42h weekly ceiling); see that file
-// for source metadata. Never duplicate these numbers elsewhere — every
-// generator/validator reads them from this CONFIG object (itself read
-// from the resolver), not a hardcoded 15/42 of its own.
+// minimum_rest_hours and maximum_average_weekly_working_hours are sourced
+// from lib/labor-rules.ts, not hand-picked here — 15h rest is confirmed
+// and continuously enforced; 42h is a confirmed AVERAGE, not a
+// Monday-Sunday ceiling, and working_hours_reference_period_days is not
+// yet confirmed (null) — see that file's module comment. Never duplicate
+// these numbers elsewhere — every generator/validator reads them from
+// this CONFIG object (itself read from the resolver).
 const DEFAULT_RULES = resolveDefaultLaborRules();
 
 export const CONFIG: Config = {
   minimum_rest_hours: DEFAULT_RULES.minimumRestHours,
-  maximum_weekly_working_hours: DEFAULT_RULES.maximumWeeklyWorkingHours,
+  maximum_average_weekly_working_hours: DEFAULT_RULES.maximumAverageWeeklyWorkingHours,
+  working_hours_reference_period_days: DEFAULT_RULES.workingHoursReferencePeriodDays,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
   normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,

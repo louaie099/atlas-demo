@@ -10,13 +10,33 @@ import { Employee } from "./types";
  *
  * Every rule value carries its own `source` so "confirmed" vs "prototype
  * placeholder, pending a real number" is never lost once a value is read.
- * As of this revision every field below is confirmed_management_policy —
- * `minimumRestHours` (15h) and `maximumWeeklyWorkingHours` (42h) were the
- * last two still marked "unconfirmed_prototype"/"unconfirmed"; both are
- * now real, active, hard constraints. The `unconfirmed_prototype` source
- * value itself is kept in the LaborRuleSource union below only so a
- * FUTURE genuinely-unconfirmed rule can still be represented honestly —
- * it does not describe anything in DEFAULT_LABOR_RULES today.
+ * `minimumRestHours` (15h) is a real, active, hard constraint, evaluated
+ * continuously (every real shift-to-shift transition, never reset at a
+ * calendar week boundary — see roster-generation.ts's restHoursBetween
+ * and validation.ts's checkRestBetweenDays).
+ *
+ * `maximumAverageWeeklyWorkingHours` (42h) — renamed from the old
+ * `maximumWeeklyWorkingHours` — is ALSO confirmed, but it is NOT a
+ * Monday-Sunday calendar-week ceiling. Normal employee rosters are a
+ * CONTINUOUS rotation across week boundaries (a displayed WeeklyPlan is
+ * only a 7-day VIEW into that rotation, exactly like
+ * lib/fixed-cycle-rotation.ts's Transit/Leaders cycle already models),
+ * so "42h" is confirmed as an AVERAGE over some reference period, not a
+ * per-displayed-week sum. The exact reference period
+ * (`workingHoursReferencePeriodDays` below) is NOT YET CONFIRMED — do
+ * not default it to 7, 14, or 28 days. Until it is configured, no code
+ * may treat a single displayed week's total as sufficient to determine
+ * 42h compliance one way or the other (see
+ * lib/planning/average-hours.ts's evaluateAverageWorkingHours, which
+ * returns an explicit not_evaluable state in that case, and
+ * lib/planning/validation.ts's checkAverageWeeklyHours/
+ * auditAverageWeeklyHoursFeasibility, which never emit a violation while
+ * unconfigured).
+ *
+ * The `unconfirmed_prototype` source value in the LaborRuleSource union
+ * below is what `workingHoursReferencePeriodDays` currently uses — it is
+ * a real, active "not yet decided" state for that one field, not
+ * decorative history.
  */
 export type LaborRuleSource =
   | "confirmed_management_policy"
@@ -71,17 +91,22 @@ export interface LaborRules {
   // lib/fixed-cycle-rotation.ts) is validated AGAINST this value, but the
   // sequence itself lives in the rotation engine, never here.
   maxConsecutiveOffDays: RuleValue<number>;
-  // Confirmed: the maximum total counted working duration (sum of
-  // scheduled shift durations, overnight shifts counted correctly) across
-  // one employee's normal week. Previously "unconfirmed" (the old 40h
-  // prototype value was deliberately never carried forward as a number);
-  // now a real, confirmed 42h ceiling. This is a HARD constraint a roster
-  // must satisfy BEFORE it is generated, never a number a plan is allowed
-  // to exceed and merely get flagged for afterward — see
-  // lib/planning/validation.ts's checkWeeklyHoursCeiling (final-validation
-  // gate) and lib/planning/shift-generation.ts (generation-time gate for
-  // the flexible pool, the only place shift SELECTION happens day-by-day).
-  maximumWeeklyWorkingHours: RuleValue<number>;
+  // Confirmed: 42h is the maximum AVERAGE weekly working duration (sum of
+  // scheduled shift durations, overnight shifts counted correctly),
+  // averaged over `workingHoursReferencePeriodDays` below — never a
+  // Monday-Sunday calendar-week sum by itself (see the module doc
+  // comment above). This is a hard constraint a CONTINUOUS rotation must
+  // satisfy over its real reference period; a single displayed week
+  // running high (or low) is not, by itself, a violation or a pass.
+  maximumAverageWeeklyWorkingHours: RuleValue<number>;
+  // NOT YET CONFIRMED. The number of days the 42h average above is
+  // computed over. `value: null` means "no reference period has been
+  // configured yet" — this is a real, load-bearing state, not a
+  // placeholder to be defaulted away. Do not set this to 7, 14, or 28
+  // speculatively; every consumer must treat `null` as "cannot evaluate
+  // average-hours compliance right now" (see
+  // lib/planning/average-hours.ts).
+  workingHoursReferencePeriodDays: RuleValue<number | null>;
 }
 
 /**
@@ -89,12 +114,12 @@ export interface LaborRules {
  * has confirmed values. Do not add a scoped entry speculatively — add one
  * only once a real, confirmed, role/contract-specific rule exists.
  *
- * minimumRestHours (15h) and maximumWeeklyWorkingHours (42h) are now BOTH
- * confirmed management-policy values, replacing the old 10h
- * "unconfirmed_prototype" rest placeholder and the "unconfirmed" hours
- * ceiling respectively. Do not restore the old 10h or 40h values anywhere
- * — those numbers no longer exist in this codebase as anything other than
- * history in comments like this one.
+ * minimumRestHours (15h) and maximumAverageWeeklyWorkingHours (42h) are
+ * both confirmed management-policy VALUES. Do not restore the old 10h or
+ * 40h values anywhere. workingHoursReferencePeriodDays is deliberately
+ * `unconfirmed_prototype` with `value: null` — the 42h number is
+ * confirmed, the period it averages over is not, and those are two
+ * separate facts (see the module doc comment above).
  *
  * normalWeeklyOffDays (2), renfortWeeklyOffDays (1), and
  * maxConsecutiveOffDays (2) remain confirmed and unchanged.
@@ -114,7 +139,8 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     normalWeeklyOffDays: { value: 2, source: "confirmed_management_policy" },
     renfortWeeklyOffDays: { value: 1, source: "confirmed_management_policy" },
     maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
-    maximumWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
+    maximumAverageWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
+    workingHoursReferencePeriodDays: { value: null, source: "unconfirmed_prototype" },
   },
 ];
 
@@ -127,8 +153,11 @@ export interface ResolvedLaborRules {
   renfortWeeklyOffDaysSource: LaborRuleSource;
   maxConsecutiveOffDays: number;
   maxConsecutiveOffDaysSource: LaborRuleSource;
-  maximumWeeklyWorkingHours: number;
-  maximumWeeklyWorkingHoursSource: LaborRuleSource;
+  maximumAverageWeeklyWorkingHours: number;
+  maximumAverageWeeklyWorkingHoursSource: LaborRuleSource;
+  // null = not yet confirmed. See workingHoursReferencePeriodDays above.
+  workingHoursReferencePeriodDays: number | null;
+  workingHoursReferencePeriodDaysSource: LaborRuleSource;
 }
 
 function isEffective(rule: LaborRules, date: string): boolean {
@@ -185,8 +214,10 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     renfortWeeklyOffDaysSource: rule.renfortWeeklyOffDays.source,
     maxConsecutiveOffDays: rule.maxConsecutiveOffDays.value,
     maxConsecutiveOffDaysSource: rule.maxConsecutiveOffDays.source,
-    maximumWeeklyWorkingHours: rule.maximumWeeklyWorkingHours.value,
-    maximumWeeklyWorkingHoursSource: rule.maximumWeeklyWorkingHours.source,
+    maximumAverageWeeklyWorkingHours: rule.maximumAverageWeeklyWorkingHours.value,
+    maximumAverageWeeklyWorkingHoursSource: rule.maximumAverageWeeklyWorkingHours.source,
+    workingHoursReferencePeriodDays: rule.workingHoursReferencePeriodDays.value,
+    workingHoursReferencePeriodDaysSource: rule.workingHoursReferencePeriodDays.source,
   };
 }
 

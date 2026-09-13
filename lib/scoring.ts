@@ -114,14 +114,18 @@ export function scoreCandidates(
     // ending before the window ends is a genuine unplanned extension worth
     // flagging for human review.
     const extensionNeeded = shiftEndMin < windowEndMin;
-    // maximum_weekly_working_hours is now a confirmed, always-a-number
-    // ceiling (see lib/labor-rules.ts) — approaching it (within 5h) still
-    // only flags a candidate for human review here; the HARD 42h cap
-    // itself is enforced earlier, at shift generation/selection time (see
-    // lib/planning/shift-generation.ts) and again at final validation
-    // (lib/planning/validation.ts's checkWeeklyHoursCeiling), never
-    // rescued by scoring.
-    const nearCeiling = employee.weekly_hours >= config.maximum_weekly_working_hours - 5;
+    // maximum_average_weekly_working_hours (42h) is a confirmed AVERAGE,
+    // not a Monday-Sunday ceiling (see lib/labor-rules.ts) — the exact
+    // reference period it averages over is not yet confirmed, so nothing
+    // in this codebase can currently determine hard compliance from
+    // Employee.weekly_hours alone (see lib/planning/average-hours.ts).
+    // This remains a soft, human-review-only heuristic: an employee
+    // already accumulating hours close to the confirmed average is worth
+    // a second look before adding more, but this NEVER hard-excludes a
+    // candidate, and no code elsewhere in the pipeline hard-rejects on
+    // this basis any more either (see the delivered report on the
+    // removed calendar-week 42h gate).
+    const nearCeiling = employee.weekly_hours >= config.maximum_average_weekly_working_hours - 5;
     const rested = employee.rest_before_shift_hours >= config.minimum_rest_hours;
 
     // Eligibility basis, stated honestly: a real trained skill for every
@@ -134,13 +138,13 @@ export function scoreCandidates(
       return {
         employee,
         status: "recommended",
-        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within the ${config.maximum_weekly_working_hours}h weekly ceiling. No extension required.`,
+        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within the confirmed ${config.maximum_average_weekly_working_hours}h average. No extension required.`,
       };
     }
 
     const reasons: string[] = [];
     if (extensionNeeded) reasons.push("would require an unplanned shift extension with no rest window");
-    if (nearCeiling) reasons.push(`weekly hours (${employee.weekly_hours}h) approaching the ${config.maximum_weekly_working_hours}h weekly ceiling`);
+    if (nearCeiling) reasons.push(`weekly hours (${employee.weekly_hours}h) approaching the confirmed ${config.maximum_average_weekly_working_hours}h average`);
     if (!rested) reasons.push(`insufficient rest (${employee.rest_before_shift_hours}h, below the ${config.minimum_rest_hours}h minimum required)`);
 
     return {

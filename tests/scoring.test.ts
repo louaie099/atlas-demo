@@ -25,14 +25,14 @@ describe("scoreCandidates", () => {
     const karim = results.find((r) => r.employee.id === "karim-idrissi");
     expect(karim?.status).toBe("flagged");
     expect(karim?.reasoning).toContain("unplanned shift extension");
-    // CONFIG.maximum_weekly_working_hours is now a CONFIRMED 42h (see
-    // lib/labor-rules.ts) — Karim's scripted 38h weekly total genuinely IS
-    // within 5h of that confirmed ceiling (38 >= 42-5), so "approaching
-    // the ceiling" is now an accurate, expected part of his reasoning,
-    // not a bug to suppress. This inverts the old assertion, which
-    // depended on the ceiling being unconfirmed and therefore never
-    // mentioned at all.
-    expect(karim?.reasoning).toContain("42h weekly ceiling");
+    // CONFIG.maximum_average_weekly_working_hours is a CONFIRMED 42h
+    // average (see lib/labor-rules.ts) — Karim's scripted 38h weekly
+    // total genuinely IS within 5h of that confirmed average (38 >= 42-5),
+    // so "approaching" it is an accurate, expected part of his reasoning
+    // (a soft, human-review heuristic — see scoring.ts's nearCeiling doc
+    // comment — never a hard per-week violation, since the reference
+    // period is unconfirmed).
+    expect(karim?.reasoning).toContain("confirmed 42h average");
   });
 
   it("recommends Hicham Bouzid, but flags Rania Toumi, for the AT535 Check-in gap — their real shifts' derived rest differs (MT01: 15h, at the floor; MT02: 13.75h, below it)", () => {
