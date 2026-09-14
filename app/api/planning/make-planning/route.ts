@@ -46,12 +46,19 @@ export async function POST() {
   // read-after-write investigation; remove once resolved.
   const supabaseProjectRef = getSupabaseProjectRefForDiagnostics();
   const planId = planIdForWeek(CURRENT_WEEK_START);
+  // TEMPORARY, additive-only: Vercel's own auto-injected commit SHA for
+  // the deployment currently serving this request -- non-secret. Compared
+  // against the same field on GET /api/planning/weekly-view's response to
+  // prove or disprove the two routes running from different deployments
+  // (skew) at the moment of a real request. Remove once the investigation
+  // concludes.
+  const buildId = process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
   try {
     const result = await makePlanning(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in result) {
       return NextResponse.json(
-        { error: result.reason, supabaseProjectRef, planId },
+        { error: result.reason, supabaseProjectRef, planId, buildId },
         { status: 409, headers: { "Cache-Control": "no-store" } }
       );
     }
@@ -62,6 +69,7 @@ export async function POST() {
         revision: result.plan.revision,
         summary: result.summary,
         supabaseProjectRef,
+        buildId,
         diagnostics: result.diagnostics ?? null,
       },
       { headers: { "Cache-Control": "no-store" } }
@@ -73,7 +81,7 @@ export async function POST() {
     // identity instead of a generic 500 with no detail, so the deployed
     // failure is immediately actionable from the response body alone.
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err), supabaseProjectRef, planId },
+      { error: err instanceof Error ? err.message : String(err), supabaseProjectRef, planId, buildId },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }

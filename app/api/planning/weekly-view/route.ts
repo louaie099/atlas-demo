@@ -42,6 +42,21 @@ export async function GET() {
   const supabaseProjectRef = getSupabaseProjectRefForDiagnostics();
   const planId = planIdForWeek(CURRENT_WEEK_START);
 
+  // TEMPORARY, additive-only: part of the deployed read-after-write
+  // investigation. requestId/serverTimestamp are generated fresh on
+  // every invocation of this handler, so two DevTools entries with the
+  // same requestId can only mean the panel replayed/cached an old
+  // response rather than this route actually re-running -- proves or
+  // disproves "was this a genuinely fresh GET" independent of anything
+  // else. buildId is Vercel's own auto-injected commit SHA for the
+  // deployment currently serving this request; comparing it against the
+  // same field on POST /api/planning/make-planning's response proves or
+  // disproves the two routes running from different deployments (skew).
+  // Neither value is secret. Remove once the investigation concludes.
+  const requestId = crypto.randomUUID();
+  const serverTimestamp = new Date().toISOString();
+  const buildId = process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
+
   const view = await loadPersistedPlanView(supabase, CURRENT_WEEK_START, DAYS_WITH_DATA);
   if (!view) {
     return NextResponse.json(
@@ -53,7 +68,16 @@ export async function GET() {
         issues: [],
         planIssueCount: 0,
         configurationIssues: [],
-        diagnostics: { supabaseProjectRef, planId, revision: null, rosterCount: 0, assignmentCount: 0 },
+        diagnostics: {
+          supabaseProjectRef,
+          planId,
+          revision: null,
+          rosterCount: 0,
+          assignmentCount: 0,
+          requestId,
+          serverTimestamp,
+          buildId,
+        },
       },
       noStore
     );
@@ -83,6 +107,9 @@ export async function GET() {
         revision: view.plan.revision,
         rosterCount: rawRosterEntries.length,
         assignmentCount: rawAssignments.length,
+        requestId,
+        serverTimestamp,
+        buildId,
       },
     },
     noStore
