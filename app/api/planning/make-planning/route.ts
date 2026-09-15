@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient, getSupabaseProjectRefForDiagnostics } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { makePlanning, planIdForWeek } from "@/lib/planning/weekly-plan-service";
+import { makePlanning, planIdForWeek, getPlanConnectionDiagnostics } from "@/lib/planning/weekly-plan-service";
 import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
@@ -63,6 +63,7 @@ export async function POST() {
       );
     }
 
+    const dbConnection = await getPlanConnectionDiagnostics(supabase, planId);
     return NextResponse.json(
       {
         plan: result.plan,
@@ -70,6 +71,7 @@ export async function POST() {
         summary: result.summary,
         supabaseProjectRef,
         buildId,
+        dbConnection,
         diagnostics: result.diagnostics ?? null,
       },
       { headers: { "Cache-Control": "no-store" } }

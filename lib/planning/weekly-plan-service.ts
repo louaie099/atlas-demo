@@ -322,6 +322,28 @@ async function verifyPlanPersisted(
 }
 
 /**
+ * TEMPORARY, additive-only: part of the deployed read-after-write
+ * investigation. Calls the plan_connection_diagnostics SQL function
+ * (see migration 0011) to capture which physical Postgres backend
+ * actually answered this SELECT -- in particular pg_is_in_recovery(),
+ * which is only true when a streaming read replica served the query.
+ * Never throws: a diagnostics probe must not be able to fail the real
+ * operation it's attached to. Remove once the investigation concludes.
+ */
+export async function getPlanConnectionDiagnostics(
+  supabase: SupabaseClient,
+  planId: string
+): Promise<Record<string, unknown> | null> {
+  try {
+    const { data, error } = await supabase.rpc("plan_connection_diagnostics", { p_plan_id: planId });
+    if (error) return { error: error.message };
+    return (data && data[0]) ?? null;
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Supabase/PostgREST caps a plain `.select()` at 1000 rows by default
  * (the `db-max-rows` setting) -- silently: no error, it just returns the
  * first page and stops. weekly_plan_roster_entries holds one row per

@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient, getSupabaseProjectRefForDiagnostics } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { loadPersistedPlanView, planIdForWeek, fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan } from "@/lib/planning/weekly-plan-service";
+import { loadPersistedPlanView, planIdForWeek, fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan, getPlanConnectionDiagnostics } from "@/lib/planning/weekly-plan-service";
 import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
@@ -83,9 +83,10 @@ export async function GET() {
     );
   }
 
-  const [rawRosterEntries, rawAssignments] = await Promise.all([
+  const [rawRosterEntries, rawAssignments, dbConnection] = await Promise.all([
     fetchAllRosterEntriesForPlan(supabase, planId),
     fetchAllAssignmentsForPlan(supabase, planId),
+    getPlanConnectionDiagnostics(supabase, planId),
   ]);
 
   // `configurationIssues` is exposed here for a future Administration/
@@ -110,6 +111,7 @@ export async function GET() {
         requestId,
         serverTimestamp,
         buildId,
+        dbConnection,
       },
     },
     noStore
