@@ -4,33 +4,6 @@ import { generateDraftWeeklyPlan } from "./generate-draft-plan";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
 import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
-import { getSupabaseProjectRefForDiagnostics } from "../supabase-server";
-
-/**
- * TEMPORARY DEPLOYED-DATABASE DIAGNOSTICS -- part of the live read-after-
- * write investigation requested against the actual deployed Supabase
- * project (not a hypothesis to be verified from TypeScript alone). Every
- * field here is either a non-secret identifier (the Supabase project ref
- * -- see getSupabaseProjectRefForDiagnostics's doc comment) or a plain
- * count/number read straight back from the database via a fresh SELECT
- * immediately after the corresponding write -- never an in-memory value
- * assumed to have landed. Attached to regenerateDraftPlan's result and
- * surfaced by POST /api/planning/make-planning's JSON response so the
- * NEXT real click's response body is itself the evidence, without
- * needing server log access. Remove once the deployed root cause is
- * confirmed and fixed.
- */
-export interface PlanPersistenceDiagnostics {
-  supabaseProjectRef: string;
-  planId: string;
-  before: { revision: number; rosterCount: number; assignmentCount: number };
-  afterPlanUpdate: { revisionReadBack: number };
-  afterRosterDelete: { remainingRosterCount: number };
-  afterRosterInsert: { rosterCount: number };
-  afterAssignmentDelete: { remainingAssignmentCount: number };
-  afterAssignmentInsert: { assignmentCount: number };
-  final: { revision: number; rosterCount: number; assignmentCount: number };
-}
 
 /**
  * The Weekly Plan lifecycle service. This is the ONLY place that creates,
@@ -322,28 +295,6 @@ async function verifyPlanPersisted(
 }
 
 /**
- * TEMPORARY, additive-only: part of the deployed read-after-write
- * investigation. Calls the plan_connection_diagnostics SQL function
- * (see migration 0011) to capture which physical Postgres backend
- * actually answered this SELECT -- in particular pg_is_in_recovery(),
- * which is only true when a streaming read replica served the query.
- * Never throws: a diagnostics probe must not be able to fail the real
- * operation it's attached to. Remove once the investigation concludes.
- */
-export async function getPlanConnectionDiagnostics(
-  supabase: SupabaseClient,
-  planId: string
-): Promise<Record<string, unknown> | null> {
-  try {
-    const { data, error } = await supabase.rpc("plan_connection_diagnostics", { p_plan_id: planId });
-    if (error) return { error: error.message };
-    return (data && data[0]) ?? null;
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/**
  * Supabase/PostgREST caps a plain `.select()` at 1000 rows by default
  * (the `db-max-rows` setting) -- silently: no error, it just returns the
  * first page and stops. weekly_plan_roster_entries holds one row per
@@ -390,7 +341,7 @@ export async function fetchAllRosterEntriesForPlan(
 // transition) but is a pure status/timestamp flip with no generation
 // step, so it has nothing to summarize and omits the field.
 export type PlanLifecycleResult =
-  | { plan: WeeklyPlan; summary?: PlanSummary; diagnostics?: PlanPersistenceDiagnostics }
+  | { plan: WeeklyPlan; summary?: PlanSummary }
   | { blocked: true; reason: string };
 
 /**
@@ -525,18 +476,6 @@ export async function regenerateDraftPlan(
     employees as Employee[]
   );
 
-  // ---- TEMPORARY DEPLOYED-DATABASE DIAGNOSTICS ----
-  // See PlanPersistenceDiagnostics's doc comment. Every number below is a
-  // fresh read straight off the database at that exact point in the
-  // sequence -- never an in-memory value assumed to have landed -- so the
-  // JSON this function ultimately returns is itself the proof (or
-  // disproof) of what actually happened in Postgres, without needing
-  // server log access.
-  const projectRef = getSupabaseProjectRefForDiagnostics();
-  const beforeRoster = await fetchAllRosterEntriesForPlan(supabase, planId);
-  const beforeAssignments = await fetchAllAssignmentsForPlan(supabase, planId);
-  const before = { revision: existing.revision, rosterCount: beforeRoster.length, assignmentCount: beforeAssignments.length };
-
   // Wipe this plan's roster/assignments before re-inserting the new
   // revision's -- the plan row itself (id/week_start/status) is UPDATED,
   // never recreated, so its identity is stable across a regeneration.
@@ -547,11 +486,9 @@ export async function regenerateDraftPlan(
   // blocked above).
   const { error: deleteAssignErr } = await supabase.from("assignments").delete().eq("plan_id", planId);
   if (deleteAssignErr) throw new Error(deleteAssignErr.message);
-  const remainingAssignmentCount = (await fetchAllAssignmentsForPlan(supabase, planId)).length;
 
   const { error: deleteRosterErr } = await supabase.from("weekly_plan_roster_entries").delete().eq("plan_id", planId);
   if (deleteRosterErr) throw new Error(deleteRosterErr.message);
-  const remainingRosterCount = (await fetchAllRosterEntriesForPlan(supabase, planId)).length;
 
   const bundle = buildDraftPlanBundle({
     planId,
@@ -578,50 +515,27 @@ export async function regenerateDraftPlan(
     .eq("id", planId);
   if (updateErr) throw new Error(`Updating weekly plan failed: ${updateErr.message}`);
 
-  // Fresh SELECT immediately after the UPDATE -- the literal
-  // `SELECT revision FROM weekly_plans WHERE id = ...` the investigation
-  // asked for, via the same client this request used to write it.
-  const { data: postUpdateRows, error: postUpdateErr } = await supabase.from("weekly_plans").select("revision").eq("id", planId);
-  if (postUpdateErr) throw new Error(`Reading back weekly plan after update failed: ${postUpdateErr.message}`);
-  const revisionReadBack = (postUpdateRows?.[0] as { revision: number } | undefined)?.revision ?? -1;
-
   if (bundle.rosterEntries.length > 0) {
     const { error } = await supabase.from("weekly_plan_roster_entries").insert(bundle.rosterEntries);
     if (error) throw new Error(`Persisting plan roster entries failed: ${error.message}`);
   }
-  const rosterCountAfterInsert = (await fetchAllRosterEntriesForPlan(supabase, planId)).length;
 
   if (bundle.assignments.length > 0) {
     const { error } = await supabase.from("assignments").insert(bundle.assignments);
     if (error) throw new Error(`Persisting plan assignments failed: ${error.message}`);
   }
-  const assignmentCountAfterInsert = (await fetchAllAssignmentsForPlan(supabase, planId)).length;
 
-  // Read-your-own-write verification -- see verifyPlanPersisted's doc
-  // comment. This is the exact step that closes the traced read-after-
-  // write bug: the UPDATE above reporting no client-visible `error` is
-  // NOT proof the row this same request will read back next actually
-  // shows revision `bundle.plan.revision` -- Postgres does not error on
-  // an UPDATE that matches zero rows (the classic silent-RLS-filter or
-  // stale/duplicate-row failure mode), so this re-reads the plan and its
-  // roster/assignment counts before this function is allowed to report
-  // success, and throws a specific, diagnostic error the moment any of
-  // them disagrees with what was just generated.
-  const final = await verifyPlanPersisted(supabase, bundle, "regenerateDraftPlan");
+  // Read-your-own-write verification -- this is a permanent safety check,
+  // independent of the (now removed) deployed-diagnostics investigation:
+  // Postgres does not error on an UPDATE/DELETE that matches zero rows
+  // (a silently-filtering RLS policy or a stale/duplicate row are the
+  // classic causes), so this re-reads the plan and its roster/assignment
+  // counts before this function is allowed to report success, and throws
+  // a specific, diagnostic error the moment any of them disagrees with
+  // what was just generated. See verifyPlanPersisted's own doc comment.
+  await verifyPlanPersisted(supabase, bundle, "regenerateDraftPlan");
 
-  const diagnostics: PlanPersistenceDiagnostics = {
-    supabaseProjectRef: projectRef,
-    planId,
-    before,
-    afterPlanUpdate: { revisionReadBack },
-    afterRosterDelete: { remainingRosterCount },
-    afterRosterInsert: { rosterCount: rosterCountAfterInsert },
-    afterAssignmentDelete: { remainingAssignmentCount },
-    afterAssignmentInsert: { assignmentCount: assignmentCountAfterInsert },
-    final,
-  };
-
-  return { plan: { ...existing, ...bundle.plan }, summary: bundle.summary, diagnostics };
+  return { plan: { ...existing, ...bundle.plan }, summary: bundle.summary };
 }
 
 /**

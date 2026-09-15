@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { getSupabaseServerClient, getSupabaseProjectRefForDiagnostics } from "@/lib/supabase-server";
+import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { loadPersistedPlanView, planIdForWeek, fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan, getPlanConnectionDiagnostics } from "@/lib/planning/weekly-plan-service";
+import { loadPersistedPlanView } from "@/lib/planning/weekly-plan-service";
 import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
@@ -22,40 +22,14 @@ import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
  * the write itself succeeded. The client's own `fetch(..., { cache:
  * "no-store" })` call is a second, independent line of defense for the
  * same failure mode -- neither one alone is guaranteed to be honored by
- * every intermediary, so both are set.
- *
- * The `diagnostics` block is TEMPORARY, part of the deployed read-after-
- * write investigation: `supabaseProjectRef` is the same non-secret
- * identifier POST /api/planning/make-planning now reports (see
- * getSupabaseProjectRefForDiagnostics's doc comment) -- if the two ever
- * disagree on a real deployed request, the write and this read are
- * proven to be talking to two different Supabase projects/credentials,
- * which is the single most important fact this investigation needs.
- * `rosterCount`/`assignmentCount` are fresh, independent reads of the raw
- * tables (not derived from the transformed `roster`/`schedule` views
- * below), for a direct, apples-to-apples comparison against the same
- * counts regenerateDraftPlan's own diagnostics reported a moment earlier.
+ * every intermediary, so both are set. The actual fix for this route
+ * consistently returning a stale revision lives in getSupabaseServerClient
+ * (lib/supabase-server.ts): its fetch override disables intermediary
+ * caching of every GET this server client makes to Supabase.
  */
 export async function GET() {
   const supabase = getSupabaseServerClient();
   const noStore = { headers: { "Cache-Control": "no-store" } };
-  const supabaseProjectRef = getSupabaseProjectRefForDiagnostics();
-  const planId = planIdForWeek(CURRENT_WEEK_START);
-
-  // TEMPORARY, additive-only: part of the deployed read-after-write
-  // investigation. requestId/serverTimestamp are generated fresh on
-  // every invocation of this handler, so two DevTools entries with the
-  // same requestId can only mean the panel replayed/cached an old
-  // response rather than this route actually re-running -- proves or
-  // disproves "was this a genuinely fresh GET" independent of anything
-  // else. buildId is Vercel's own auto-injected commit SHA for the
-  // deployment currently serving this request; comparing it against the
-  // same field on POST /api/planning/make-planning's response proves or
-  // disproves the two routes running from different deployments (skew).
-  // Neither value is secret. Remove once the investigation concludes.
-  const requestId = crypto.randomUUID();
-  const serverTimestamp = new Date().toISOString();
-  const buildId = process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
   const view = await loadPersistedPlanView(supabase, CURRENT_WEEK_START, DAYS_WITH_DATA);
   if (!view) {
@@ -68,26 +42,10 @@ export async function GET() {
         issues: [],
         planIssueCount: 0,
         configurationIssues: [],
-        diagnostics: {
-          supabaseProjectRef,
-          planId,
-          revision: null,
-          rosterCount: 0,
-          assignmentCount: 0,
-          requestId,
-          serverTimestamp,
-          buildId,
-        },
       },
       noStore
     );
   }
-
-  const [rawRosterEntries, rawAssignments, dbConnection] = await Promise.all([
-    fetchAllRosterEntriesForPlan(supabase, planId),
-    fetchAllAssignmentsForPlan(supabase, planId),
-    getPlanConnectionDiagnostics(supabase, planId),
-  ]);
 
   // `configurationIssues` is exposed here for a future Administration/
   // Configuration surface -- it is NOT read by the current Weekly
@@ -102,17 +60,6 @@ export async function GET() {
       issues: view.plan.issues,
       planIssueCount: view.plan.issues.length,
       configurationIssues: view.plan.configuration_issues,
-      diagnostics: {
-        supabaseProjectRef,
-        planId,
-        revision: view.plan.revision,
-        rosterCount: rawRosterEntries.length,
-        assignmentCount: rawAssignments.length,
-        requestId,
-        serverTimestamp,
-        buildId,
-        dbConnection,
-      },
     },
     noStore
   );

@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { getSupabaseServerClient, getSupabaseProjectRefForDiagnostics } from "@/lib/supabase-server";
+import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { makePlanning, planIdForWeek, getPlanConnectionDiagnostics } from "@/lib/planning/weekly-plan-service";
+import { makePlanning } from "@/lib/planning/weekly-plan-service";
 import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
@@ -22,10 +22,7 @@ import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "
  * revision number the transaction above just committed. The client
  * (components/make-planning-button.tsx) compares THIS number against
  * whatever revision the follow-up GET /api/planning/weekly-view reports,
- * and refuses to show success until they match -- see that component's
- * doc comment for why a bare "the refetch resolved" was never a strong
- * enough guarantee (an intermediate cache or a lagging read replica can
- * return a resolved-but-stale response).
+ * and refuses to show success until they match.
  *
  * `Cache-Control: no-store` is set explicitly on the response, not left
  * to `export const dynamic = "force-dynamic"` alone -- that flag governs
@@ -37,53 +34,28 @@ import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "
 export async function POST() {
   const supabase = getSupabaseServerClient();
 
-  // TEMPORARY: identifies which Supabase project this specific request's
-  // service-role client is actually configured against -- non-secret (see
-  // getSupabaseProjectRefForDiagnostics), included on every branch below
-  // (including a thrown error, via the catch) so a live comparison
-  // against /api/planning/weekly-view's own reported project ref is
-  // possible from the response bodies alone. Part of the deployed
-  // read-after-write investigation; remove once resolved.
-  const supabaseProjectRef = getSupabaseProjectRefForDiagnostics();
-  const planId = planIdForWeek(CURRENT_WEEK_START);
-  // TEMPORARY, additive-only: Vercel's own auto-injected commit SHA for
-  // the deployment currently serving this request -- non-secret. Compared
-  // against the same field on GET /api/planning/weekly-view's response to
-  // prove or disprove the two routes running from different deployments
-  // (skew) at the moment of a real request. Remove once the investigation
-  // concludes.
-  const buildId = process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
-
   try {
     const result = await makePlanning(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in result) {
-      return NextResponse.json(
-        { error: result.reason, supabaseProjectRef, planId, buildId },
-        { status: 409, headers: { "Cache-Control": "no-store" } }
-      );
+      return NextResponse.json({ error: result.reason }, { status: 409, headers: { "Cache-Control": "no-store" } });
     }
 
-    const dbConnection = await getPlanConnectionDiagnostics(supabase, planId);
     return NextResponse.json(
       {
         plan: result.plan,
         revision: result.plan.revision,
         summary: result.summary,
-        supabaseProjectRef,
-        buildId,
-        dbConnection,
-        diagnostics: result.diagnostics ?? null,
       },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (err) {
     // A thrown error here (most likely verifyPlanPersisted's own
     // diagnostic message -- see weekly-plan-service.ts) means the write
-    // did NOT verifiably land; surface the exact message and project
-    // identity instead of a generic 500 with no detail, so the deployed
-    // failure is immediately actionable from the response body alone.
+    // did NOT verifiably land; surface the exact message instead of a
+    // generic 500 with no detail, so a real failure is immediately
+    // actionable from the response body alone.
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err), supabaseProjectRef, planId, buildId },
+      { error: err instanceof Error ? err.message : String(err) },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
