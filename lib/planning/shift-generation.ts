@@ -173,7 +173,20 @@ export function generateFlexiblePoolShifts(
         if (!a.coversRoles.includes(role)) a.coversRoles.push(role);
       }
 
-      const candidateCodes = selectCompatibleShiftCodes(window.start, window.end).slice(0, MAX_SHIFT_CODE_CANDIDATES);
+      // allowLateStart: true — this window is a demand CLUSTER's full
+      // span (demandClustersForRole), not one dedicated commitment; a
+      // shift starting after the cluster opens but still running through
+      // its end is exactly what scoring.ts's own duty-assignment stage
+      // already treats as normal coverage (see selectCompatibleShiftCodes'
+      // doc comment). Without this, a cluster opening earlier than every
+      // catalog code's entree (e.g. Check-in's T-3h window on an early
+      // departure) got zero candidate codes here and so never rostered
+      // anyone at all, even though scoring.ts would gladly use a
+      // late-starting shift for the rest of that window.
+      const candidateCodes = selectCompatibleShiftCodes(window.start, window.end, undefined, undefined, undefined, true).slice(
+        0,
+        MAX_SHIFT_CODE_CANDIDATES
+      );
 
       for (const candidateCode of candidateCodes) {
         if (covered >= peak) break;

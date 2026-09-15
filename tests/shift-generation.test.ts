@@ -131,4 +131,25 @@ describe("generateFlexiblePoolShifts", () => {
     const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
     expect(result).toHaveLength(0);
   });
+
+  it("REGRESSION (deployed bug): a Check-in demand cluster opening before every catalog code's entree is still covered by a real, later-starting code, instead of leaving a qualified/idle employee unrostered", () => {
+    // AT100-style 07:15 departure: Check-in opens T-180 (04:15) and
+    // closes T-45 (06:30) under DEFAULT_CHECKIN_DEMAND_POLICY. No catalog
+    // code starts at or before 04:15 (earliest entree is 04:30), so the
+    // OLD full-containment-only matching left this cluster with zero
+    // candidate codes and rostered nobody -- even though the employee
+    // below is qualified, active, and has no conflicting prior shift.
+    const flight = makeFlight({ id: "at100-monday", flight_number: "AT100", scheduled_departure: "07:15" });
+    const requirement = makeRequirement({ id: "req-checkin", flight_id: "at100-monday", role: "Check-in", source: "demand_forecast", total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+    const employee = makeEmployee({ id: "e1", skills: ["Check-in"] });
+
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    expect(result).toHaveLength(1);
+    expect(result[0].employeeId).toBe("e1");
+    // MT02 (04:30-14:45) is the closest-fit code that still runs through
+    // the window's 06:30 close -- exactly what scoring.ts's own
+    // duty-assignment stage already treats as valid coverage.
+    expect(result[0].shiftCode).toBe("MT02");
+  });
 });

@@ -16,6 +16,43 @@ describe("selectCompatibleShiftCode", () => {
     // gap), but NR01 (08:00-16:45) is shorter than NR02 (08:00-18:15).
     expect(selectCompatibleShiftCode("11:20", "15:50")).toBe("NR01");
   });
+
+  it("without allowLateStart, still returns null for a window opening before every catalog code's entree (the bug this option fixes)", () => {
+    // 04:15-06:30 is exactly a Check-in demand cluster for a ~07:15
+    // departure (T-180/T-45). No catalog code starts at or before 04:15
+    // (the earliest, MT02/JR02, starts 04:30) — strict full-containment
+    // matching correctly reports no compatible code by its own contract.
+    expect(selectCompatibleShiftCode("04:15", "06:30")).toBeNull();
+  });
+
+  it("allowLateStart: true finds a real, later-starting code for that same window instead of leaving it uncoverable", () => {
+    // MT02 (04:30-14:45) starts 15min after the window opens but runs
+    // well past it closing at 06:30 -- exactly the "shift starting
+    // somewhat after the window's own start is normal and expected"
+    // coverage scoring.ts's own duty-assignment stage already accepts.
+    expect(selectCompatibleShiftCode("04:15", "06:30", undefined, undefined, undefined, true)).toBe("MT02");
+  });
+
+  it("allowLateStart: true never returns a code that ends before the window does", () => {
+    // 23:20 is after every non-overnight catalog code's latest sortie
+    // (AP02, 23:15) -- allowLateStart only relaxes the START side, never
+    // the END side, so this must still be null.
+    expect(selectCompatibleShiftCode("20:00", "23:20", undefined, undefined, undefined, true)).toBeNull();
+  });
+
+  it("allowLateStart: true never selects a shift that starts after the window has already closed", () => {
+    // 02:00-03:00 is before every catalog code's entree (earliest 04:30)
+    // -- a shift starting at 04:30 never actually overlaps a window that
+    // closed at 03:00, so this must stay null even with allowLateStart.
+    expect(selectCompatibleShiftCode("02:00", "03:00", undefined, undefined, undefined, true)).toBeNull();
+  });
+
+  it("allowLateStart: true still prefers a fully-containing code over a late-starting one when both exist", () => {
+    // 05:00-09:00: MT02 (04:30-14:45) fully contains it (0 minutes lost);
+    // a hypothetical later code would lose coverage minutes and must not
+    // be preferred just because it's shorter.
+    expect(selectCompatibleShiftCode("05:00", "09:00", undefined, undefined, undefined, true)).toBe("MT02");
+  });
 });
 
 function makeFlight(overrides: Partial<Flight>): Flight {

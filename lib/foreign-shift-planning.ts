@@ -15,15 +15,40 @@ function minutesToTime(mins: number): string {
 /**
  * Selects the RAM Handling shift code that covers a given protected
  * window, from the authoritative shift catalog — never a hardcoded
- * per-company mapping. A shift is compatible only if it starts at or
- * before the window start AND ends at or after the window end (i.e. the
- * shift fully contains the company's operational window).
+ * per-company mapping. By default (`allowLateStart` false — every
+ * existing caller), a shift is compatible only if it starts at or before
+ * the window start AND ends at or after the window end (i.e. the shift
+ * fully contains the window) — this is the right rule for a foreign
+ * company's protected/contractual window, which genuinely needs full
+ * coverage from open to close.
  *
- * Among compatible shifts, prefers (1) the smallest gap between shift
- * start and window start (closest fit, least wasted early time), then
- * (2) the shortest total shift duration (don't roster someone longer than
- * necessary). This is what makes "Gulf Air at 09:00 → MT02" fall out of
- * the general rule rather than being a special case for Gulf Air.
+ * `allowLateStart: true` relaxes only the start-side requirement: a shift
+ * starting AFTER windowStart still qualifies, as long as it starts at or
+ * before windowEnd (genuine overlap, never a shift that only begins after
+ * the window has already closed) AND still runs through windowEnd. This exists for demand-CLUSTER matching
+ * (shift-generation.ts's General T1 loop, specialized-team-generation.ts's
+ * Profiling/Mesure), where the window is the full contiguous span of a
+ * role's demand that day — not one company's single dedicated commitment
+ * — and scoring.ts's actual per-flight duty assignment (Stage 9) already
+ * treats a late-starting-but-otherwise-overlapping shift as normal and
+ * expected, never a bug (see its own doc comment: "A shift starting
+ * somewhat after the window's own start is ... exactly how real shift
+ * coverage works"). Before this option existed, Stage 6 was silently
+ * STRICTER than Stage 9 could ever need: a demand cluster whose start
+ * predates every catalog code's earliest entree (e.g. a Check-in window
+ * opening T-3h before an early-morning departure, versus the earliest
+ * catalog entree of 04:30) got ZERO compatible codes here and so never
+ * got anyone rostered at all — even though Stage 9 would have happily
+ * used a 04:30-start shift to cover everything from 04:30 through
+ * departure. `allowLateStart` makes Stage 6's matching exactly as
+ * permissive as Stage 9 already is, no more.
+ *
+ * Among compatible shifts, prefers (1) the smallest coverage loss at the
+ * start — 0 for any shift starting at or before windowStart, otherwise
+ * how many minutes late it starts — then (2) the shortest total shift
+ * duration (don't roster someone longer than necessary). This is what
+ * makes "Gulf Air at 09:00 → MT02" fall out of the general rule rather
+ * than being a special case for Gulf Air.
  *
  * Deliberately does not handle shifts or windows that cross midnight —
  * a documented limitation for overnight company flights, not silently
@@ -49,9 +74,13 @@ export function selectCompatibleShiftCode(
   windowEnd: string,
   adjacentShiftStart?: string | null,
   adjacentShiftEnd?: string | null,
-  minimumRestHours?: number
+  minimumRestHours?: number,
+  allowLateStart = false
 ): string | null {
-  return selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours)[0]?.code ?? null;
+  return (
+    selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours, allowLateStart)[0]
+      ?.code ?? null
+  );
 }
 
 /**
@@ -79,7 +108,8 @@ export function selectCompatibleShiftCodes(
   windowEnd: string,
   adjacentShiftStart?: string | null,
   adjacentShiftEnd?: string | null,
-  minimumRestHours?: number
+  minimumRestHours?: number,
+  allowLateStart = false
 ): { code: string; entree: string; sortie: string }[] {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
@@ -91,7 +121,10 @@ export function selectCompatibleShiftCodes(
       sortieMin: timeToMinutes(sortie),
     }))
     .filter((c) => c.sortieMin > c.entreeMin) // exclude overnight-wrapping codes from this matcher
-    .filter((c) => c.entreeMin <= windowStartMin && c.sortieMin >= windowEndMin);
+    .filter(
+      (c) =>
+        (allowLateStart ? c.entreeMin <= windowEndMin : c.entreeMin <= windowStartMin) && c.sortieMin >= windowEndMin
+    );
 
   if (adjacentShiftStart != null && adjacentShiftEnd != null && minimumRestHours != null) {
     candidates = candidates.filter(
@@ -100,9 +133,9 @@ export function selectCompatibleShiftCodes(
   }
 
   candidates.sort((a, b) => {
-    const gapA = windowStartMin - a.entreeMin;
-    const gapB = windowStartMin - b.entreeMin;
-    if (gapA !== gapB) return gapA - gapB;
+    const lossA = Math.max(0, a.entreeMin - windowStartMin);
+    const lossB = Math.max(0, b.entreeMin - windowStartMin);
+    if (lossA !== lossB) return lossA - lossB;
     const durationA = a.sortieMin - a.entreeMin;
     const durationB = b.sortieMin - b.entreeMin;
     return durationA - durationB;

@@ -75,12 +75,19 @@ function assignPoolToWindow(
   for (const employee of pool) {
     if (assigned.length >= headcount) break;
     const prior = priorDayShift.get(employee.id) ?? null;
+    // allowLateStart: true — see selectCompatibleShiftCodes' doc comment.
+    // This window is a Profiling/Mesure demand cluster's full span, not a
+    // foreign company's dedicated protected commitment, so the same
+    // reasoning as shift-generation.ts's General T1 loop applies: a
+    // late-starting-but-otherwise-covering shift is real, usable coverage,
+    // not a bug.
     const candidates = selectCompatibleShiftCodes(
       window.start,
       window.end,
       prior?.shift_start ?? null,
       prior?.shift_end ?? null,
-      minimumRestHours
+      minimumRestHours,
+      true
     );
     if (candidates.length > 0) {
       assigned.push({ employeeId: employee.id, shiftCode: candidates[0].code });
