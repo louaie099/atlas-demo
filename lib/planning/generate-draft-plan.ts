@@ -351,7 +351,7 @@ export function generateDraftWeeklyPlan(
     combinedShiftsByDay[day] = dayShifts;
   }
 
-  const { dropped: universallyDropped } = enforceRestInvariantAcrossWeek(
+  const { dropped: universallyDropped, restHoursByEmployeeDay } = enforceRestInvariantAcrossWeek(
     daysOrder,
     combinedShiftsByDay,
     config.minimum_rest_hours,
@@ -427,7 +427,8 @@ export function generateDraftWeeklyPlan(
       employeesForPipeline,
       finalGeneratedShiftsByDay[day] ?? [],
       existingAssignments,
-      config
+      config,
+      restHoursByEmployeeDay
     );
     dutiesByDay[day] = duties;
     allUnfilled.push(...unfilled);

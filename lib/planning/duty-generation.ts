@@ -2,7 +2,7 @@ import { Employee, Flight, StaffingRequirement, Assignment, Config, WeeklyPlanRo
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
-import { GeneratedShiftAssignment } from "./shift-generation";
+import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay } from "./shift-generation";
 import { getShiftTimesAs } from "../shift-templates";
 import { isGenerationDrivenPopulation } from "./workforce-pools";
 
@@ -230,7 +230,17 @@ export function generateDutiesForDay(
   allEmployees: Employee[],
   generatedShifts: GeneratedShiftAssignment[],
   existingAssignments: Assignment[],
-  config: Config
+  config: Config,
+  // The single authoritative "actual rest before today's real shift"
+  // source (see enforceRestInvariantAcrossWeek's own doc comment) --
+  // when omitted, falls back to each employee's static persisted
+  // rest_before_shift_hours (existing behavior), so every existing
+  // caller/test keeps working unchanged. Real callers (generate-draft-
+  // plan.ts) always pass this: an employee's REST ELIGIBILITY for a duty
+  // must reflect the rest actually implied by their real generated/
+  // persisted shift, never a stale value left over from whatever their
+  // OLD static template happened to imply.
+  actualRestHoursByDay?: ActualRestHoursByEmployeeDay
 ): { duties: GeneratedDuty[]; unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] } {
   const dayFlightIds = new Set(flights.filter((f) => f.day_of_week === dayOfWeek).map((f) => f.id));
   const dayRequirements = requirements
@@ -253,12 +263,24 @@ export function generateDutiesForDay(
 
     // Build day-effective candidate pool: only employees actually
     // rostered this day, with their real shift for THIS day substituted
-    // in — this is the day-aware reuse of scoreCandidates.
+    // in — this is the day-aware reuse of scoreCandidates. rest_before_
+    // shift_hours is ALSO substituted here, from the same authoritative
+    // source as shift_start/shift_end are, for exactly the same reason:
+    // an employee's real generated/persisted shift for today can differ
+    // completely from whatever their static baseline template implied,
+    // and eligibility must reflect the shift they're ACTUALLY on, not a
+    // stale snapshot of a different one.
     const dayEffectivePool = allEmployees
       .map((e) => {
         const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts);
         if (!effective) return null;
-        return { ...e, shift_start: effective.shift_start, shift_end: effective.shift_end } as Employee;
+        const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
+        return {
+          ...e,
+          shift_start: effective.shift_start,
+          shift_end: effective.shift_end,
+          rest_before_shift_hours: actualRest ?? e.rest_before_shift_hours,
+        } as Employee;
       })
       .filter((e) => e !== null) as Employee[];
 

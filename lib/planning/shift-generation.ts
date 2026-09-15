@@ -368,14 +368,39 @@ function restHoursBetweenAcrossGap(
  * this week's Monday is caught too, not just violations wholly inside
  * this displayed week.
  */
+/**
+ * The single authoritative "actual rest hours before this employee's
+ * shift on this day" value, keyed `${employeeId}|${dayOfWeek}`. Computed
+ * ONCE, here, from the same real walk enforceRestInvariantAcrossWeek
+ * already does to decide keep/drop — this is not a second rest
+ * calculation, it's the first one's own working values, exposed. Every
+ * consumer that needs to know "is this employee actually rested for
+ * their real generated/persisted shift" (Stage 9's scoreCandidates,
+ * lib/scoring.ts) reads from THIS map instead of the employee's static,
+ * persisted `rest_before_shift_hours` field, which reflects whatever
+ * their OLD baseline template implied and goes stale the moment
+ * demand-driven generation puts them on a different real shift.
+ *
+ * `Number.POSITIVE_INFINITY` means "no real prior-shift data to check
+ * against" (the same "undefined prior shift is never a violation"
+ * convention used everywhere else in this pipeline) -- never a
+ * fabricated pass, just an honest "nothing contradicts rest here."
+ */
+export type ActualRestHoursByEmployeeDay = Map<string, number>;
+
+function restKey(employeeId: string, dayOfWeek: string): string {
+  return `${employeeId}|${dayOfWeek}`;
+}
+
 export function enforceRestInvariantAcrossWeek(
   daysOrder: string[],
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
   minimumRestHours: number,
   priorWeekBoundaryContext: PriorDayShiftMap = new Map()
-): { repaired: Record<string, GeneratedShiftAssignment[]>; dropped: DroppedShiftForRest[] } {
+): { repaired: Record<string, GeneratedShiftAssignment[]>; dropped: DroppedShiftForRest[]; restHoursByEmployeeDay: ActualRestHoursByEmployeeDay } {
   const repaired: Record<string, GeneratedShiftAssignment[]> = {};
   const dropped: DroppedShiftForRest[] = [];
+  const restHoursByEmployeeDay: ActualRestHoursByEmployeeDay = new Map();
   // Each employee's most recent REAL (kept) worked shift so far this walk,
   // ALONGSIDE the calendar day index it was worked on — deliberately NOT
   // reset to "no data" on an intervening OFF day (an OFF day always
@@ -406,6 +431,7 @@ export function enforceRestInvariantAcrossWeek(
       }
 
       keep.push(assignment);
+      restHoursByEmployeeDay.set(restKey(assignment.employeeId, day), rest ?? Number.POSITIVE_INFINITY);
     }
 
     repaired[day] = keep;
@@ -446,12 +472,20 @@ export function enforceRestInvariantAcrossWeek(
       const rest = restHoursBetweenAcrossGap(lastDayTimes.shift_start, lastDayTimes.shift_end, firstDayTimes.shift_start, 1);
       if (rest < minimumRestHours) {
         dropped.push({ employeeId: assignment.employeeId, dayOfWeek: firstDay, shiftCode: assignment.shiftCode, restHours: rest });
+        restHoursByEmployeeDay.delete(restKey(assignment.employeeId, firstDay));
         continue;
       }
+      // This wrap check is a REAL, additional constraint against this
+      // same week's own last day -- whichever of it and the main walk's
+      // own day-0 value (against priorWeekBoundaryContext) is LOWER is
+      // the genuinely binding one; both must hold simultaneously, so the
+      // authoritative "actual rest" value is never higher than either.
+      const existing = restHoursByEmployeeDay.get(restKey(assignment.employeeId, firstDay)) ?? Number.POSITIVE_INFINITY;
+      restHoursByEmployeeDay.set(restKey(assignment.employeeId, firstDay), Math.min(existing, rest));
       survivors.push(assignment);
     }
     repaired[firstDay] = survivors;
   }
 
-  return { repaired, dropped };
+  return { repaired, dropped, restHoursByEmployeeDay };
 }
