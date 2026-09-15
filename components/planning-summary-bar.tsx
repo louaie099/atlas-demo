@@ -13,12 +13,22 @@ import { PlanIssue } from "@/lib/planning/validation";
  *    `roster`). The gap between this and "Flights this week" is exactly
  *    the unmanaged/unconfigured flights that stay Flight-Schedule-only —
  *    a real, useful number, not hidden.
- *  - "Assigned duties" is the NORMAL successful state of a draft plan, not
- *    a pending recommendation. There is no separate "Confirmed" tile any
- *    more: whether a specific assignment is backed by a real Assignment
- *    row or is still only the engine's own draft-plan duty no longer
- *    changes how it's counted here, since both ARE the plan's assignment
- *    (see RequirementCoverageStatus's doc comment in lib/types.ts).
+ *  - "Requirements covered" (previously mislabeled "Assigned duties" —
+ *    renamed because it was showing a different, smaller number than
+ *    Make Planning's own "X duties assigned" result banner and using the
+ *    same word "duties" for both, with no way to tell they measure
+ *    different things) counts REQUIREMENTS (one row per flight+role slot,
+ *    e.g. "AT100 Check-in") that are fully staffed — NOT individual
+ *    people. A requirement needing 2 Check-in agents counts as ONE here
+ *    once both are found, but as TWO in Make Planning's duty count (which
+ *    counts actual persisted employee-to-duty Assignment rows,
+ *    headcount-level). Both numbers are correct for what they measure;
+ *    they were never meant to match, and are now labeled so a person can
+ *    tell why. There is no separate "Confirmed" tile any more: whether a
+ *    specific assignment is backed by a real Assignment row or is still
+ *    only the engine's own draft-plan duty no longer changes how it's
+ *    counted here, since both ARE the plan's assignment (see
+ *    RequirementCoverageStatus's doc comment in lib/types.ts).
  *  - "Staffing gaps" = requirements the draft plan could not fully cover —
  *    the one bucket that may warrant a human renfort decision.
  *  - "Plan warnings" = genuine OPERATIONAL problems in this week's
@@ -47,7 +57,7 @@ export function PlanningSummaryBar({
   const totalFlights = new Set(flights.map((f) => f.id)).size;
   const managedFlights = new Set(roster.map((v) => v.flight.id)).size;
 
-  const assigned = roster.filter((v) => v.coverageStatus === "assigned").length;
+  const requirementsCovered = roster.filter((v) => v.coverageStatus === "assigned").length;
   const gaps = roster.filter((v) => v.coverageStatus === "gap").length;
 
   const planWarnings = issues.filter(
@@ -56,13 +66,18 @@ export function PlanningSummaryBar({
 
   // Ordered by draft-plan priority, not raw category: Flights sets the
   // scale, Managed flights narrows it to what ATLAS actually plans for,
-  // Assigned duties comes next because a full spread of ATLAS assignments
-  // IS the successful outcome of a draft generation -- not a fallback
-  // awaiting approval. Staffing gaps and Plan warnings follow.
+  // Requirements covered comes next because a full spread of ATLAS
+  // coverage IS the successful outcome of a draft generation -- not a
+  // fallback awaiting approval. Staffing gaps and Plan warnings follow.
   const stats: { label: string; value: number; dot: string; hint?: string }[] = [
     { label: "Flights this week", value: totalFlights, dot: "bg-gray-400", hint: "Every scheduled flight, managed or not" },
     { label: "Managed flights", value: managedFlights, dot: "bg-gray-600", hint: "Flights ATLAS generates staffing coverage for" },
-    { label: "Assigned duties", value: assigned, dot: "bg-brand-500", hint: "Staffed by this draft plan" },
+    {
+      label: "Requirements covered",
+      value: requirementsCovered,
+      dot: "bg-brand-500",
+      hint: "Flight+role slots fully staffed by this draft plan (a slot needing 2 people still counts as one covered slot here — see Make Planning's own duty count for the individual-person total)",
+    },
     { label: "Staffing gaps", value: gaps, dot: "bg-bad-500", hint: "Not enough valid people found -- may warrant a renfort decision" },
     { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest, weekly-hours, or consecutive-OFF issues in this week's plan" },
   ];

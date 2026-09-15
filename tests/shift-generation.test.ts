@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { generateFlexiblePoolShifts } from "../lib/planning/shift-generation";
+import { generateDutiesForDay } from "../lib/planning/duty-generation";
 import { aggregateDailyDemand } from "../lib/planning/demand-aggregation";
+import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement } from "../lib/types";
 
 function makeEmployee(overrides: Partial<Employee>): Employee {
@@ -85,21 +87,167 @@ describe("generateFlexiblePoolShifts", () => {
     expect(result).toHaveLength(0);
   });
 
-  it("reuses one multi-skilled employee's shift to cover a second role, rather than rostering someone new", () => {
-    const boardingFlight = makeFlight({ id: "b", boarding_window_start: "09:00", boarding_window_end: "10:00" });
-    const boardingReq = makeRequirement({ id: "rb", flight_id: "b", role: "Boarding", total_requirement: 1 });
-    const gateFlight = makeFlight({ id: "g", boarding_window_start: "09:00", boarding_window_end: "10:00" });
-    const gateReq = makeRequirement({ id: "rg", flight_id: "g", role: "Gate", total_requirement: 1 });
+  it("SEQUENTIAL REUSE: one multi-qualified employee's single continuous shift covers three non-overlapping roles across the day, rather than three separate people", () => {
+    // Check-in 04:45-07:00 (demand_forecast, T-180/T-45 from a 07:45
+    // departure), Gate 07:30-08:30 (fixed_rule, T-60 from 08:30), Boarding
+    // 09:00-10:00 (fixed_rule, T-60 from 10:00) -- three genuinely
+    // non-overlapping windows spanning 04:45-10:00, all inside MT02's
+    // 04:30-14:45 shift.
+    const checkinFlight = makeFlight({ id: "ci", scheduled_departure: "07:45" });
+    const checkinReq = makeRequirement({ id: "r-ci", flight_id: "ci", role: "Check-in", source: "demand_forecast", total_requirement: 1 });
+    const gateFlight = makeFlight({ id: "ga", scheduled_departure: "08:30" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "ga", role: "Gate", total_requirement: 1 });
+    const boardingFlight = makeFlight({ id: "bo", scheduled_departure: "10:00" });
+    const boardingReq = makeRequirement({ id: "r-bo", flight_id: "bo", role: "Boarding", total_requirement: 1 });
 
+    const demand = aggregateDailyDemand("Wednesday", [checkinFlight, gateFlight, boardingFlight], [checkinReq, gateReq, boardingReq]);
+    const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate", "Boarding"] });
+
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+
+    expect(result).toHaveLength(1); // one shift, not three separate assignments
+    expect(result[0].shiftCode).toBe("MT02");
+    expect(result[0].coversRoles.sort()).toEqual(["Boarding", "Check-in", "Gate"]);
+  });
+
+  it("STAGE 6 -> STAGE 9 FEASIBILITY: the sequential-reuse roster above actually converts into three real, non-overlapping duties for that one employee — Stage 6's output is not just plausible on paper, Stage 9 can genuinely use it", () => {
+    const checkinFlight = makeFlight({ id: "ci", scheduled_departure: "07:45" });
+    const checkinReq = makeRequirement({ id: "r-ci", flight_id: "ci", role: "Check-in", source: "demand_forecast", total_requirement: 1 });
+    const gateFlight = makeFlight({ id: "ga", scheduled_departure: "08:30" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "ga", role: "Gate", total_requirement: 1 });
+    const boardingFlight = makeFlight({ id: "bo", scheduled_departure: "10:00" });
+    const boardingReq = makeRequirement({ id: "r-bo", flight_id: "bo", role: "Boarding", total_requirement: 1 });
+
+    const flights = [checkinFlight, gateFlight, boardingFlight];
+    const requirements = [checkinReq, gateReq, boardingReq];
+    const demand = aggregateDailyDemand("Wednesday", flights, requirements);
+    const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate", "Boarding"], rest_before_shift_hours: 24, weekly_hours: 0 });
+    const generatedShifts = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, [employee], generatedShifts, [], CONFIG);
+
+    expect(unfilled).toHaveLength(0); // every requirement genuinely got covered, not just "roster looked sufficient"
+    expect(duties).toHaveLength(3);
+    expect(new Set(duties.map((d) => d.role))).toEqual(new Set(["Check-in", "Gate", "Boarding"]));
+    expect(duties.every((d) => d.employeeId === "multi-1")).toBe(true);
+
+    // No two of this employee's duties may overlap in time.
+    const windows = duties.map((d) => d.window);
+    for (let i = 0; i < windows.length; i++) {
+      for (let j = i + 1; j < windows.length; j++) {
+        const overlaps = windows[i].start < windows[j].end && windows[j].start < windows[i].end;
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
+
+  it("SIMULTANEOUS DEMAND: two roles needing coverage in the same overlapping time window require two separate people, even when both are qualified for both roles", () => {
+    // Check-in (09:00 departure -> window 06:00-08:15) and Gate (07:00
+    // departure -> window 06:00-07:00) genuinely overlap 06:00-07:00.
+    const checkinFlight = makeFlight({ id: "ci", scheduled_departure: "09:00" });
+    const checkinReq = makeRequirement({ id: "r-ci", flight_id: "ci", role: "Check-in", source: "demand_forecast", total_requirement: 1 });
+    const gateFlight = makeFlight({ id: "ga", scheduled_departure: "07:00" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "ga", role: "Gate", total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [checkinFlight, gateFlight], [checkinReq, gateReq]);
+
+    const employees = [
+      makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate"] }),
+      makeEmployee({ id: "multi-2", skills: ["Check-in", "Gate"] }),
+    ];
+    const result = generateFlexiblePoolShifts("Wednesday", demand, employees);
+
+    expect(result).toHaveLength(2); // two people, not one double-counted
+    const coveredRoles = new Set(result.flatMap((r) => r.coversRoles));
+    expect(coveredRoles).toEqual(new Set(["Check-in", "Gate"]));
+  });
+
+  it("ONE UNIT PER BUCKET: with only one multi-qualified employee available for two simultaneous roles, they cover exactly one role — the other stays a genuine, honest gap, never double-counted", () => {
+    const checkinFlight = makeFlight({ id: "ci", scheduled_departure: "09:00" });
+    const checkinReq = makeRequirement({ id: "r-ci", flight_id: "ci", role: "Check-in", source: "demand_forecast", total_requirement: 1 });
+    const gateFlight = makeFlight({ id: "ga", scheduled_departure: "07:00" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "ga", role: "Gate", total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [checkinFlight, gateFlight], [checkinReq, gateReq]);
+
+    const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate"] });
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+
+    expect(result).toHaveLength(1); // never two assignments for one employee
+    expect(result[0].coversRoles).toHaveLength(1); // never both roles credited to the same person for the same overlapping time
+  });
+
+  it("QUALIFICATION-LIMITED DEMAND: an employee qualified for only one of two roles never gets rostered for the role they can't do, even when it has real unmet demand", () => {
+    const boardingFlight = makeFlight({ id: "bo", scheduled_departure: "10:00" });
+    const boardingReq = makeRequirement({ id: "r-bo", flight_id: "bo", role: "Boarding", total_requirement: 1 });
+    const gateFlight = makeFlight({ id: "ga", scheduled_departure: "10:00" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "ga", role: "Gate", total_requirement: 1 });
     const demand = aggregateDailyDemand("Wednesday", [boardingFlight, gateFlight], [boardingReq, gateReq]);
 
-    // Only ONE employee exists, qualified for both roles.
-    const multiSkilled = makeEmployee({ id: "multi-1", skills: ["Boarding", "Gate"] });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [multiSkilled]);
+    const employee = makeEmployee({ id: "e1", skills: ["Boarding"] }); // NOT qualified for Gate
+    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
 
-    expect(result).toHaveLength(1); // one shift, not two separate assignments
-    expect(result[0].coversRoles).toContain("Boarding");
-    expect(result[0].coversRoles).toContain("Gate");
+    expect(result).toHaveLength(1);
+    expect(result[0].coversRoles).toEqual(["Boarding"]); // Gate's demand is left genuinely unfilled, not fabricated
+  });
+
+  it("REST GATE: a rest-blocked candidate is skipped and a legal candidate is selected instead, never the reverse", () => {
+    const flight = makeFlight({ scheduled_departure: "10:00" }); // Boarding window 09:00-10:00
+    const requirement = makeRequirement({ total_requirement: 1 });
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+
+    // e1 ended a shift at 23:00 the day before -- every compatible code's
+    // entree (05:45-09:00 range) is well under 15h rest since 23:00.
+    const priorDayShift = new Map([
+      ["e1", { shift_start: "13:45", shift_end: "23:00" }],
+      ["e2", null], // e2 was OFF the prior day -- no conflict at all
+    ]);
+    const employees = [makeEmployee({ id: "e1", skills: ["Boarding"] }), makeEmployee({ id: "e2", skills: ["Boarding"] })];
+
+    const result = generateFlexiblePoolShifts("Wednesday", demand, employees, priorDayShift, 15);
+    expect(result).toHaveLength(1);
+    expect(result[0].employeeId).toBe("e2"); // never e1 -- the rest-blocked candidate
+  });
+
+  it("CROSS-WEEK REST BOUNDARY: a priorDayShift seeded from the PREVIOUS WEEK's real last-worked shift (this window's own Monday has no 'yesterday' inside the display) still blocks an under-rested candidate", () => {
+    // Exactly how rotation-context.ts seeds Monday's priorDayShift from
+    // the previous week's real Sunday roster (see
+    // tests/rotation-context.test.ts for that wiring) -- this proves the
+    // per-day rest gate itself honors whatever it's handed, regardless of
+    // which calendar week the data came from.
+    const flight = makeFlight({ scheduled_departure: "10:00" });
+    const requirement = makeRequirement({ total_requirement: 1 });
+    const demand = aggregateDailyDemand("Monday", [flight], [requirement]);
+
+    const priorWeekSundayShift = new Map([["e1", { shift_start: "13:45", shift_end: "23:00" }]]); // last week's Sunday
+    const employee = makeEmployee({ id: "e1", skills: ["Boarding"] });
+
+    const result = generateFlexiblePoolShifts("Monday", demand, [employee], priorWeekSundayShift, 15);
+    expect(result).toHaveLength(0); // the only candidate is blocked by last week's boundary shift
+  });
+
+  it("HONEST GAP: when legal, qualified capacity is genuinely insufficient, the shortfall is never silently padded", () => {
+    const flight = makeFlight({ scheduled_departure: "10:00" });
+    const requirement = makeRequirement({ total_requirement: 2 }); // needs 2
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+
+    const onlyOneQualified = [makeEmployee({ id: "e1", skills: ["Boarding"] })]; // only 1 exists
+    const result = generateFlexiblePoolShifts("Wednesday", demand, onlyOneQualified);
+    expect(result).toHaveLength(1); // never fabricates a second person
+  });
+
+  it("DETERMINISTIC: identical inputs (fresh Maps each call, to rule out accidental mutation) produce byte-identical output", () => {
+    const flight = makeFlight({ scheduled_departure: "10:00" });
+    const requirement = makeRequirement({ total_requirement: 2 });
+    const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
+    const employees = [
+      makeEmployee({ id: "e1", skills: ["Boarding"] }),
+      makeEmployee({ id: "e2", skills: ["Boarding"] }),
+      makeEmployee({ id: "e3", skills: ["Boarding"] }),
+    ];
+
+    const run1 = generateFlexiblePoolShifts("Wednesday", demand, employees, new Map(), 15, undefined, new Map(), new Map());
+    const run2 = generateFlexiblePoolShifts("Wednesday", demand, employees, new Map(), 15, undefined, new Map(), new Map());
+
+    const sortById = (arr: typeof run1) => [...arr].sort((a, b) => a.employeeId.localeCompare(b.employeeId));
+    expect(sortById(run1)).toEqual(sortById(run2));
   });
 
   it("RANKED SHIFT-CODE FALLBACK: tries every compatible candidate code before giving up, but the rest gate applies identically to every candidate — a rest-blocked employee is never rescued by trying a worse-fit code (a later-ranked candidate never starts LATER than the top choice, so backward rest can only be equal or worse)", () => {

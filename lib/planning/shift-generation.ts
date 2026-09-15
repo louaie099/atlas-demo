@@ -1,9 +1,8 @@
 import { Employee } from "../types";
-import { DailyDemand, demandClustersForRole } from "./demand-aggregation";
-import { selectCompatibleShiftCodes } from "../foreign-shift-planning";
+import { DailyDemand } from "./demand-aggregation";
+import { SHIFT_CODES, getShiftTimesAs } from "../shift-templates";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { restHoursBetween } from "../roster-generation";
-import { getShiftTimesAs } from "../shift-templates";
 
 /** An employee's effective shift on the immediately preceding day, or null if they were OFF/unrostered — undefined (not in the map) means "no prior-day data available" (e.g. the first day of the week), which is never treated as a rest violation. */
 export type PriorDayShiftMap = Map<string, { shift_start: string; shift_end: string } | null>;
@@ -12,7 +11,7 @@ export interface GeneratedShiftAssignment {
   employeeId: string;
   dayOfWeek: string;
   shiftCode: string;
-  coversRoles: string[]; // which roles this employee's shift was assigned to help cover
+  coversRoles: string[]; // every role this employee's single shift ended up covering AT LEAST ONE bucket of, across the day (informational — Stage 9/scoring.ts independently re-derives the actual per-flight duty assignment from shift_start/shift_end + real requirement windows, it does not read this field)
 }
 
 function timeToMinutes(t: string): number {
@@ -22,21 +21,21 @@ function timeToMinutes(t: string): number {
 
 /**
  * Circular (clock-of-day) distance between two "HH:mm" start times, in
- * minutes — used only as a CONTINUITY preference (see fairnessKey below),
- * never a hard constraint. A candidate with no known prior start time gets
- * a fixed neutral distance rather than an extreme best/worst score, so
- * "no continuity data" never out-ranks or under-ranks "genuinely close
- * continuity" / "genuinely disruptive change."
+ * minutes — used only as a CONTINUITY preference (see the tie-break
+ * chain below), never a hard constraint. A candidate with no known prior
+ * start time gets a fixed neutral distance rather than an extreme
+ * best/worst score, so "no continuity data" never out-ranks or
+ * under-ranks "genuinely close continuity" / "genuinely disruptive
+ * change."
  */
-function windowsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
-  return timeToMinutes(aStart) < timeToMinutes(bEnd) && timeToMinutes(bStart) < timeToMinutes(aEnd);
-}
-
 function circularStartDistanceMinutes(aStart: string, bStart: string): number {
   const diff = Math.abs(timeToMinutes(aStart) - timeToMinutes(bStart));
   return Math.min(diff, 1440 - diff);
 }
 const NEUTRAL_CONTINUITY_DISTANCE_MINUTES = 360; // "no data" ranks like a moderate 6h shift-time change — neither a bonus nor a penalty
+
+const BUCKET_MINUTES = 30;
+const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
 
 /**
  * Stage 6 of the planning pipeline: assigning daily shifts to the
@@ -45,63 +44,81 @@ const NEUTRAL_CONTINUITY_DISTANCE_MINUTES = 360; // "no data" ranks like a moder
  * required capacity rather than by employees' static baseline pattern.
  *
  * DEMAND-DRIVEN, NOT TEMPLATE-DRIVEN: every ACTIVE flexible-pool employee
- * is a candidate every day — there is no more "already off per their
- * static weekly_shifts template" pre-filter. An employee not selected by
- * this function for a given day is genuinely OFF that day (see
+ * is a candidate every day — there is no "already off per their static
+ * weekly_shifts template" pre-filter. An employee not selected by this
+ * function for a given day is genuinely OFF that day (see
  * duty-generation.ts's resolvePlanRosterEntry, which no longer falls back
- * to Employee.weekly_shifts for this pool) — OFF is now a normal,
- * expected planning OUTCOME of "demand didn't need this person today,"
- * not a pre-declared template cell. This is the core Task E correction:
- * `RAM demand -> required capacity -> compatible shift coverage ->
- * roster/OFF placement`, never the reverse.
+ * to Employee.weekly_shifts for this pool) — OFF is a normal, expected
+ * planning OUTCOME of "demand didn't need this person today," not a
+ * pre-declared template cell.
  *
- * Still a deliberate FIRST-PASS GREEDY HEURISTIC, not a full optimizer:
- *  - Roles are processed in a fixed order (Boarding, Check-in, Gate,
- *    Profiling, Mesure).
- *  - Before pulling in a new employee for a role, employees ALREADY
- *    assigned a shift today (for an earlier-processed role) are checked
- *    first for cross-role coverage — one multi-skilled employee's single
- *    shift can count toward multiple roles' demand.
- *  - RANKED SHIFT-CODE FALLBACK (new): rather than trying only the single
- *    nearest-fit catalog code for a role's demand window, up to
- *    MAX_SHIFT_CODE_CANDIDATES ranked candidates (selectCompatibleShiftCodes,
- *    nearest-fit-then-shortest-duration) are tried in order. Capacity is
- *    determined FIRST (peak/window, unchanged) — ranked codes are only
- *    ever used to find real, rest-compliant EMPLOYEES to cover that
- *    already-determined capacity, never to inflate or invent demand. A
- *    later code candidate is only tried when the current one couldn't
- *    reach peak with any remaining eligible, rested employee.
- *  - FAIRNESS ORDERING (new): among employees eligible for a given
- *    candidate code (qualified, available, rest-compliant), the greedy
- *    fill order is no longer array order — it's sorted by (1) ascending
- *    hours already assigned this week so far (spread load, don't
- *    repeatedly burden the same people), then (2) continuity: how close
- *    this code's start time is to the employee's own immediately-
- *    preceding-day start time (prefer NOT to churn someone from an early
- *    shift to a late one and back for no operational reason). Fairness
- *    only ever orders otherwise-equally-eligible candidates — it never
- *    overrides a hard qualification/rest gate, and it never causes a
- *    role to go understaffed when a less "fair" candidate could have
- *    covered it.
- *  - Stops once a role's peak demand is met or no more ranked code +
- *    eligible-employee combination is available — it does NOT attempt a
- *    joint, whole-day optimum across roles.
+ * JOINT SET-COVER, NOT FIXED-ROLE-ORDER GREEDY (replaces the earlier
+ * per-role, per-cluster heuristic — see git history for the prior
+ * version and the audit that led here). The core distinction this
+ * algorithm exists to make:
+ *
+ *  - SIMULTANEOUS demand (two different roles needing coverage in the
+ *    SAME 30-min bucket) genuinely needs TWO different people — one
+ *    employee, however many roles they're qualified for, represents
+ *    exactly one unit of human capacity per bucket. This is enforced
+ *    structurally below: `remaining[bucket][role]` is tracked separately
+ *    per role, and scoring a candidate never lets one bucket contribute
+ *    to more than one role's remaining count for that same candidate.
+ *  - SEQUENTIAL demand (Check-in needing someone 06:00-07:30, then Gate
+ *    08:00-09:00, then Boarding 09:30-10:30, all on one continuous
+ *    shift) is exactly what this DOES reuse one employee for — different
+ *    buckets of their one shift can each count toward a different role,
+ *    since a person really can do different jobs at different times of
+ *    their working day. Stage 9 (scoring.ts/duty-generation.ts,
+ *    unchanged) is what actually assigns each specific flight duty
+ *    within an employee's shift, using genuine window overlap and
+ *    per-duty non-overlap — this stage only needs to make sure enough of
+ *    the RIGHT people (qualification + rest-legal shift) exist for Stage
+ *    9 to succeed; it does not itself decide which specific duty an
+ *    employee gets at which moment.
+ *
+ * ALGORITHM: a standard greedy weighted set-cover. Every (employee, legal
+ * shift code) pair is a candidate "set" that could cover some of the
+ * day's still-unfilled (bucket, role) demand units. Repeatedly:
+ *   1. Score every remaining candidate by how many CURRENTLY-unfilled
+ *      (bucket, role) units it would cover (at most one role per bucket,
+ *      via the fixed rolesToConsider priority order, for that
+ *      candidate — see coverageFor below).
+ *   2. Take the highest-scoring candidate; tie-break by (a) shortest
+ *      shift duration — don't roster someone longer than the coverage
+ *      they'd actually provide needs, (b) fewest hours already assigned
+ *      this week so far — spread load across otherwise-idle eligible
+ *      people rather than repeatedly reusing the same ones, (c) smallest
+ *      continuity distance from their own immediately-preceding-day
+ *      start time, (d) employee id — for full, reproducible determinism.
+ *   3. Mark those (bucket, role) units covered, remove that employee
+ *      from further consideration this day, repeat.
+ *   4. Stop once no remaining candidate would cover anything at all —
+ *      never once a fixed target is "reached," since there is no longer
+ *      a single per-role target: the target is real, aggregate,
+ *      role-and-bucket-specific demand, met however many people that
+ *      genuinely takes.
+ *
+ * A candidate's legality (rest-compliant shift code) is evaluated ONCE
+ * per employee up front, independent of iteration order — rest depends
+ * only on that employee's own prior/next-day shift and the candidate
+ * code's own entree, never on who else has already been picked.
+ * Overnight-wrapping codes are excluded from this pool entirely (same
+ * scope as the previous implementation and as
+ * selectCompatibleShiftCodes) — General T1 has never used them.
  *
  * Cross-day rest is part of shift SELECTION, not just after-the-fact
  * detection: `priorDayShift` carries each employee's effective shift on
- * the immediately preceding day (built by the caller as it walks the week
- * day by day — seeded from the immediately preceding WEEK's real roster,
- * or a documented fallback, for a window's own first day — see
- * rotation-context.ts). Before a candidate shift is handed to an
- * employee, it must clear the same minimum-rest rule validation.ts
- * already enforces (`restHoursBetween`). An employee who would land below
- * the minimum is simply skipped for that role/day/code: this is a real,
- * honest coverage shortfall, surfaced later as an unfilled_duty by Stage
- * 10 if nobody else can cover it — never an illegal roster silently
- * created and only flagged afterward.
+ * the immediately preceding day (built by the caller as it walks the
+ * week day by day — seeded from the immediately preceding WEEK's real
+ * roster, or a documented fallback, for a window's own first day — see
+ * rotation-context.ts). A candidate code that would land an employee
+ * below the confirmed minimum rest, against EITHER the immediately
+ * preceding day's real shift or the immediately following day's own
+ * (not-yet-regenerated) baseline shift, is never offered to them at all.
+ * `enforceRestInvariantAcrossWeek` below remains the final, independent,
+ * whole-week hard safety net on top of this per-day legality gate.
  */
-const MAX_SHIFT_CODE_CANDIDATES = 3;
-
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
   demand: DailyDemand,
@@ -140,112 +157,150 @@ export function generateFlexiblePoolShifts(
   // select them, not by a pre-declared template cell.
   const availableToday = allEmployees.filter(isFlexibleGeneralPool);
 
-  const assignments = new Map<string, GeneratedShiftAssignment>(); // employeeId -> assignment
+  // Remaining demand, per bucket per role — a mutable working copy of
+  // this day's aggregated demand, restricted to the roles this call is
+  // responsible for (Profiling/Mesure/foreign teams have their own
+  // separate generation, see specialized-team-generation.ts; this
+  // function is never handed their demand, but the filter is kept
+  // explicit and cheap rather than assumed from the caller).
+  const remaining: Map<string, number>[] = demand.buckets.map((bucket) => {
+    const m = new Map<string, number>();
+    for (const role of rolesToConsider) {
+      const need = bucket.demandByRole[role] ?? 0;
+      if (need > 0) m.set(role, need);
+    }
+    return m;
+  });
 
-  for (const role of rolesToConsider) {
-    // Demand for a role is rarely one continuous span across the whole
-    // day (see demandClustersForRole's doc comment) — each cluster is a
-    // separately coverable window, covered independently, so a morning
-    // bank and an evening bank can draw on different employees rather
-    // than requiring one shift to somehow span a gap no catalog code
-    // covers.
-    const clusters = demandClustersForRole(demand, role);
+  // Every catalog shift code, precomputed once (non-overnight only — see
+  // doc comment above).
+  const allCodes = Object.entries(SHIFT_CODES)
+    .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
+    .filter((c) => c.sortieMin > c.entreeMin);
 
-    for (const cluster of clusters) {
-      const peak = cluster.peak;
-      if (peak === 0) continue;
-      const window = { start: cluster.start, end: cluster.end };
+  // Which buckets a given code's shift genuinely overlaps — the exact
+  // same overlap rule aggregateDailyDemand itself uses to assign a
+  // requirement's window to a bucket in the first place (startMin <
+  // bucketEnd && bucketStart < endMin), so "this employee's shift covers
+  // this bucket" here means exactly the same thing "this flight's
+  // requirement window touches this bucket" meant when the demand was
+  // built.
+  function bucketsCoveredBy(entreeMin: number, sortieMin: number): number[] {
+    const covered: number[] = [];
+    for (let i = 0; i < BUCKETS_PER_DAY; i++) {
+      const bucketStart = i * BUCKET_MINUTES;
+      const bucketEnd = bucketStart + BUCKET_MINUTES;
+      if (entreeMin < bucketEnd && bucketStart < sortieMin) covered.push(i);
+    }
+    return covered;
+  }
 
-      // Count already-assigned employees (from an earlier role/cluster)
-      // who are BOTH qualified for this role AND whose actual shift for
-      // today genuinely overlaps this cluster's window — their existing
-      // shift already covers it, no new assignment needed. Skill alone
-      // isn't enough once a role can have multiple disjoint clusters: an
-      // employee's shift might cover the morning cluster but not the
-      // evening one.
-      let covered = 0;
-      for (const a of assignments.values()) {
-        const employee = availableToday.find((e) => e.id === a.employeeId);
-        if (!employee?.skills.includes(role)) continue;
-        const times = getShiftTimesAs(a.shiftCode);
-        if (!windowsOverlap(times.shift_start, times.shift_end, window.start, window.end)) continue;
-        covered++;
-        if (!a.coversRoles.includes(role)) a.coversRoles.push(role);
+  // Per-employee legal (rest-compliant) codes, computed once up front —
+  // legality depends only on this employee's own prior/next-day shift
+  // and a candidate code's own entree/sortie, never on which other
+  // employees end up chosen this same day.
+  const legalCodesByEmployee = new Map<string, { code: string; entreeMin: number; sortieMin: number }[]>();
+  for (const employee of availableToday) {
+    const priorShift = priorDayShift.get(employee.id);
+    const nextShift = nextDayBaselineShift.get(employee.id);
+    const legal = allCodes.filter((c) => {
+      if (priorShift) {
+        const entreeTime = `${String(Math.floor(c.entreeMin / 60)).padStart(2, "0")}:${String(c.entreeMin % 60).padStart(2, "0")}`;
+        if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
       }
+      if (nextShift) {
+        const entreeTime = `${String(Math.floor(c.entreeMin / 60)).padStart(2, "0")}:${String(c.entreeMin % 60).padStart(2, "0")}`;
+        const sortieTime = `${String(Math.floor(c.sortieMin / 60)).padStart(2, "0")}:${String(c.sortieMin % 60).padStart(2, "0")}`;
+        if (restHoursBetween(entreeTime, sortieTime, nextShift.shift_start) < minimumRestHours) return false;
+      }
+      return true;
+    });
+    if (legal.length > 0) legalCodesByEmployee.set(employee.id, legal);
+  }
 
-      // allowLateStart: true — this window is a demand CLUSTER's full
-      // span (demandClustersForRole), not one dedicated commitment; a
-      // shift starting after the cluster opens but still running through
-      // its end is exactly what scoring.ts's own duty-assignment stage
-      // already treats as normal coverage (see selectCompatibleShiftCodes'
-      // doc comment). Without this, a cluster opening earlier than every
-      // catalog code's entree (e.g. Check-in's T-3h window on an early
-      // departure) got zero candidate codes here and so never rostered
-      // anyone at all, even though scoring.ts would gladly use a
-      // late-starting shift for the rest of that window.
-      const candidateCodes = selectCompatibleShiftCodes(window.start, window.end, undefined, undefined, undefined, true).slice(
-        0,
-        MAX_SHIFT_CODE_CANDIDATES
-      );
+  const assignments = new Map<string, GeneratedShiftAssignment>();
+  const assignedIds = new Set<string>();
 
-      for (const candidateCode of candidateCodes) {
-        if (covered >= peak) break;
+  for (;;) {
+    let best: {
+      employee: Employee;
+      code: string;
+      entreeMin: number;
+      sortieMin: number;
+      score: number;
+      bucketRoles: { bucket: number; role: string }[];
+    } | null = null;
 
-        const eligible = availableToday.filter((employee) => {
-          if (covered >= peak) return false;
-          if (assignments.has(employee.id)) return false; // already rostered today for another role/cluster
-          if (!employee.skills.includes(role)) return false;
+    for (const employee of availableToday) {
+      if (assignedIds.has(employee.id)) continue;
+      const legalCodes = legalCodesByEmployee.get(employee.id);
+      if (!legalCodes) continue;
 
-          const priorShift = priorDayShift.get(employee.id);
-          if (priorShift && restHoursBetween(priorShift.shift_start, priorShift.shift_end, candidateCode.entree) < minimumRestHours) {
-            return false;
+      for (const candidate of legalCodes) {
+        const buckets = bucketsCoveredBy(candidate.entreeMin, candidate.sortieMin);
+        let score = 0;
+        const bucketRoles: { bucket: number; role: string }[] = [];
+        for (const bucket of buckets) {
+          // One employee = one unit of capacity per bucket, however many
+          // roles they're qualified for: pick at most ONE role per
+          // bucket for THIS candidate, in the fixed rolesToConsider
+          // priority order, among roles the employee is actually
+          // qualified for AND that still have unmet demand.
+          for (const role of rolesToConsider) {
+            if (!employee.skills.includes(role)) continue;
+            if ((remaining[bucket].get(role) ?? 0) <= 0) continue;
+            score++;
+            bucketRoles.push({ bucket, role });
+            break;
           }
-          const nextShift = nextDayBaselineShift.get(employee.id);
-          if (nextShift && restHoursBetween(candidateCode.entree, candidateCode.sortie, nextShift.shift_start) < minimumRestHours) {
-            return false;
-          }
-          return true;
-        });
+        }
+        if (score === 0) continue;
 
-        // Fairness ordering ONLY among employees already proven eligible
-        // above — never a substitute for the hard gates. Ascending hours
-        // so far this week (spread load), then ascending continuity
-        // distance from this employee's own prior-day start (prefer to
-        // keep someone on a similar shift time rather than churn them).
-        eligible.sort((a, b) => {
-          const hoursA = hoursSoFarThisWeek.get(a.id) ?? 0;
-          const hoursB = hoursSoFarThisWeek.get(b.id) ?? 0;
-          if (hoursA !== hoursB) return hoursA - hoursB;
-
-          const priorA = priorDayShift.get(a.id);
-          const priorB = priorDayShift.get(b.id);
-          const distA = priorA ? circularStartDistanceMinutes(priorA.shift_start, candidateCode.entree) : NEUTRAL_CONTINUITY_DISTANCE_MINUTES;
-          const distB = priorB ? circularStartDistanceMinutes(priorB.shift_start, candidateCode.entree) : NEUTRAL_CONTINUITY_DISTANCE_MINUTES;
-          return distA - distB;
-        });
-
-        // NOTE: there is deliberately no hours-ceiling gate here. The
-        // confirmed 42h rule (lib/labor-rules.ts's
-        // maximumAverageWeeklyWorkingHours) is an AVERAGE over a reference
-        // period that is not yet confirmed — rejecting a candidate because
-        // the DISPLAYED Monday-Sunday week would exceed 42h was treating
-        // that window as the reference period, which is exactly the wrong
-        // assumption this milestone corrects. hoursSoFarThisWeek above is
-        // used ONLY to order fairness, never to reject anyone. See
-        // lib/planning/average-hours.ts and the delivered report.
-
-        for (const employee of eligible) {
-          if (covered >= peak) break;
-          assignments.set(employee.id, {
-            employeeId: employee.id,
-            dayOfWeek,
-            shiftCode: candidateCode.code,
-            coversRoles: [role],
-          });
-          covered++;
+        if (!best || isBetterCandidate(employee, candidate, score, best)) {
+          best = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score, bucketRoles };
         }
       }
     }
+
+    if (!best) break; // no remaining candidate covers anything — genuine capacity/demand exhaustion
+
+    for (const { bucket, role } of best.bucketRoles) {
+      remaining[bucket].set(role, (remaining[bucket].get(role) ?? 0) - 1);
+    }
+    assignedIds.add(best.employee.id);
+    assignments.set(best.employee.id, {
+      employeeId: best.employee.id,
+      dayOfWeek,
+      shiftCode: best.code,
+      coversRoles: Array.from(new Set(best.bucketRoles.map((br) => br.role))),
+    });
+  }
+
+  function isBetterCandidate(
+    employee: Employee,
+    candidate: { code: string; entreeMin: number; sortieMin: number },
+    score: number,
+    current: { employee: Employee; entreeMin: number; sortieMin: number; score: number }
+  ): boolean {
+    if (score !== current.score) return score > current.score;
+
+    const durationA = candidate.sortieMin - candidate.entreeMin;
+    const durationB = current.sortieMin - current.entreeMin;
+    if (durationA !== durationB) return durationA < durationB; // shortest shift that achieves the same coverage
+
+    const hoursA = hoursSoFarThisWeek.get(employee.id) ?? 0;
+    const hoursB = hoursSoFarThisWeek.get(current.employee.id) ?? 0;
+    if (hoursA !== hoursB) return hoursA < hoursB; // spread load — prefer an otherwise-idle eligible person
+
+    const entreeTimeA = `${String(Math.floor(candidate.entreeMin / 60)).padStart(2, "0")}:${String(candidate.entreeMin % 60).padStart(2, "0")}`;
+    const entreeTimeB = `${String(Math.floor(current.entreeMin / 60)).padStart(2, "0")}:${String(current.entreeMin % 60).padStart(2, "0")}`;
+    const priorA = priorDayShift.get(employee.id);
+    const priorB = priorDayShift.get(current.employee.id);
+    const distA = priorA ? circularStartDistanceMinutes(priorA.shift_start, entreeTimeA) : NEUTRAL_CONTINUITY_DISTANCE_MINUTES;
+    const distB = priorB ? circularStartDistanceMinutes(priorB.shift_start, entreeTimeB) : NEUTRAL_CONTINUITY_DISTANCE_MINUTES;
+    if (distA !== distB) return distA < distB;
+
+    return employee.id < current.employee.id; // final, fully deterministic tie-break
   }
 
   return Array.from(assignments.values());
