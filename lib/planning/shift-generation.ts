@@ -178,19 +178,32 @@ export function generateFlexiblePoolShifts(
     .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
     .filter((c) => c.sortieMin > c.entreeMin);
 
-  // Which buckets a given code's shift genuinely overlaps — the exact
-  // same overlap rule aggregateDailyDemand itself uses to assign a
-  // requirement's window to a bucket in the first place (startMin <
-  // bucketEnd && bucketStart < endMin), so "this employee's shift covers
-  // this bucket" here means exactly the same thing "this flight's
-  // requirement window touches this bucket" meant when the demand was
-  // built.
+  // Which buckets a given code's shift genuinely COVERS -- deliberately
+  // ASYMMETRIC, matching scoring.ts's own asymmetric duty-eligibility
+  // rule exactly: a shift starting partway through a bucket still counts
+  // (this is allowLateStart's whole point from the earlier fix -- an
+  // employee arriving mid-window is real, usable coverage for the rest
+  // of it), but a shift that LEAVES partway through a bucket does NOT.
+  // Before this fix, plain overlap (entreeMin < bucketEnd && bucketStart
+  // < sortieMin) credited a shift ending even one minute into a bucket
+  // as if it covered that bucket in full -- so a shift ending at 22:45
+  // scored identically to one ending at 23:15 for a bucket spanning
+  // 22:30-23:00, and the duration tie-break then picked the SHORTER one,
+  // even though it leaves 15 minutes before the requirement's own close.
+  // scoring.ts (Stage 9) correctly refuses to treat that as full coverage
+  // (its own doc comment: a shift ending before the window ends is
+  // flagged, never silently recommended) -- Stage 6 must not claim
+  // capacity Stage 9 will correctly refuse. This is NOT a new
+  // "allowEarlyEnd" concept and does not touch the start side at all:
+  // only the end condition changed, from `bucketStart < sortieMin`
+  // (any overlap) to `sortieMin >= bucketEnd` (present through the
+  // bucket's full close).
   function bucketsCoveredBy(entreeMin: number, sortieMin: number): number[] {
     const covered: number[] = [];
     for (let i = 0; i < BUCKETS_PER_DAY; i++) {
       const bucketStart = i * BUCKET_MINUTES;
       const bucketEnd = bucketStart + BUCKET_MINUTES;
-      if (entreeMin < bucketEnd && bucketStart < sortieMin) covered.push(i);
+      if (entreeMin < bucketEnd && sortieMin >= bucketEnd) covered.push(i);
     }
     return covered;
   }

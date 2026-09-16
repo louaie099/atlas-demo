@@ -300,4 +300,60 @@ describe("generateFlexiblePoolShifts", () => {
     // duty-assignment stage already treats as valid coverage.
     expect(result[0].shiftCode).toBe("MT02");
   });
+
+  it("REGRESSION (AT870): AP02 (13:45-23:15) is chosen over AP01 (13:45-22:45) for a Gate requirement ending at 23:00, when both are legal", () => {
+    // Boeing 787-9 (Dreamliner), 23:00 departure -> Gate/Boarding window
+    // is T-90 = 21:30-23:00. AP01 ends 22:45, 15 minutes short of the
+    // window's own close; AP02 ends 23:15, fully through it. Before this
+    // fix, both scored identically (any-overlap credited the last
+    // 22:30-23:00 bucket to AP01 too) and the duration tie-break then
+    // picked the SHORTER, wrong one. Now AP01 only covers 2 of the 3
+    // buckets (missing 22:30-23:00), AP02 covers all 3 -- AP02 must win
+    // on SCORE, before duration is ever consulted.
+    const flight = makeFlight({ id: "at870-tuesday", flight_number: "AT870", scheduled_departure: "23:00", aircraft: "Boeing 787-9", day_of_week: "Tuesday" });
+    const requirement = makeRequirement({ id: "req-gate", flight_id: "at870-tuesday", role: "Gate", total_requirement: 1 });
+    const demand = aggregateDailyDemand("Tuesday", [flight], [requirement]);
+    const employee = makeEmployee({ id: "e1", skills: ["Gate"] });
+
+    const result = generateFlexiblePoolShifts("Tuesday", demand, [employee]);
+    expect(result).toHaveLength(1);
+    expect(result[0].shiftCode).toBe("AP02"); // never AP01
+  });
+
+  it("REGRESSION (AT870): when AP02 is illegal (blocked by next-day rest) but AP01 is legal, AP01 is still used for what it CAN cover -- Stage 6 doesn't refuse capacity it does have, it just correctly can't claim the last bucket", () => {
+    const flight = makeFlight({ id: "at870-tuesday", flight_number: "AT870", scheduled_departure: "23:00", aircraft: "Boeing 787-9", day_of_week: "Tuesday" });
+    const requirement = makeRequirement({ id: "req-gate", flight_id: "at870-tuesday", role: "Gate", total_requirement: 1 });
+    const demand = aggregateDailyDemand("Tuesday", [flight], [requirement]);
+    const employee = makeEmployee({ id: "e1", skills: ["Gate"] });
+    // Next day's own baseline shift starts at 14:00: 22:45->14:00 next
+    // day is exactly 15h15 (legal for AP01); 23:15->14:00 next day is
+    // only 14h45 (illegal for AP02, which is 30min longer at the end).
+    const nextDayBaselineShift = new Map([["e1", { shift_start: "14:00", shift_end: "22:00" }]]);
+
+    const result = generateFlexiblePoolShifts("Tuesday", demand, [employee], new Map(), 15, undefined, nextDayBaselineShift);
+    expect(result).toHaveLength(1);
+    expect(result[0].shiftCode).toBe("AP01"); // AP02 was illegal, but AP01 remains a real, legal, partially-useful option
+  });
+
+  it("PARTIAL BUCKET OVERLAP: a shift ending mid-bucket is never credited as satisfying that bucket's full simultaneous demand -- two people end up on the fully-covering code, not one alone on the partial one", () => {
+    // Non-Dreamliner, 23:00 departure -> Gate window is T-60 = 22:00-23:00
+    // (two 30-min buckets: 22:00-22:30 and 22:30-23:00). Needs 2 Gate
+    // agents simultaneously through the WHOLE window, including its
+    // final 22:30-23:00 bucket.
+    const flight = makeFlight({ id: "f1", scheduled_departure: "23:00", day_of_week: "Tuesday" });
+    const requirement = makeRequirement({ role: "Gate", total_requirement: 2 });
+    const demand = aggregateDailyDemand("Tuesday", [flight], [requirement]);
+    const employees = [makeEmployee({ id: "e1", skills: ["Gate"] }), makeEmployee({ id: "e2", skills: ["Gate"] })];
+
+    const result = generateFlexiblePoolShifts("Tuesday", demand, employees);
+    expect(result).toHaveLength(2);
+    // Both must be on a code that genuinely reaches 23:00 (AP02) -- if
+    // partial overlap were still credited, the solver could have settled
+    // for AP01 (which "looks" sufficient under the old any-overlap rule)
+    // for one or both, silently under-covering the requirement's true
+    // close.
+    for (const assignment of result) {
+      expect(assignment.shiftCode).toBe("AP02");
+    }
+  });
 });
