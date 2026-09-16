@@ -369,7 +369,7 @@ export async function generateDraftPlan(
   }
 
   const [{ data: flights, error: flightsErr }, { data: employees, error: empErr }] = await Promise.all([
-    supabase.from("flights").select("*"),
+    supabase.from("flights").select("*").eq("week_start", weekStart),
     supabase.from("employees").select("*"),
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
@@ -464,7 +464,7 @@ export async function regenerateDraftPlan(
   }
 
   const [{ data: flights, error: flightsErr }, { data: employees, error: empErr }] = await Promise.all([
-    supabase.from("flights").select("*"),
+    supabase.from("flights").select("*").eq("week_start", existing.week_start),
     supabase.from("employees").select("*"),
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
@@ -659,21 +659,27 @@ export async function loadPersistedPlanView(
   const plan = rows?.[0] as WeeklyPlan | undefined;
   if (!plan) return null;
 
-  const [
-    rosterEntries,
-    { data: assignments, error: assignErr },
-    { data: requirements, error: reqErr },
-    { data: flights, error: flightErr },
-    { data: employees, error: empErr },
-  ] = await Promise.all([
+  // Flights are fetched FIRST and used to scope requirements, rather than
+  // fetching both in the same parallel batch unscoped -- staffing_
+  // requirements has no week_start column of its own (it only ever
+  // belongs to a week via its flight_id), so "this week's requirements"
+  // can only be computed as "requirements whose flight_id is one of this
+  // week's flights", never independently. Fetching flights unscoped here
+  // (as this used to do) is exactly the cross-week leakage this
+  // milestone exists to close: two different weeks' flights, requirements,
+  // and Agent Schedule/Flight Coverage entries must never mix.
+  const { data: flights, error: flightErr } = await supabase.from("flights").select("*").eq("week_start", weekStart);
+  if (flightErr) throw new Error(flightErr.message);
+  const flightIds = (flights ?? []).map((f) => f.id);
+
+  const [rosterEntries, { data: assignments, error: assignErr }, { data: requirements, error: reqErr }, { data: employees, error: empErr }] = await Promise.all([
     fetchAllRosterEntriesForPlan(supabase, planId),
     supabase.from("assignments").select("*").eq("plan_id", planId),
-    supabase.from("staffing_requirements").select("*"),
-    supabase.from("flights").select("*"),
+    flightIds.length > 0 ? supabase.from("staffing_requirements").select("*").in("flight_id", flightIds) : Promise.resolve({ data: [], error: null }),
     supabase.from("employees").select("*"),
   ]);
-  if (assignErr || reqErr || flightErr || empErr) {
-    throw new Error((assignErr || reqErr || flightErr || empErr)!.message);
+  if (assignErr || reqErr || empErr) {
+    throw new Error((assignErr || reqErr || empErr)!.message);
   }
 
   return buildPersistedWeeklyPlanView(

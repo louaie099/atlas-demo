@@ -62,7 +62,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     boarding_window_end: "10:00",
     status: "scheduled",
     booking_pressure: "normal",
-    day_of_week: "Wednesday",
+    day_of_week: "Wednesday", flight_date: "2026-09-03", week_start: "2026-09-01",
     operator_type: "atlas_managed",
     destination_category: "Europe/Schengen",
     booked_passengers: null,
@@ -185,7 +185,7 @@ describe("generateDraftWeeklyPlan — whole-pipeline invariants hold after the a
     origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null, registration: null,
     callsign: null, terminal: "T1", scheduled_departure: "10:00", scheduled_arrival: null, gate: null,
     boarding_window_start: null, boarding_window_end: null, status: "scheduled", booking_pressure: "normal",
-    day_of_week: day, operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+    day_of_week: day, flight_date: `2026-09-0${i + 1}`, week_start: "2026-09-01", operator_type: "atlas_managed", destination_category: "Europe/Schengen",
     booked_passengers: null, seat_capacity: null,
   }));
   const requirements: StaffingRequirement[] = flights.flatMap((f) => [

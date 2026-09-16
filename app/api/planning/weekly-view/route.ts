@@ -27,11 +27,13 @@ import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
  * (lib/supabase-server.ts): its fetch override disables intermediary
  * caching of every GET this server client makes to Supabase.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const weekStart = searchParams.get("week_start") ?? CURRENT_WEEK_START;
   const supabase = getSupabaseServerClient();
   const noStore = { headers: { "Cache-Control": "no-store" } };
 
-  const view = await loadPersistedPlanView(supabase, CURRENT_WEEK_START, DAYS_WITH_DATA);
+  const view = await loadPersistedPlanView(supabase, weekStart, DAYS_WITH_DATA);
   if (!view) {
     return NextResponse.json(
       {

@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 import { makePlanning } from "@/lib/planning/weekly-plan-service";
-import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { weekLabelFor } from "@/lib/flight-date";
 
 /**
  * Make Planning -- the single endpoint behind the Weekly Planning page's
@@ -31,11 +32,25 @@ import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "
  * the browser and this function; only a real Cache-Control header on the
  * wire can tell those layers not to reuse this response.
  */
-export async function POST() {
+export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
+  // week_start selects WHICH week's flight schedule Make Planning reads
+  // from and which week's WeeklyPlan it writes to -- defaults to the
+  // original demo week so a caller that predates week selection (or the
+  // "Reset Demo" flow) keeps working unchanged. weekLabelFor computes the
+  // display label from the date itself, rather than requiring a second,
+  // independently-maintained label per week.
+  let weekStart = CURRENT_WEEK_START;
+  try {
+    const body = await req.json();
+    if (body?.week_start) weekStart = body.week_start;
+  } catch {
+    // No JSON body sent (e.g. a bare POST with no body) -- fall back to the default week, not an error.
+  }
+  const weekLabel = weekLabelFor(weekStart);
 
   try {
-    const result = await makePlanning(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    const result = await makePlanning(supabase, weekStart, weekLabel, DAYS_WITH_DATA, CONFIG);
     if ("blocked" in result) {
       return NextResponse.json({ error: result.reason }, { status: 409, headers: { "Cache-Control": "no-store" } });
     }

@@ -8,6 +8,7 @@ import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycle-rotation";
 import { usesFixedCycleRotation } from "./teams";
+import { flightDateFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
@@ -284,7 +285,7 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
 // demo figures (same caveat as lib/flight-generator.ts's generated
 // flights) — not real booking data, kept in range with the same
 // normal/elevated load-factor bands the generator uses.
-export const SCRIPTED_FLIGHTS: Flight[] = [
+export const SCRIPTED_FLIGHTS: Omit<Flight, "flight_date" | "week_start">[] = [
   {
     id: "at201",
     flight_number: "AT201",
@@ -341,7 +342,11 @@ export const SCRIPTED_FLIGHTS: Flight[] = [
 // recurring templates. Built BEFORE EMPLOYEES below, since foreign-company
 // employees' weekly shifts are now derived FROM the flight schedule, not
 // the other way around.
-export const FLIGHTS: Flight[] = [...SCRIPTED_FLIGHTS, ...generateWeeklyFlights()];
+export const FLIGHTS: Flight[] = [...SCRIPTED_FLIGHTS, ...generateWeeklyFlights()].map((f) => ({
+  ...f,
+  flight_date: flightDateFor(CURRENT_WEEK_START, f.day_of_week),
+  week_start: CURRENT_WEEK_START,
+}));
 
 /**
  * For an employee currently assigned to a foreign company, the company's

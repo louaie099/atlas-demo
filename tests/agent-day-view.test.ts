@@ -21,7 +21,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null,
     registration: null, callsign: null, terminal: "T1", scheduled_departure: "14:00",
     scheduled_arrival: null, gate: null, boarding_window_start: "13:50", boarding_window_end: "14:20",
-    status: "scheduled", booking_pressure: "normal", day_of_week: "Wednesday",
+    status: "scheduled", booking_pressure: "normal", day_of_week: "Wednesday", flight_date: "2026-09-03", week_start: "2026-09-01",
     operator_type: "atlas_managed", destination_category: "Europe/Schengen",
     booked_passengers: null, seat_capacity: null,
     ...overrides,

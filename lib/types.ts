@@ -92,7 +92,16 @@ export interface Flight {
   boarding_window_end: string | null;
   status: FlightStatus;
   booking_pressure: BookingPressure;
-  day_of_week: string; // e.g. "Wednesday" — which day of the selected week
+  day_of_week: string; // e.g. "Wednesday" — derived from flight_date, kept alongside it since most existing code reads this directly
+  // The actual calendar date this flight occurs on, and the Monday that
+  // starts its display week (week_start is a pure grouping/indexing key —
+  // every real chronological question, including cross-week rest
+  // adjacency, must be answered from flight_date, never from day_of_week
+  // or week_start alone). flight_date's weekday MUST match day_of_week —
+  // enforced by a CHECK constraint at the database level (migration
+  // 0013), not just assumed by application code.
+  flight_date: string; // "YYYY-MM-DD"
+  week_start: string; // "YYYY-MM-DD" — the Monday of flight_date's display week
   operator_type: OperatorType; // atlas_managed (RAM/own ops) vs self_managed (foreign carrier)
   destination_category: string | null; // e.g. "Europe/Schengen", "UK/USA" — RAM flights only
   // Passenger load — architecture only for now (see lib/flight-generator.ts).

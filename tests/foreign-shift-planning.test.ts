@@ -75,7 +75,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
     boarding_window_end: null,
     status: "scheduled",
     booking_pressure: "normal",
-    day_of_week: "Wednesday",
+    day_of_week: "Wednesday", flight_date: "2026-09-03", week_start: "2026-09-01",
     operator_type: "self_managed",
     destination_category: null,
     booked_passengers: null,

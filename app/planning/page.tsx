@@ -5,7 +5,7 @@ import { Flight, RosterRequirementView, AgentScheduleEntry, WeeklyPlan } from "@
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
-import { AddFlightForm } from "@/components/add-flight-form";
+// AddFlightForm import removed -- see the note at its former render site below.
 import { WeekNav } from "@/components/week-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
@@ -194,11 +194,13 @@ export default function PlanningPage() {
               </button>
             </div>
 
-            {/* Secondary action -- manual Add Flight lives next to the page/week
-                controls, not inside the flight list itself, so it never competes
-                with the operational program for visual weight (still just the
-                collapsed "+ Add Flight" button unless clicked open). */}
-            {tab === "coverage" && <AddFlightForm onAdded={loadWeeklyPlan} />}
+            {/* Add Flight is being rebuilt against the new /api/flights
+                contract (real fields: flight_date, destination, aircraft --
+                no manual staffing numbers) and moved to the Flight Schedule
+                tab, per the approved multi-week Flight Program design.
+                Temporarily removed here rather than left wired to a form
+                that no longer matches the route it calls -- see
+                docs/known-limitations for this milestone's remaining scope. */}
           </div>
 
           {tab === "flights" && (

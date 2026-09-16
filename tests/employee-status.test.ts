@@ -41,7 +41,7 @@ const ramFlight: Flight = {
   boarding_window_end: "14:20",
   status: "scheduled",
   booking_pressure: "normal",
-  day_of_week: "Wednesday",
+  day_of_week: "Wednesday", flight_date: "2026-09-03", week_start: "2026-09-01",
   operator_type: "atlas_managed",
   destination_category: "Europe/Schengen",
   booked_passengers: null,

@@ -27,12 +27,20 @@ interface FakeRow {
 }
 
 class FakeQuery implements PromiseLike<{ data: FakeRow[]; error: null }> {
-  constructor(private table: FakeTable, private filters: [string, unknown][] = []) {}
+  constructor(private table: FakeTable, private filters: [string, unknown][] = [], private inFilters: [string, unknown[]][] = []) {}
 
   private rangeBounds: [number, number] | null = null;
 
   eq(col: string, val: unknown): FakeQuery {
-    return new FakeQuery(this.table, [...this.filters, [col, val]]);
+    return new FakeQuery(this.table, [...this.filters, [col, val]], this.inFilters);
+  }
+
+  // Mirrors supabase-js's .in(col, values): matches any row whose column
+  // value is a member of the given array -- used by loadPersistedPlanView
+  // to scope staffing_requirements to a specific week's flight ids
+  // without a week_start column of its own on that table.
+  in(col: string, vals: unknown[]): FakeQuery {
+    return new FakeQuery(this.table, this.filters, [...this.inFilters, [col, vals]]);
   }
 
   // Mirrors supabase-js's .range(from, to): an inclusive slice, applied
@@ -42,7 +50,7 @@ class FakeQuery implements PromiseLike<{ data: FakeRow[]; error: null }> {
   // every row from a single unbounded page and could never catch a
   // regression back to the plain, unpaginated .select("*") this replaced.
   range(from: number, to: number): FakeQuery {
-    const next = new FakeQuery(this.table, this.filters);
+    const next = new FakeQuery(this.table, this.filters, this.inFilters);
     next.rangeBounds = [from, to];
     return next;
   }
@@ -50,7 +58,9 @@ class FakeQuery implements PromiseLike<{ data: FakeRow[]; error: null }> {
   then<TResult1 = { data: FakeRow[]; error: null }, TResult2 = never>(
     onfulfilled?: ((value: { data: FakeRow[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null
   ): PromiseLike<TResult1 | TResult2> {
-    let rows = this.table.rows.filter((r) => this.filters.every(([c, v]) => r[c] === v));
+    let rows = this.table.rows
+      .filter((r) => this.filters.every(([c, v]) => r[c] === v))
+      .filter((r) => this.inFilters.every(([c, vals]) => vals.includes(r[c])));
     if (this.rangeBounds) {
       const [from, to] = this.rangeBounds;
       rows = rows.slice(from, to + 1);

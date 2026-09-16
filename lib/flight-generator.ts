@@ -150,8 +150,8 @@ const TEMPLATES: FlightTemplate[] = [
  * record per (template, operating day). AT201 and AT535 are added
  * separately by the caller — this function never touches them.
  */
-export function generateWeeklyFlights(): Flight[] {
-  const flights: Flight[] = [];
+export function generateWeeklyFlights(): Omit<Flight, "flight_date" | "week_start">[] {
+  const flights: Omit<Flight, "flight_date" | "week_start">[] = [];
 
   for (const t of TEMPLATES) {
     const seatCapacity = getSyntheticSeatCapacity(t.aircraft);
