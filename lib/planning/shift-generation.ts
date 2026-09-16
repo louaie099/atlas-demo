@@ -409,7 +409,25 @@ export function enforceRestInvariantAcrossWeek(
   daysOrder: string[],
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
   minimumRestHours: number,
-  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
+  // Employee IDs whose day-by-day placement is DEMAND-DRIVEN (General T1,
+  // Profiling, Mesure, foreign companies) rather than a confirmed,
+  // genuinely-repeating fixed rotation (Transit/Leaders/Duty Officers,
+  // etc. -- see teams.ts). Only changes behavior in the WRAPAROUND check
+  // below (this week's own last day -> this week's own first day): for a
+  // fixed team, that pattern really does repeat every week by design, so
+  // a conflict there is confirmed and stays a hard drop, exactly as
+  // before. For a demand-driven population, next week's actual schedule
+  // is generated fresh from next week's own flight demand and isn't
+  // known yet -- "this week repeats" is a hypothesis, not a fact, so a
+  // conflict there is no longer silently dropped: the shift is kept, and
+  // checkRestBetweenDays (validation.ts, which runs afterward on the
+  // persisted roster) surfaces it as a visible cross_week_continuity_
+  // uncertain WARNING instead — never a hard, blocking rest_violation
+  // over an assumption nobody has confirmed. Defaults to empty (every
+  // employee treated as fixed -- the original hard-drop behavior) so
+  // every existing caller/test keeps working unchanged.
+  generationDrivenEmployeeIds: Set<string> = new Set()
 ): { repaired: Record<string, GeneratedShiftAssignment[]>; dropped: DroppedShiftForRest[]; restHoursByEmployeeDay: ActualRestHoursByEmployeeDay } {
   const repaired: Record<string, GeneratedShiftAssignment[]> = {};
   const dropped: DroppedShiftForRest[] = [];
@@ -484,6 +502,19 @@ export function enforceRestInvariantAcrossWeek(
       const firstDayTimes = getShiftTimesAs(assignment.shiftCode);
       const rest = restHoursBetweenAcrossGap(lastDayTimes.shift_start, lastDayTimes.shift_end, firstDayTimes.shift_start, 1);
       if (rest < minimumRestHours) {
+        if (generationDrivenEmployeeIds.has(assignment.employeeId)) {
+          // Kept, not dropped -- see this function's doc comment. The low
+          // wraparound rest value is deliberately NOT written into
+          // restHoursByEmployeeDay here (it stays whatever the main walk
+          // already set, typically Number.POSITIVE_INFINITY when no real
+          // priorWeekBoundaryContext exists) -- Stage 9 must treat this
+          // employee as eligible, since the whole point of not dropping
+          // the shift is that we are NOT enforcing this unconfirmed
+          // assumption as a hard constraint. checkRestBetweenDays is what
+          // surfaces the finding, visibly, as a warning.
+          survivors.push(assignment);
+          continue;
+        }
         dropped.push({ employeeId: assignment.employeeId, dayOfWeek: firstDay, shiftCode: assignment.shiftCode, restHours: rest });
         restHoursByEmployeeDay.delete(restKey(assignment.employeeId, firstDay));
         continue;

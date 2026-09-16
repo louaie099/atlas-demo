@@ -11,6 +11,7 @@ import { checkConsecutiveOffCyclic } from "./consecutive-off";
 // for a different team, this becomes a real per-team lookup then — not
 // invented speculatively now.
 import { JR_NT_OFF_OFF_CYCLE, maxConsecutiveOffInCycle } from "../fixed-cycle-rotation";
+import { isGenerationDrivenPopulation } from "./workforce-pools";
 
 // "needs_configuration" was REMOVED from this type entirely — it isn't an
 // operational planning problem, it's an internal administrative gap (no
@@ -20,7 +21,26 @@ import { JR_NT_OFF_OFF_CYCLE, maxConsecutiveOffInCycle } from "../fixed-cycle-ro
 // Warnings count again. It's now a fully separate concept — see
 // ConfigurationIssue and collectConfigurationIssues below — with its own
 // field on DraftWeeklyPlan, never mixed into this array.
-export type PlanIssueType = "unfilled_duty" | "rest_violation" | "weekly_hours_violation" | "consecutive_off_violation";
+//
+// "cross_week_continuity_uncertain" is distinct from "rest_violation" on
+// purpose: both come from the SAME wraparound check (this displayed
+// week's own last day treated as if it repeated as the day before this
+// week's own first day), but for a DEMAND-DRIVEN population (General T1,
+// Profiling, Mesure, foreign companies) that assumption is a hypothesis
+// about a week that hasn't been planned yet, never a confirmed fact —
+// unlike a genuinely fixed/cyclic team (Transit/Leaders/Duty Officers),
+// whose repeating pattern really is the confirmed rule. Treating the
+// hypothesis as a hard, blocking rest_violation would silently drop real,
+// otherwise-legal coverage over an assumption nobody has confirmed; this
+// type surfaces the same finding as a visible, non-blocking warning
+// instead (see checkRestBetweenDays and enforceRestInvariantAcrossWeek's
+// own doc comments for the full reasoning).
+export type PlanIssueType =
+  | "unfilled_duty"
+  | "rest_violation"
+  | "weekly_hours_violation"
+  | "consecutive_off_violation"
+  | "cross_week_continuity_uncertain";
 
 export interface PlanIssue {
   type: PlanIssueType;
@@ -84,7 +104,7 @@ export function collectConfigurationIssues(requirements: StaffingRequirement[]):
 export function checkRestBetweenDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue[] {
   const issues: PlanIssue[] = [];
 
-  function checkPair(todayLabel: string, tomorrowLabel: string, tomorrowIssueDay: string): void {
+  function checkPair(todayLabel: string, tomorrowLabel: string, tomorrowIssueDay: string, issueType: PlanIssueType): void {
     const today = employee.weekly_shifts.find((s) => s.day_of_week === todayLabel);
     const tomorrow = employee.weekly_shifts.find((s) => s.day_of_week === tomorrowLabel);
     if (today?.status !== "working" || !today.shift_code) return;
@@ -102,17 +122,20 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
     const restHours = restHoursBetween(todayShift.shift_start, todayShift.shift_end, tomorrowShift.shift_start);
 
     if (restHours < config.minimum_rest_hours) {
+      const isWarning = issueType === "cross_week_continuity_uncertain";
       issues.push({
-        type: "rest_violation",
+        type: issueType,
         employeeId: employee.id,
         dayOfWeek: tomorrowIssueDay,
-        description: `${employee.name}: only ${restHours.toFixed(1)}h rest between ${todayLabel} (ends ${todayShift.shift_end}) and ${tomorrowLabel} (starts ${tomorrowShift.shift_start}) — minimum required is ${config.minimum_rest_hours}h.`,
+        description: isWarning
+          ? `${employee.name}: only ${restHours.toFixed(1)}h rest between ${todayLabel} (ends ${todayShift.shift_end}) and ${tomorrowLabel} (starts ${tomorrowShift.shift_start}) IF next week repeats this week's pattern — unconfirmed, since next week hasn't been planned yet. Review before publishing if you already know next week's actual schedule will put this employee on an early shift.`
+          : `${employee.name}: only ${restHours.toFixed(1)}h rest between ${todayLabel} (ends ${todayShift.shift_end}) and ${tomorrowLabel} (starts ${tomorrowShift.shift_start}) — minimum required is ${config.minimum_rest_hours}h.`,
       });
     }
   }
 
   for (let i = 0; i < daysOrder.length - 1; i++) {
-    checkPair(daysOrder[i], daysOrder[i + 1], daysOrder[i + 1]);
+    checkPair(daysOrder[i], daysOrder[i + 1], daysOrder[i + 1], "rest_violation");
   }
   // Cyclic week-boundary pair: this week's last day -> next week's first
   // day (e.g. Sunday -> the following Monday), relevant to any
@@ -122,8 +145,22 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
   // Monday") -- a partial slice (e.g. two arbitrary adjacent days passed
   // directly in a unit test) has no real "following week" boundary at
   // its end, and must not be treated as one.
+  //
+  // Issue type depends on WHICH population this employee belongs to: for
+  // a fixed/cyclic team (Transit/Leaders/Duty Officers), this week's
+  // pattern genuinely IS next week's pattern by confirmed design, so a
+  // conflict here is a real, confirmed rest_violation — unchanged. For a
+  // demand-driven population (General T1, Profiling, Mesure, foreign
+  // companies), next week's actual schedule is generated fresh from next
+  // week's own flight demand and is NOT yet known — "this week repeats"
+  // is an unconfirmed assumption, so a conflict here is surfaced as the
+  // softer cross_week_continuity_uncertain warning instead (see
+  // enforceRestInvariantAcrossWeek's matching doc comment: that function
+  // no longer silently drops this case for a demand-driven employee, so
+  // this check is what actually surfaces it, visibly, in the final plan).
   if (daysOrder.length === 7) {
-    checkPair(daysOrder[daysOrder.length - 1], daysOrder[0], `${daysOrder[0]} (following week)`);
+    const issueType: PlanIssueType = isGenerationDrivenPopulation(employee) ? "cross_week_continuity_uncertain" : "rest_violation";
+    checkPair(daysOrder[daysOrder.length - 1], daysOrder[0], `${daysOrder[0]} (following week)`, issueType);
   }
 
   return issues;

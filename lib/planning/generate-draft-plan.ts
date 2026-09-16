@@ -351,11 +351,13 @@ export function generateDraftWeeklyPlan(
     combinedShiftsByDay[day] = dayShifts;
   }
 
+  const generationDrivenEmployeeIds = new Set(employees.filter(isGenerationDrivenPopulation).map((e) => e.id));
   const { dropped: universallyDropped, restHoursByEmployeeDay } = enforceRestInvariantAcrossWeek(
     daysOrder,
     combinedShiftsByDay,
     config.minimum_rest_hours,
-    priorWeekBoundaryContext
+    priorWeekBoundaryContext,
+    generationDrivenEmployeeIds
   );
 
   // Anything newly dropped in THIS pass beyond the flexible-pool repair

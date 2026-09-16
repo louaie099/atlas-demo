@@ -114,7 +114,36 @@ describe("checkRestBetweenDays", () => {
     ]);
     withMonday.weekly_shifts[0] = { day_of_week: "Monday", shift_code: "MT02", status: "working" };
     const issues = checkRestBetweenDays(withMonday, daysOrder, CONFIG);
+    // CHANGED (deliberately, not a regression): this employee's default
+    // assignment is "General T1 Pool" -- a demand-driven population whose
+    // next week isn't planned yet, so "this week repeats" is an
+    // unconfirmed assumption. This wraparound case is now the softer
+    // cross_week_continuity_uncertain warning, never a hard rest_violation,
+    // so a demand-driven employee's otherwise-legal Monday coverage is no
+    // longer silently dropped over a hypothesis nobody confirmed. See
+    // enforceRestInvariantAcrossWeek's matching doc comment.
+    expect(issues.some((i) => i.type === "cross_week_continuity_uncertain" && i.dayOfWeek?.includes("Monday"))).toBe(true);
+    expect(issues.some((i) => i.type === "rest_violation")).toBe(false);
+  });
+
+  it("the SAME wraparound conflict stays a hard rest_violation for a FIXED/cyclic team, whose repeating pattern is confirmed by design, not a hypothesis", () => {
+    const daysOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    const employee = makeEmployee(
+      [
+        { day_of_week: "Monday", shift_code: null, status: "off" },
+        { day_of_week: "Tuesday", shift_code: null, status: "off" },
+        { day_of_week: "Wednesday", shift_code: null, status: "off" },
+        { day_of_week: "Thursday", shift_code: null, status: "off" },
+        { day_of_week: "Friday", shift_code: null, status: "off" },
+        { day_of_week: "Saturday", shift_code: null, status: "off" },
+        { day_of_week: "Sunday", shift_code: "AP02", status: "working" },
+      ],
+      { assignment: "Transit" }
+    );
+    employee.weekly_shifts[0] = { day_of_week: "Monday", shift_code: "MT02", status: "working" };
+    const issues = checkRestBetweenDays(employee, daysOrder, CONFIG);
     expect(issues.some((i) => i.type === "rest_violation" && i.dayOfWeek?.includes("Monday"))).toBe(true);
+    expect(issues.some((i) => i.type === "cross_week_continuity_uncertain")).toBe(false);
   });
 });
 

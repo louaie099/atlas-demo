@@ -61,7 +61,11 @@ export function PlanningSummaryBar({
   const gaps = roster.filter((v) => v.coverageStatus === "gap").length;
 
   const planWarnings = issues.filter(
-    (i) => i.type === "rest_violation" || i.type === "weekly_hours_violation" || i.type === "consecutive_off_violation"
+    (i) =>
+      i.type === "rest_violation" ||
+      i.type === "weekly_hours_violation" ||
+      i.type === "consecutive_off_violation" ||
+      i.type === "cross_week_continuity_uncertain"
   ).length;
 
   // Ordered by draft-plan priority, not raw category: Flights sets the
@@ -79,7 +83,7 @@ export function PlanningSummaryBar({
       hint: "Flight+role slots fully staffed by this draft plan (a slot needing 2 people still counts as one covered slot here — see Make Planning's own duty count for the individual-person total)",
     },
     { label: "Staffing gaps", value: gaps, dot: "bg-bad-500", hint: "Not enough valid people found -- may warrant a renfort decision" },
-    { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest, weekly-hours, or consecutive-OFF issues in this week's plan" },
+    { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest, weekly-hours, consecutive-OFF, or unconfirmed cross-week continuity issues in this week's plan" },
   ];
 
   return (

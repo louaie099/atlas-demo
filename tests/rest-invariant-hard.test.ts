@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START, CURRENT_WEEK_LABEL } from "../lib/seed-data";
 import { buildDraftPlanBundle, planIdForWeek } from "../lib/planning/weekly-plan-service";
-import { isFlexibleGeneralPool } from "../lib/planning/workforce-pools";
+import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "../lib/planning/workforce-pools";
 import { checkRestBetweenDays, auditStaticShiftRestFeasibility } from "../lib/planning/validation";
 import { enforceRestInvariantAcrossWeek, GeneratedShiftAssignment, PriorDayShiftMap } from "../lib/planning/shift-generation";
 import { Employee, WeeklyShiftEntry } from "../lib/types";
@@ -110,14 +110,29 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
     expect(restCapacityIssues.length).toBeGreaterThan(0); // the demo dataset genuinely has some -- confirmed reported, not silently dropped
   });
 
-  it("HARD GATE, ALL EMPLOYEES (not just the flexible pool): zero consecutive-working-day pairs in the FINAL persisted-shape roster fall below 15h rest -- the confirmed minimum is a hard employee constraint regardless of which planning model (Stage 6 demand-driven, or a specialized/fixed team's own configured rotation) produced the day. A specialized team whose configured rotation cannot itself satisfy 15h has its offending day dropped to OFF and reported as a BLOCKING configuration conflict (see specializedRestConflicts in generate-draft-plan.ts) rather than ever reaching this check as an illegal pair", () => {
+  it("HARD GATE, ALL EMPLOYEES (not just the flexible pool): zero consecutive-working-day pairs in the FINAL persisted-shape roster fall below 15h rest -- the confirmed minimum is a hard employee constraint regardless of which planning model (Stage 6 demand-driven, or a specialized/fixed team's own configured rotation) produced the day. A specialized team whose configured rotation cannot itself satisfy 15h has its offending day dropped to OFF and reported as a BLOCKING configuration conflict (see specializedRestConflicts in generate-draft-plan.ts) rather than ever reaching this check as an illegal pair. NOTE: this checks the hard rest_violation type only -- cross_week_continuity_uncertain (the Sunday -> following-Monday wraparound, for demand-driven populations only) is a deliberate, visible, non-blocking WARNING, not a hard violation -- see the next test.", () => {
     const violators: string[] = [];
     for (const employee of EMPLOYEES) {
       const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
-      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG).filter((i) => i.type === "rest_violation");
       for (const issue of issues) violators.push(`${employee.name} (${employee.assignment}): ${issue.description}`);
     }
     expect(violators, violators.join("\n")).toHaveLength(0);
+  });
+
+  it("cross_week_continuity_uncertain fires ONLY for demand-driven populations at the Sunday -> following-Monday wraparound, never rest_violation, and never for a fixed/cyclic team", () => {
+    for (const employee of EMPLOYEES) {
+      const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG);
+      const wraparoundIssues = issues.filter((i) => i.dayOfWeek?.includes("following week"));
+      for (const issue of wraparoundIssues) {
+        if (isGenerationDrivenPopulation(rebuilt)) {
+          expect(issue.type, `${employee.name} (${employee.assignment}): ${issue.description}`).toBe("cross_week_continuity_uncertain");
+        } else {
+          expect(issue.type, `${employee.name} (${employee.assignment}): ${issue.description}`).toBe("rest_violation");
+        }
+      }
+    }
   });
 
   it("reports the BLOCKING specialized-rest-conflict configuration issues this run actually produced -- a nonzero count here means the demo's own specialized/fixed workforce-design data genuinely cannot satisfy 15h on its own (a real finding to hand to workforce design, not a bug), and confirms the conflict is surfaced, never silently swallowed", () => {
@@ -207,5 +222,56 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
 
     expect(repaired.Tuesday).toHaveLength(1); // kept -- real rest is ample across the OFF day
     expect(dropped).toHaveLength(0);
+  });
+
+  it("WRAPAROUND, demand-driven employee: a Sunday -> following-Monday conflict is KEPT (not dropped) when the employee id is in generationDrivenEmployeeIds, and Stage 9 eligibility (restHoursByEmployeeDay) is NOT poisoned by the low wraparound value", () => {
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {
+      Monday: [{ employeeId: "e1", dayOfWeek: "Monday", shiftCode: "NR01", coversRoles: ["Mesure"] }], // entree 08:00
+      Tuesday: [],
+      Wednesday: [],
+      Thursday: [],
+      Friday: [],
+      Saturday: [],
+      Sunday: [{ employeeId: "e1", dayOfWeek: "Sunday", shiftCode: "AP02", coversRoles: ["Mesure"] }], // sortie 23:15 -> 8h45 before Monday's 08:00, well under 15h
+    };
+
+    const { repaired, dropped, restHoursByEmployeeDay } = enforceRestInvariantAcrossWeek(
+      days,
+      generatedShiftsByDay,
+      15,
+      new Map(),
+      new Set(["e1"])
+    );
+
+    expect(repaired.Monday).toHaveLength(1); // kept, not dropped
+    expect(dropped).toHaveLength(0);
+    // Not poisoned to the low (8.75h) wraparound value -- Stage 9 must
+    // treat this employee as eligible, since the whole point of keeping
+    // the shift is that this unconfirmed assumption is NOT being enforced
+    // as a hard constraint. Number.POSITIVE_INFINITY is what the main
+    // walk already set (no real priorWeekBoundaryContext for Monday).
+    expect(restHoursByEmployeeDay.get("e1|Monday")).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("WRAPAROUND, fixed/cyclic employee: the SAME conflict is still hard-dropped when the employee id is NOT in generationDrivenEmployeeIds (or the parameter is omitted) -- unchanged, original behavior", () => {
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {
+      Monday: [{ employeeId: "e1", dayOfWeek: "Monday", shiftCode: "NR01", coversRoles: ["Boarding"] }],
+      Tuesday: [],
+      Wednesday: [],
+      Thursday: [],
+      Friday: [],
+      Saturday: [],
+      Sunday: [{ employeeId: "e1", dayOfWeek: "Sunday", shiftCode: "AP02", coversRoles: ["Boarding"] }],
+    };
+
+    // No generationDrivenEmployeeIds passed at all -- every existing
+    // caller/test that predates this parameter keeps the original
+    // hard-drop behavior unchanged.
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15);
+
+    expect(repaired.Monday).toHaveLength(0); // still dropped
+    expect(dropped).toHaveLength(1);
   });
 });
