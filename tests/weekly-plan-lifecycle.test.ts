@@ -342,10 +342,18 @@ describe("weekly-plan-service — Publish", () => {
     clearBlockingConflicts(fake, draft.plan.id);
     const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
     const plan = plans.find((p) => p.id === draft.plan.id)!;
-    // Confirms staffing gaps genuinely remain (a real, expected outcome --
-    // see the delivered report) and are NOT what clearBlockingConflicts
-    // removed, so this test actually exercises the "gaps alone don't
-    // block" rule rather than a coincidentally gap-free plan.
+    // CHANGED (deliberately, not a regression): the real seed data used to
+    // reliably leave at least one genuine unfilled_duty gap here, but the
+    // Stage 6/Stage 9 coherence fix (see the delivered AT870 report) makes
+    // the real seed data now fully coverable -- a positive outcome, but it
+    // means this test can no longer rely on an INCIDENTAL gap to exercise
+    // the "gaps alone don't block publish" rule. A synthetic unfilled_duty
+    // issue is injected directly instead, so this test keeps verifying the
+    // rule deterministically regardless of how good the real planner gets.
+    plan.issues = [
+      ...plan.issues,
+      { type: "unfilled_duty", requirementId: "synthetic-test-gap", dayOfWeek: "Monday", description: "synthetic gap for this test only" },
+    ];
     expect(plan.issues.some((i) => i.type === "unfilled_duty")).toBe(true);
 
     const result = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);

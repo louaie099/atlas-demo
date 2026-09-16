@@ -245,72 +245,171 @@ export function generateDutiesForDay(
   const dayFlightIds = new Set(flights.filter((f) => f.day_of_week === dayOfWeek).map((f) => f.id));
   const dayRequirements = requirements
     .filter((r) => dayFlightIds.has(r.flight_id) && !r.needs_configuration)
-    .map((r) => ({ requirement: r, flight: flights.find((f) => f.id === r.flight_id)! }))
-    .sort((a, b) => a.flight.scheduled_departure.localeCompare(b.flight.scheduled_departure));
+    .map((r) => {
+      const flight = flights.find((f) => f.id === r.flight_id)!;
+      return { requirement: r, flight, window: getRequirementWindow(r, flight, config.checkin_demand_policy) };
+    });
 
   const busyWindows = computeBusyWindowsForDay(dayOfWeek, existingAssignments, requirements, flights, allEmployees, config.checkin_demand_policy);
 
   const duties: GeneratedDuty[] = [];
   const unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
-  for (const { requirement, flight } of dayRequirements) {
-    const window = getRequirementWindow(requirement, flight, config.checkin_demand_policy);
-    const alreadyAssignedToThisRequirement = existingAssignments.filter(
-      (a) => a.staffing_requirement_id === requirement.id
-    ).length;
-    const stillNeeded = requirement.total_requirement - alreadyAssignedToThisRequirement - duties.filter((d) => d.requirementId === requirement.id).length;
-    if (stillNeeded <= 0) continue;
+  // Build day-effective candidate pool ONCE: only employees actually
+  // rostered this day, with their real shift for THIS day substituted
+  // in — this is the day-aware reuse of scoreCandidates. rest_before_
+  // shift_hours is ALSO substituted here, from the same authoritative
+  // source as shift_start/shift_end are, for exactly the same reason:
+  // an employee's real generated/persisted shift for today can differ
+  // completely from whatever their static baseline template implied,
+  // and eligibility must reflect the shift they're ACTUALLY on, not a
+  // stale snapshot of a different one.
+  const dayEffectivePool = allEmployees
+    .map((e) => {
+      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts);
+      if (!effective) return null;
+      const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
+      return {
+        ...e,
+        shift_start: effective.shift_start,
+        shift_end: effective.shift_end,
+        rest_before_shift_hours: actualRest ?? e.rest_before_shift_hours,
+      } as Employee;
+    })
+    .filter((e) => e !== null) as Employee[];
 
-    // Build day-effective candidate pool: only employees actually
-    // rostered this day, with their real shift for THIS day substituted
-    // in — this is the day-aware reuse of scoreCandidates. rest_before_
-    // shift_hours is ALSO substituted here, from the same authoritative
-    // source as shift_start/shift_end are, for exactly the same reason:
-    // an employee's real generated/persisted shift for today can differ
-    // completely from whatever their static baseline template implied,
-    // and eligibility must reflect the shift they're ACTUALLY on, not a
-    // stale snapshot of a different one.
-    const dayEffectivePool = allEmployees
-      .map((e) => {
-        const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts);
-        if (!effective) return null;
-        const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
-        return {
-          ...e,
-          shift_start: effective.shift_start,
-          shift_end: effective.shift_end,
-          rest_before_shift_hours: actualRest ?? e.rest_before_shift_hours,
-        } as Employee;
-      })
-      .filter((e) => e !== null) as Employee[];
-
-    // A company_config (foreign-carrier) requirement is never filled via a
-    // skill match -- there is no real "Company Team" flight-task skill,
-    // only real authorization for THIS specific company (see
-    // scoring.ts's requiredAuthorization param). Every other requirement
-    // (Gate/Boarding/Profiling/Mesure/Check-in) is untouched: role-based
-    // skill matching, exactly as before.
-    const requiredAuthorization = requirement.source === "company_config" ? flight.airline : undefined;
-    const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization);
-    const recommended = results.filter((r) => r.status === "recommended");
-
-    let filled = 0;
-    for (const candidate of recommended) {
-      if (filled >= stillNeeded) break;
-      duties.push({
-        requirementId: requirement.id,
-        flightId: flight.id,
-        employeeId: candidate.employee.id,
-        role: requirement.role,
-        window,
-        reasoning: candidate.reasoning,
-      });
-      busyWindows[candidate.employee.id] = [...(busyWindows[candidate.employee.id] ?? []), window];
-      filled++;
+  // STAGE 6 / STAGE 9 COHERENCE (see the delivered AT870 report): a fixed
+  // processing order (departure time, or any other static category
+  // order) is inherently order-dependent when multiple SIMULTANEOUS
+  // requirements share a multi-qualified candidate pool -- whichever
+  // requirement happens to be processed first greedily consumes shared
+  // people, even when Stage 6 already secured EXACTLY enough distinct
+  // total headcount to cover every one of them, because Stage 6's own
+  // per-bucket accounting has no way to bind a specific employee to a
+  // specific real per-flight requirement (it operates on a coarser,
+  // aggregated bucket grid). A fixed order that happens to work for
+  // today's data is not a fix -- the very next week's flight mix could
+  // just as easily invert which requirement starves.
+  //
+  // The fix: group requirements into CLUSTERS of mutually-overlapping
+  // real time windows (transitively -- if A overlaps B and B overlaps C,
+  // all three compete for the same instant even if A and C don't overlap
+  // each other directly), then within each cluster process requirements
+  // in MOST-CONSTRAINED-FIRST order: whichever unfilled requirement
+  // currently has the FEWEST eligible ("recommended") candidates is
+  // resolved before any requirement with more options, recomputed after
+  // every assignment (since a candidate pool can only shrink as other
+  // requirements in the same cluster consume people, never grow). This
+  // is the standard "smallest domain first" heuristic for exactly this
+  // shape of problem (a set of simultaneous demands sharing a scarce,
+  // multi-qualified pool) -- it makes the OUTCOME depend on genuine
+  // scarcity, never on which category a role happens to be, so it
+  // generalizes to any future flight mix rather than being tuned to
+  // today's data. A requirement with no overlap with anything else that
+  // day is simply a cluster of one -- unaffected, same result as before.
+  //
+  // Everything else is completely unchanged: scoreCandidates' own
+  // ranking, rest/qualification/overlap eligibility, and busyWindows'
+  // no-double-booking enforcement are all exactly as strict as before --
+  // this only changes WHICH ORDER requirements are offered to the same
+  // pool, never weakens what counts as eligible.
+  const n = dayRequirements.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  function find(x: number): number {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
     }
+    return x;
+  }
+  function union(a: number, b: number): void {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  }
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (windowsOverlap(dayRequirements[i].window, dayRequirements[j].window)) union(i, j);
+    }
+  }
+  const clusterMembers = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    clusterMembers.set(root, [...(clusterMembers.get(root) ?? []), i]);
+  }
+  // Deterministic cluster processing order (doesn't affect correctness --
+  // clusters never share candidates by definition of "no window overlap"
+  // -- only reproducibility): earliest window start, then lexically
+  // smallest requirement id in the cluster.
+  const clusters = Array.from(clusterMembers.values()).sort((a, b) => {
+    const aMin = Math.min(...a.map((i) => timeToMinutes(dayRequirements[i].window.start)));
+    const bMin = Math.min(...b.map((i) => timeToMinutes(dayRequirements[i].window.start)));
+    if (aMin !== bMin) return aMin - bMin;
+    const aId = a.map((i) => dayRequirements[i].requirement.id).sort()[0];
+    const bId = b.map((i) => dayRequirements[i].requirement.id).sort()[0];
+    return aId.localeCompare(bId);
+  });
 
-    if (filled < stillNeeded) {
-      unfilled.push({ dayOfWeek, requirementId: requirement.id, role: requirement.role, stillNeeded: stillNeeded - filled });
+  for (const clusterIndices of clusters) {
+    const remaining = new Set(clusterIndices);
+
+    while (remaining.size > 0) {
+      let bestIdx = -1;
+      let bestRecommended: ReturnType<typeof scoreCandidates> = [];
+      let bestStillNeeded = 0;
+
+      for (const idx of remaining) {
+        const { requirement, flight, window } = dayRequirements[idx];
+        const alreadyAssignedToThisRequirement = existingAssignments.filter((a) => a.staffing_requirement_id === requirement.id).length;
+        const stillNeeded = requirement.total_requirement - alreadyAssignedToThisRequirement - duties.filter((d) => d.requirementId === requirement.id).length;
+        if (stillNeeded <= 0) {
+          remaining.delete(idx);
+          continue;
+        }
+
+        const requiredAuthorization = requirement.source === "company_config" ? flight.airline : undefined;
+        const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization);
+        const recommended = results.filter((r) => r.status === "recommended");
+
+        if (
+          bestIdx === -1 ||
+          recommended.length < bestRecommended.length ||
+          (recommended.length === bestRecommended.length && requirement.id < dayRequirements[bestIdx].requirement.id)
+        ) {
+          bestIdx = idx;
+          bestRecommended = recommended;
+          bestStillNeeded = stillNeeded;
+        }
+      }
+
+      if (bestIdx === -1) break; // every remaining requirement in this cluster already fully resolved above
+
+      const { requirement, flight, window } = dayRequirements[bestIdx];
+      let filled = 0;
+      for (const candidate of bestRecommended) {
+        if (filled >= bestStillNeeded) break;
+        duties.push({
+          requirementId: requirement.id,
+          flightId: flight.id,
+          employeeId: candidate.employee.id,
+          role: requirement.role,
+          window,
+          reasoning: candidate.reasoning,
+        });
+        busyWindows[candidate.employee.id] = [...(busyWindows[candidate.employee.id] ?? []), window];
+        filled++;
+      }
+
+      // This requirement's own pool can only ever shrink further (other
+      // requirements in the cluster only remove candidates, never add
+      // any) -- once it's had its most-constrained-first turn and taken
+      // everyone currently recommended, there is nothing left to gain by
+      // revisiting it later, so it's resolved (filled or honestly
+      // reported unfilled) in this one pass and removed from the cluster.
+      if (filled < bestStillNeeded) {
+        unfilled.push({ dayOfWeek, requirementId: requirement.id, role: requirement.role, stillNeeded: bestStillNeeded - filled });
+      }
+      remaining.delete(bestIdx);
     }
   }
 

@@ -357,3 +357,47 @@ describe("generateFlexiblePoolShifts", () => {
     }
   });
 });
+
+describe("Stage 6 + Stage 9 integration -- AT870-shaped simultaneous demand end-to-end", () => {
+  it("four AP02-capable multi-qualified employees plus additional legal idle Check-in-only candidates: Stage 6 rosters everyone needed, and the FINAL generated duties (not just Stage 6's own bookkeeping) reach full coverage for all three simultaneous roles", () => {
+    // Real shape from the live AT870 trace: Check-in needs 4 (a wider,
+    // demand_forecast window), Gate and Boarding each need 2 (fixed_rule,
+    // narrower, overlapping windows) -- and the qualified population
+    // splits into a small multi-qualified shared pool (exactly enough
+    // for Gate+Boarding's combined 4) plus a larger Check-in-only pool.
+    const checkinFlight = makeFlight({ id: "f-ci", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    const checkinReq = makeRequirement({ id: "r-ci", flight_id: "f-ci", role: "Check-in", source: "demand_forecast", total_requirement: 4 });
+    const gateFlight = makeFlight({ id: "f-ga", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    const gateReq = makeRequirement({ id: "r-ga", flight_id: "f-ga", role: "Gate", total_requirement: 2 });
+    const boardingFlight = makeFlight({ id: "f-bo", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    const boardingReq = makeRequirement({ id: "r-bo", flight_id: "f-bo", role: "Boarding", total_requirement: 2 });
+    const flights = [checkinFlight, gateFlight, boardingFlight];
+    const requirements = [checkinReq, gateReq, boardingReq];
+
+    const multiQualified = ["m1", "m2", "m3", "m4"].map((id) =>
+      makeEmployee({ id, skills: ["Check-in", "Gate", "Boarding"], rest_before_shift_hours: 24, weekly_hours: 0 })
+    );
+    // Additional legal idle candidates -- qualified for Check-in only,
+    // otherwise unused, exactly what the live trace found sitting idle.
+    const checkinOnly = ["c1", "c2", "c3", "c4", "c5"].map((id) =>
+      makeEmployee({ id, skills: ["Check-in"], rest_before_shift_hours: 24, weekly_hours: 0 })
+    );
+    const employees = [...multiQualified, ...checkinOnly];
+
+    const demand = aggregateDailyDemand("Tuesday", flights, requirements);
+    const generatedShifts = generateFlexiblePoolShifts("Tuesday", demand, employees);
+
+    // Stage 9, using the SAME generated shifts Stage 6 actually produced.
+    const { duties, unfilled } = generateDutiesForDay("Tuesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+
+    expect(unfilled).toHaveLength(0);
+    expect(duties.filter((d) => d.role === "Check-in")).toHaveLength(4);
+    expect(duties.filter((d) => d.role === "Gate")).toHaveLength(2);
+    expect(duties.filter((d) => d.role === "Boarding")).toHaveLength(2);
+
+    // No employee double-booked across these simultaneous duties.
+    const byEmployee = new Map<string, number>();
+    for (const d of duties) byEmployee.set(d.employeeId, (byEmployee.get(d.employeeId) ?? 0) + 1);
+    for (const count of byEmployee.values()) expect(count).toBe(1);
+  });
+});

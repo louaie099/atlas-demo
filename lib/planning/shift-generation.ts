@@ -256,15 +256,45 @@ export function generateFlexiblePoolShifts(
         for (const bucket of buckets) {
           // One employee = one unit of capacity per bucket, however many
           // roles they're qualified for: pick at most ONE role per
-          // bucket for THIS candidate, in the fixed rolesToConsider
-          // priority order, among roles the employee is actually
-          // qualified for AND that still have unmet demand.
+          // bucket for THIS candidate, among roles the employee is
+          // actually qualified for AND that still have unmet demand.
+          //
+          // SCARCEST-REMAINING-FIRST, not a fixed rolesToConsider
+          // priority order (see the delivered AT870 report): a fixed
+          // order (e.g. always Boarding before Check-in) lets whichever
+          // role happens to sit first "reserve" a multi-qualified
+          // candidate even when that role has abundant OTHER qualified
+          // candidates elsewhere, while a genuinely scarcer simultaneous
+          // role (fewer total remaining units needed, typically because
+          // fewer people are qualified for it at all -- e.g. Gate/
+          // Boarding's 2+2 versus Check-in's much larger qualified pool)
+          // silently exhausts the shared pool it depended on. Picking
+          // the role with the SMALLEST positive remaining count in this
+          // bucket first means a small, hard-to-fill simultaneous need
+          // gets first claim on a shared candidate, while a role with
+          // abundant remaining need (and, by construction, a much larger
+          // qualified population to draw the REST of its coverage from
+          // in later iterations of this same greedy loop) is deferred --
+          // it will still be filled, just by different people. This is
+          // the same "most-constrained-first" principle Stage 9
+          // (duty-generation.ts) now also uses when several real
+          // per-flight requirements compete for the same instant --
+          // keeping both stages internally consistent, per the delivered
+          // report, rather than fixing the mismatch only on one side.
+          let pickedRole: string | null = null;
+          let pickedRemaining = Number.POSITIVE_INFINITY;
           for (const role of rolesToConsider) {
             if (!employee.skills.includes(role)) continue;
-            if ((remaining[bucket].get(role) ?? 0) <= 0) continue;
+            const remainingForRole = remaining[bucket].get(role) ?? 0;
+            if (remainingForRole <= 0) continue;
+            if (remainingForRole < pickedRemaining) {
+              pickedRole = role;
+              pickedRemaining = remainingForRole;
+            }
+          }
+          if (pickedRole) {
             score++;
-            bucketRoles.push({ bucket, role });
-            break;
+            bucketRoles.push({ bucket, role: pickedRole });
           }
         }
         if (score === 0) continue;
