@@ -118,6 +118,21 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * (not-yet-regenerated) baseline shift, is never offered to them at all.
  * `enforceRestInvariantAcrossWeek` below remains the final, independent,
  * whole-week hard safety net on top of this per-day legality gate.
+ *
+ * KNOWN LIMITATION, documented not implemented (see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md for the
+ * full requirement): this function decides WHETHER an employee is
+ * rostered at all purely from marginal coverage value against flight
+ * demand. When demand is low, that can correctly leave real employees
+ * OFF entirely rather than rostered-but-idle, which RAM Handling does
+ * not consider acceptable on its own — a separate "roster planning"
+ * concept (is this employee scheduled to work at all, driven by their
+ * real working-hours obligation, once confirmed) needs to exist
+ * alongside this "duty allocation" concept (what they do while
+ * rostered, which this function and Stage 9 already handle correctly).
+ * Do not attempt to solve this by treating
+ * config.maximum_average_weekly_working_hours as a target-hours floor —
+ * see that doc for why, and see average-hours.ts's own doc comment.
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,

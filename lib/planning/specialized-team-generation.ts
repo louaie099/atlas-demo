@@ -42,6 +42,13 @@ import { getShiftTimesAs } from "../shift-templates";
  * specialized team's own rotation being intrinsically rest-infeasible:
  * both are real workforce-design findings, not something this module
  * invents a shift-policy answer for.
+ *
+ * KNOWN LIMITATION, shared with shift-generation.ts (see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md): whether
+ * a Profiling/Mesure employee is rostered at all is decided purely by
+ * that day's real demand, same as General T1 — the same future "roster
+ * planning vs. duty allocation" redesign applies here too, once the
+ * real working-hours obligation is confirmed.
  */
 
 /** One day's genuine shortfall: this many fewer employees could be legally rostered than the real demand/commitment needed. */

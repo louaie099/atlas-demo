@@ -21,6 +21,15 @@ import { Config } from "../types";
  * function does the division and comparison. It never re-derives "the
  * period" from a Monday-Sunday Employee.weekly_shifts snapshot itself —
  * that data source question belongs to the caller.
+ *
+ * NOT a target-hours obligation: this evaluates an upper CEILING
+ * (maximum_average_weekly_working_hours), never a floor an employee must
+ * be scheduled to reach. Whether/how much an employee should be rostered
+ * to work at all is a separate, currently-unimplemented concept ("roster
+ * planning" vs. the demand-driven "duty allocation" this pipeline
+ * currently does) — see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md. Do not
+ * repurpose this ceiling as that floor when that work happens.
  */
 export type AverageWorkingHoursResult =
   | {
