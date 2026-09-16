@@ -3,23 +3,31 @@
 import { useState } from "react";
 import { Button, Card } from "./ui";
 
-export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
+/**
+ * Add Flight -- collects only what the planning engine actually needs
+ * (identity, route, timing, aircraft). destination_category and
+ * operator_type are ALWAYS derived server-side from what's submitted
+ * here (see app/api/flights/route.ts) -- this form never asks for a
+ * staffing number, a role, or a classification the person would
+ * otherwise have to guess.
+ */
+export function AddFlightForm({ weekStart, onAdded }: { weekStart: string; onAdded: () => void }) {
   const [open, setOpen] = useState(false);
   const [flightNumber, setFlightNumber] = useState("");
   const [airline, setAirline] = useState("Royal Air Maroc");
-  const [route, setRoute] = useState("");
+  const [flightDate, setFlightDate] = useState(weekStart);
+  const [origin, setOrigin] = useState("CMN");
+  const [destination, setDestination] = useState("");
   const [aircraft, setAircraft] = useState("Boeing 737-800");
   const [departure, setDeparture] = useState("10:00");
-  const [role, setRole] = useState<"Boarding" | "Check-in">("Boarding");
-  const [boardingBaseline, setBoardingBaseline] = useState(3);
   const [bookingPressure, setBookingPressure] = useState<"normal" | "elevated">("normal");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit() {
     setError(null);
-    if (!flightNumber.trim() || !route.trim()) {
-      setError("Flight number and route are required.");
+    if (!flightNumber.trim() || !destination.trim()) {
+      setError("Flight number and destination are required.");
       return;
     }
     setSubmitting(true);
@@ -30,11 +38,11 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
         body: JSON.stringify({
           flight_number: flightNumber,
           airline,
-          route,
+          flight_date: flightDate,
+          origin,
+          destination,
           aircraft,
           scheduled_departure: departure,
-          role,
-          boarding_baseline: boardingBaseline,
           booking_pressure: bookingPressure,
         }),
       });
@@ -44,7 +52,7 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
         return;
       }
       setFlightNumber("");
-      setRoute("");
+      setDestination("");
       onAdded();
       setOpen(false);
     } finally {
@@ -78,84 +86,62 @@ export function AddFlightForm({ onAdded }: { onAdded: () => void }) {
         </label>
 
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted">Route</span>
+          <span className="text-muted">Airline</span>
+          <input className="border border-border rounded-lg px-3 py-2" value={airline} onChange={(e) => setAirline(e.target.value)} />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Date</span>
+          <input type="date" className="border border-border rounded-lg px-3 py-2" value={flightDate} onChange={(e) => setFlightDate(e.target.value)} />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Scheduled departure</span>
+          <input type="time" className="border border-border rounded-lg px-3 py-2" value={departure} onChange={(e) => setDeparture(e.target.value)} />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Origin (IATA)</span>
           <input
-            className="border border-border rounded-lg px-3 py-2"
-            value={route}
-            onChange={(e) => setRoute(e.target.value)}
-            placeholder="e.g. CMN → MAD"
+            className="border border-border rounded-lg px-3 py-2 uppercase"
+            value={origin}
+            onChange={(e) => setOrigin(e.target.value.toUpperCase())}
+            maxLength={3}
           />
         </label>
 
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted">Airline</span>
+          <span className="text-muted">Destination (IATA)</span>
           <input
-            className="border border-border rounded-lg px-3 py-2"
-            value={airline}
-            onChange={(e) => setAirline(e.target.value)}
+            className="border border-border rounded-lg px-3 py-2 uppercase"
+            value={destination}
+            onChange={(e) => setDestination(e.target.value.toUpperCase())}
+            placeholder="e.g. MAD"
+            maxLength={3}
           />
         </label>
 
         <label className="flex flex-col gap-1 text-sm">
           <span className="text-muted">Aircraft</span>
-          <input
-            className="border border-border rounded-lg px-3 py-2"
-            value={aircraft}
-            onChange={(e) => setAircraft(e.target.value)}
-          />
+          <input className="border border-border rounded-lg px-3 py-2" value={aircraft} onChange={(e) => setAircraft(e.target.value)} />
         </label>
 
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted">Scheduled departure</span>
-          <input
-            type="time"
-            className="border border-border rounded-lg px-3 py-2"
-            value={departure}
-            onChange={(e) => setDeparture(e.target.value)}
-          />
-        </label>
-
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted">Staffing role for this flight</span>
+          <span className="text-muted">Booking pressure</span>
           <select
             className="border border-border rounded-lg px-3 py-2"
-            value={role}
-            onChange={(e) => setRole(e.target.value as "Boarding" | "Check-in")}
+            value={bookingPressure}
+            onChange={(e) => setBookingPressure(e.target.value as "normal" | "elevated")}
           >
-            <option value="Boarding">Boarding (fixed rule)</option>
-            <option value="Check-in">Check-in (demand forecast)</option>
+            <option value="normal">Normal</option>
+            <option value="elevated">Elevated</option>
           </select>
         </label>
-
-        {role === "Boarding" ? (
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-muted">Boarding agents required (fixed rule)</span>
-            <input
-              type="number"
-              className="border border-border rounded-lg px-3 py-2"
-              value={boardingBaseline}
-              onChange={(e) => setBoardingBaseline(Number(e.target.value))}
-            />
-          </label>
-        ) : (
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-muted">Booking pressure</span>
-            <select
-              className="border border-border rounded-lg px-3 py-2"
-              value={bookingPressure}
-              onChange={(e) => setBookingPressure(e.target.value as "normal" | "elevated")}
-            >
-              <option value="normal">Normal — baseline requirement only</option>
-              <option value="elevated">Elevated — Planning Engine adds overbooking reinforcement</option>
-            </select>
-          </label>
-        )}
       </div>
 
       <p className="text-xs text-muted">
-        The staffing requirement is calculated automatically using the same Planning Engine logic
-        as the rest of the demo — Boarding is always a fixed rule, Check-in responds to booking
-        pressure. Nothing here is hand-entered as a final number.
+        Staffing requirements are calculated automatically by ATLAS from this flight's route, aircraft, and rules the
+        next time Make Planning runs — nothing here is a staffing number.
       </p>
 
       <div className="flex gap-2">

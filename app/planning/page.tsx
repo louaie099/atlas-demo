@@ -5,12 +5,14 @@ import { Flight, RosterRequirementView, AgentScheduleEntry, WeeklyPlan } from "@
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
-// AddFlightForm import removed -- see the note at its former render site below.
+import { AddFlightForm } from "@/components/add-flight-form";
+import { ImportFlightsDialog } from "@/components/import-flights-dialog";
 import { WeekNav } from "@/components/week-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
+import { shiftWeek } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
 // ATLAS generated for it (Flight Coverage) -> see the resulting employee
@@ -75,15 +77,17 @@ export default function PlanningPage() {
   const [schedule, setSchedule] = useState<AgentScheduleEntry[] | null>(null);
   const [issues, setIssues] = useState<PlanIssue[]>([]);
   const [plan, setPlan] = useState<WeeklyPlan | null | undefined>(undefined); // undefined = not loaded yet
+  const [isStale, setIsStale] = useState(false);
   const [openRequirementId, setOpenRequirementId] = useState<string | null>(null);
 
-  // Week navigation is real infrastructure, but only one week currently has
-  // data -- this is intentional: no fabricated flights for other weeks.
-  const [weekOffset, setWeekOffset] = useState(0);
-  const weekLabel =
-    weekOffset === 0
-      ? "Week of Mon, Sep 1 2026"
-      : `Week of Mon, Sep ${1 + weekOffset * 7} 2026`;
+  // weekStart is the REAL, authoritative selected week -- null only until
+  // the first response tells us which week the server resolved (see
+  // loadWeeklyPlan below). Every fetch/action below (Flight Schedule,
+  // Make Planning, Add/Edit/Remove/Import Flights) is scoped by this one
+  // value -- there is no longer an implicit "current week" anywhere on
+  // this page.
+  const [weekStart, setWeekStart] = useState<string | null>(null);
+  const [weekLabel, setWeekLabel] = useState<string>("");
 
   // Single fetch, single computed plan: Flight Coverage, the summary bar,
   // and Agent Schedule all come from the same /api/planning/weekly-view
@@ -107,21 +111,26 @@ export default function PlanningPage() {
   // *a* response came back -- see MakePlanningButton's read-after-write
   // consistency check, which compares this against the revision Make
   // Planning itself just persisted before it will show success.
-  function loadWeeklyPlan(): Promise<WeeklyPlan | null> {
-    return fetch("/api/planning/weekly-view", { cache: "no-store" })
+  function loadWeeklyPlan(targetWeekStart?: string): Promise<WeeklyPlan | null> {
+    const url = targetWeekStart ? `/api/planning/weekly-view?week_start=${targetWeekStart}` : "/api/planning/weekly-view";
+    return fetch(url, { cache: "no-store" })
       .then((r) => r.json())
       .then((data) => {
+        setWeekStart(data.weekStart ?? targetWeekStart ?? null);
+        setWeekLabel(data.weekLabel ?? "");
         setFlights(data.flights ?? []);
         setRoster(data.roster ?? []);
         setSchedule(data.schedule ?? []);
         setIssues(data.issues ?? []);
         setPlan(data.plan ?? null);
+        setIsStale(Boolean(data.isStale));
         return (data.plan ?? null) as WeeklyPlan | null;
       });
   }
 
   useEffect(() => {
     loadWeeklyPlan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const flightGroups = useMemo(() => groupByFlight(roster ?? []), [roster]);
@@ -145,25 +154,24 @@ export default function PlanningPage() {
         </div>
         <div className="flex flex-col items-end gap-2">
           <DraftLifecycle />
-          <MakePlanningButton onDone={loadWeeklyPlan} />
+          {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
         </div>
       </div>
 
       <WeekNav
         weekLabel={weekLabel}
-        hasData={weekOffset === 0}
-        onPrev={() => setWeekOffset((w) => w - 1)}
-        onNext={() => setWeekOffset((w) => w + 1)}
+        hasData={(flights?.length ?? 0) > 0}
+        onPrev={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, -1))}
+        onNext={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, 1))}
       />
 
-      {weekOffset !== 0 && (
-        <div className="bg-white border border-border rounded-xl2 px-4 py-6 text-center text-sm text-muted">
-          No scheduled flights for this week yet. Only the current week has demo data.
+      {plan && plan.status === "draft" && isStale && (
+        <div className="bg-warn-50 border border-warn-200 text-warn-700 rounded-xl2 px-4 py-3 text-sm flex items-center justify-between gap-3">
+          <span>The flight schedule has changed since this draft was generated. Click Make Planning to update it.</span>
         </div>
       )}
 
-      {weekOffset === 0 && (
-        <>
+      <>
           {flights && roster && <PlanningSummaryBar flights={flights} roster={roster} issues={issues} />}
 
           <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -194,19 +202,27 @@ export default function PlanningPage() {
               </button>
             </div>
 
-            {/* Add Flight is being rebuilt against the new /api/flights
-                contract (real fields: flight_date, destination, aircraft --
-                no manual staffing numbers) and moved to the Flight Schedule
-                tab, per the approved multi-week Flight Program design.
-                Temporarily removed here rather than left wired to a form
-                that no longer matches the route it calls -- see
-                docs/known-limitations for this milestone's remaining scope. */}
+            {/* Import Flights / Add Flight live next to the page/week controls,
+                only on the Flight Schedule tab -- this is flight-program
+                input, not workforce planning, so it never appears alongside
+                Flight Coverage or Agent Schedule. */}
+            {tab === "flights" && weekStart && (
+              <div className="flex gap-2">
+                <ImportFlightsDialog weekStart={weekStart} onImported={() => loadWeeklyPlan(weekStart)} />
+                <AddFlightForm weekStart={weekStart} onAdded={() => loadWeeklyPlan(weekStart)} />
+              </div>
+            )}
           </div>
 
           {tab === "flights" && (
             <>
               {flights === null && <p className="text-sm text-muted">Loading flight schedule...</p>}
-              {flights && <FlightScheduleView flights={flights} />}
+              {flights && weekStart && <FlightScheduleView flights={flights} onChanged={() => loadWeeklyPlan(weekStart)} />}
+              {flights && flights.length === 0 && (
+                <div className="bg-white border border-border rounded-xl2 px-4 py-6 text-center text-sm text-muted">
+                  No scheduled flights for this week yet. Use Import Flights or Add Flight above.
+                </div>
+              )}
             </>
           )}
 
@@ -240,8 +256,7 @@ export default function PlanningPage() {
               {schedule && <AgentScheduleTable schedule={schedule} />}
             </>
           )}
-        </>
-      )}
+      </>
 
       {openRequirementId && (
         <FindAgentSheet

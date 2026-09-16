@@ -88,7 +88,7 @@ function sleep(ms: number): Promise<void> {
  * ONLY once the two numbers agree; the persisted summary counts (which
  * describe that same persisted revision) are never shown before that.
  */
-export function MakePlanningButton({ onDone }: { onDone: () => Promise<FetchedPlanIdentity | null> }) {
+export function MakePlanningButton({ weekStart, onDone }: { weekStart: string; onDone: () => Promise<FetchedPlanIdentity | null> }) {
   const [state, setState] = useState<"idle" | "loading" | "done" | "blocked">("idle");
   const [message, setMessage] = useState<string | null>(null);
   const [summary, setSummary] = useState<PlanSummary | null>(null);
@@ -99,7 +99,11 @@ export function MakePlanningButton({ onDone }: { onDone: () => Promise<FetchedPl
     setSummary(null);
     let data: { plan?: FetchedPlanIdentity; revision?: number; summary?: PlanSummary; error?: string };
     try {
-      const res = await fetch("/api/planning/make-planning", { method: "POST" });
+      const res = await fetch("/api/planning/make-planning", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ week_start: weekStart }),
+      });
       data = await res.json();
       if (!res.ok) {
         setState("blocked");
