@@ -85,6 +85,21 @@ class FakeTable {
     return Promise.resolve({ data: arr, error: null });
   }
 
+  // Mirrors supabase-js's .upsert(records, { onConflict: "id" }) closely
+  // enough for persistStaffingRequirementsForFlights (weekly-plan-service.ts):
+  // a row whose `id` already exists is replaced in place, everything else
+  // is appended -- real conflict-target flexibility (composite keys, a
+  // different column) isn't needed since every real caller upserts by "id".
+  upsert(records: FakeRow | FakeRow[], _opts?: { onConflict?: string }) {
+    const arr = Array.isArray(records) ? records : [records];
+    for (const record of arr) {
+      const idx = this.rows.findIndex((r) => r.id === record.id);
+      if (idx >= 0) this.rows[idx] = record;
+      else this.rows.push(record);
+    }
+    return Promise.resolve({ data: arr, error: null });
+  }
+
   select(_cols: string): FakeQuery {
     return new FakeQuery(this);
   }

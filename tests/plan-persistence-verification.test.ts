@@ -91,6 +91,16 @@ class FakeTable {
     return Promise.resolve({ data: arr, error: null });
   }
 
+  upsert(records: FakeRow | FakeRow[], _opts?: { onConflict?: string }) {
+    const arr = Array.isArray(records) ? records : [records];
+    for (const record of arr) {
+      const idx = this.rows.findIndex((r) => r.id === record.id);
+      if (idx >= 0) this.rows[idx] = record;
+      else this.rows.push(record);
+    }
+    return Promise.resolve({ data: arr, error: null });
+  }
+
   select(_cols: string): FakeQuery {
     return new FakeQuery(this);
   }

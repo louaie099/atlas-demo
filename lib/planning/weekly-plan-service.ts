@@ -1,9 +1,39 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { Employee, Flight, Config, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, Assignment, AssignmentModification } from "../types";
 import { generateDraftWeeklyPlan } from "./generate-draft-plan";
+import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
 import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
+
+/**
+ * Keeps `staffing_requirements` in sync with the flight set a plan is
+ * about to be generated against. `buildDraftPlanBundle` (via
+ * generateDraftWeeklyPlan) recomputes requirements -- and the deterministic
+ * `req-<flightId>-<role>` ids every generated Assignment references -- purely
+ * in memory; it was never the thing that persisted them. Historically the
+ * only writer of this table was `resetDatabase` (lib/reset-database.ts),
+ * which happened to seed `flights` and `staffing_requirements` from the
+ * same in-memory list at the same moment -- so the ids always matched by
+ * coincidence of timing, not because anything kept them in sync. The
+ * moment a flight is added, edited, or imported (this milestone's real
+ * capability) and Make Planning/Regenerate runs, the new flight's
+ * requirement ids were never inserted here, and the `assignments` insert
+ * that follows fails `assignments_staffing_requirement_id_fkey` -- exactly
+ * the live failure this fixes. Upserted (never insert-only) on `id` so an
+ * Edit Flight that changes a requirement's derivation (e.g. destination
+ * reclassified) updates the existing row instead of conflicting with it;
+ * a Remove Flight's now-orphaned rows are handled by the table's own
+ * `flight_id` FK (`on delete cascade`), not by anything here.
+ */
+async function persistStaffingRequirementsForFlights(supabase: SupabaseClient, flights: Flight[], config: Config): Promise<StaffingRequirement[]> {
+  const requirements = computeWeeklyStaffingRequirements(flights, config);
+  if (requirements.length > 0) {
+    const { error } = await supabase.from("staffing_requirements").upsert(requirements, { onConflict: "id" });
+    if (error) throw new Error(`Persisting staffing requirements failed: ${error.message}`);
+  }
+  return requirements;
+}
 
 /**
  * The Weekly Plan lifecycle service. This is the ONLY place that creates,
@@ -381,6 +411,8 @@ export async function generateDraftPlan(
     employees as Employee[]
   );
 
+  await persistStaffingRequirementsForFlights(supabase, flights as Flight[], config);
+
   const bundle = buildDraftPlanBundle({
     planId,
     weekStart,
@@ -489,6 +521,8 @@ export async function regenerateDraftPlan(
 
   const { error: deleteRosterErr } = await supabase.from("weekly_plan_roster_entries").delete().eq("plan_id", planId);
   if (deleteRosterErr) throw new Error(deleteRosterErr.message);
+
+  await persistStaffingRequirementsForFlights(supabase, flights as Flight[], config);
 
   const bundle = buildDraftPlanBundle({
     planId,

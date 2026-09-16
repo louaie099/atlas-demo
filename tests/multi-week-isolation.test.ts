@@ -55,6 +55,15 @@ class FakeTable {
     this.rows.push(...arr);
     return Promise.resolve({ data: arr, error: null });
   }
+  upsert(records: FakeRow | FakeRow[], _opts?: { onConflict?: string }) {
+    const arr = Array.isArray(records) ? records : [records];
+    for (const record of arr) {
+      const idx = this.rows.findIndex((r) => r.id === record.id);
+      if (idx >= 0) this.rows[idx] = record;
+      else this.rows.push(record);
+    }
+    return Promise.resolve({ data: arr, error: null });
+  }
   select(_cols: string): FakeQuery {
     return new FakeQuery(this);
   }
@@ -107,15 +116,24 @@ describe("multi-week isolation — flights, requirements, and plans never leak a
     const assignments = fake.table("assignments") as any[];
     expect(rosterEntries.length).toBeGreaterThan(0);
     expect(assignments.length).toBeGreaterThan(0);
-    // staffing_requirements is never persisted by generateDraftPlan itself
-    // (it's computed fresh in-memory every generation -- see
-    // weekly-requirements.ts's own doc comment; only Reset Demo's seed
-    // script inserts a persisted copy, for the Flight Coverage view to
-    // read against). What generateDraftPlan DOES persist -- roster
-    // entries and assignments -- is what must be scoped correctly: every
-    // assignment's requirement id is built as `req-${flightId}-${role}`,
-    // so confirm none of them embed a Week B flight id.
+    // generateDraftPlan now persists staffing_requirements for the week
+    // it was actually asked to plan (persistStaffingRequirementsForFlights,
+    // weekly-plan-service.ts) -- previously it only ever computed them
+    // fresh in-memory and never wrote them, which meant the very first
+    // Make Planning/Regenerate against any flight outside the original
+    // Reset Demo seed (an added, edited, or imported one) failed
+    // assignments_staffing_requirement_id_fkey, a real bug this test
+    // predates. What must stay scoped correctly, now covering both
+    // tables: every persisted staffing_requirements row and every
+    // assignment's requirement id (`req-${flightId}-${role}`) must belong
+    // to Week A's own flights, never Week B's, even though Week B's rows
+    // already coexist in the same tables.
     const weekBFlightIds = buildWeekBFlights().map((f) => f.id);
+    const staffingRequirements = fake.table("staffing_requirements") as any[];
+    expect(staffingRequirements.length).toBeGreaterThan(0);
+    for (const r of staffingRequirements) {
+      expect(weekBFlightIds.includes(r.flight_id as string)).toBe(false);
+    }
     for (const a of assignments) {
       const reqId = a.staffing_requirement_id as string;
       for (const weekBId of weekBFlightIds) {
