@@ -24,7 +24,7 @@ import { isFlexibleGeneralPool } from "../lib/planning/workforce-pools";
 describe("previousWeekStart", () => {
   it("returns the calendar date exactly 7 days before weekStart", () => {
     expect(previousWeekStart("2026-09-08")).toBe("2026-09-01");
-    expect(previousWeekStart(CURRENT_WEEK_START)).toBe("2026-08-25");
+    expect(previousWeekStart(CURRENT_WEEK_START)).toBe("2026-08-24");
   });
 
   it("crosses a month boundary correctly", () => {

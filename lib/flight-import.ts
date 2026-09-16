@@ -103,8 +103,24 @@ function slugify(s: string): string {
  * THIS SAME file (seenInFile), so two rows in one import that collide
  * with each other are caught just as reliably as a collision with an
  * already-imported flight.
+ *
+ * `selectedWeekStart` is the week the person is actually viewing and
+ * importing INTO -- a row is rejected (not silently bucketed into
+ * whatever week its own date happens to fall in) if flight_date's real
+ * week doesn't match it. Before this check existed, a row for a
+ * different week would still commit successfully, just invisibly, into
+ * a week_start nobody was looking at -- indistinguishable from the
+ * import having silently failed. Rejecting it here, with the exact
+ * mismatch named, is the same "never silently succeed somewhere other
+ * than what was asked" principle the duplicate check already follows.
  */
-export function validateRow(rowNumber: number, raw: Record<string, string>, existingKeys: Set<string>, seenInFile: Set<string>): ParsedFlightRow {
+export function validateRow(
+  rowNumber: number,
+  raw: Record<string, string>,
+  existingKeys: Set<string>,
+  seenInFile: Set<string>,
+  selectedWeekStart: string
+): ParsedFlightRow {
   const problems: string[] = [];
 
   const missing = REQUIRED_COLUMNS.filter((c) => !raw[c]?.trim());
@@ -139,6 +155,17 @@ export function validateRow(rowNumber: number, raw: Record<string, string>, exis
     return { rowNumber, raw, status: "rejected", problems, flight: null };
   }
 
+  const rowWeekStart = weekStartFor(flight_date);
+  if (rowWeekStart !== selectedWeekStart) {
+    return {
+      rowNumber,
+      raw,
+      status: "rejected",
+      problems: [`flight_date ${flight_date} falls in the week of ${rowWeekStart}, not the currently selected week (${selectedWeekStart}) — switch to that week to import this row`],
+      flight: null,
+    };
+  }
+
   const key = `${flight_date}|${flight_number}`;
   if (existingKeys.has(key)) {
     return { rowNumber, raw, status: "rejected", problems: [`${flight_number} on ${flight_date} already exists for this week — duplicate`], flight: null };
@@ -154,7 +181,6 @@ export function validateRow(rowNumber: number, raw: Record<string, string>, exis
   }
 
   const dayOfWeek = dayOfWeekFor(flight_date);
-  const weekStart = weekStartFor(flight_date);
   const operatorType = airline === "Royal Air Maroc" ? "atlas_managed" : "self_managed";
 
   const flight: Flight = {
@@ -178,7 +204,7 @@ export function validateRow(rowNumber: number, raw: Record<string, string>, exis
     booking_pressure,
     day_of_week: dayOfWeek,
     flight_date,
-    week_start: weekStart,
+    week_start: rowWeekStart,
     operator_type: operatorType,
     destination_category: destinationCategory,
     booked_passengers: null,
@@ -188,7 +214,7 @@ export function validateRow(rowNumber: number, raw: Record<string, string>, exis
   return { rowNumber, raw, status: warnings.length > 0 ? "warning" : "ready", problems: warnings, flight };
 }
 
-export function validateImportFile(csvText: string, existingKeys: Set<string>): ParsedFlightRow[] {
+export function validateImportFile(csvText: string, existingKeys: Set<string>, selectedWeekStart: string): ParsedFlightRow[] {
   const { header, rows } = parseCSV(csvText);
   const missingColumns = REQUIRED_COLUMNS.filter((c) => !header.includes(c));
   if (missingColumns.length > 0) {
@@ -202,7 +228,7 @@ export function validateImportFile(csvText: string, existingKeys: Set<string>): 
     header.forEach((col, colIdx) => {
       raw[col] = cells[colIdx] ?? "";
     });
-    const result = validateRow(i + 2, raw, existingKeys, seenInFile); // +2: 1-based, plus the header row
+    const result = validateRow(i + 2, raw, existingKeys, seenInFile, selectedWeekStart); // +2: 1-based, plus the header row
     if (result.flight) seenInFile.add(`${result.flight.flight_date}|${result.flight.flight_number}`);
     results.push(result);
   });

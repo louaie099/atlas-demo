@@ -8,7 +8,7 @@ import { buildStaggeredOffDays } from "./roster-generation";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycle-rotation";
 import { usesFixedCycleRotation } from "./teams";
-import { flightDateFor } from "./flight-date";
+import { flightDateFor, weekLabelFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
@@ -32,15 +32,30 @@ export const CONFIG: Config = {
   renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,
 };
 
-// Only this week currently has scheduled flights seeded. Week navigation in
-// the UI is built to support other weeks, but no other week's data exists
-// yet — an honest empty state, not fabricated flights.
-export const CURRENT_WEEK_LABEL = "Week of Mon, Sep 1 2026";
-// Identifier for the currently-seeded demo week -- used as the WeeklyPlan's
-// week_start/id key (see lib/planning/weekly-plan-service.ts), NOT
-// validated against a real calendar (matches CURRENT_WEEK_LABEL's own
-// existing convention of being a fixed demo label, not a derived date).
-export const CURRENT_WEEK_START = "2026-09-01";
+// Multi-week Flight Program: many weeks can now have real, distinct data
+// (see lib/flight-date.ts and the flights.week_start/flight_date columns).
+// ROOT CAUSE, FOUND AND FIXED: this constant was "2026-09-01" from the
+// project's very start -- and 2026-09-01 is a TUESDAY, not a Monday. The
+// original hardcoded CURRENT_WEEK_LABEL ("Week of Mon, Sep 1 2026") was
+// calendrically false from day one; nothing ever validated it against a
+// real calendar until flight_date/week_start (this milestone) introduced
+// genuine date math and a DB-level CHECK constraint requiring flight_date's
+// weekday to actually match day_of_week. The mismatch was invisible the
+// entire time day_of_week was just a free-floating label with no real
+// date behind it -- it surfaced all at once (Reset Demo's insert failing
+// the check constraint, the UI computing "Week of Tue, Sep 1 2026", and
+// imported/seeded flights scattering across the wrong week_start) the
+// moment real calendar validation existed to catch it.
+// 2026-08-31 (the Monday immediately before Sep 1) is the correct value:
+// Monday=Aug31 .. Sunday=Sep6, a real, internally consistent calendar
+// week, closest to the original intent.
+export const CURRENT_WEEK_START = "2026-08-31";
+// Derived, not hand-maintained: this is the ONE place a week label is
+// ever computed from a week_start. Every consumer (Reset Demo's seeded
+// WeeklyPlan row, the legacy generate-draft route) now gets a label that
+// can never drift from the real calendar date again, by construction --
+// see docs and flightDateFor's own doc comment for the fuller account.
+export const CURRENT_WEEK_LABEL = weekLabelFor(CURRENT_WEEK_START);
 export const DAYS_WITH_DATA = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 // The only day with real flight data (AT201/AT535 and the generated

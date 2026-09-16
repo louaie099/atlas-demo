@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
 import { generateDraftPlan, loadPersistedPlanView, planIdForWeek } from "../lib/planning/weekly-plan-service";
 import { shiftWeek } from "../lib/flight-date";
 import { Flight } from "../lib/types";
@@ -80,7 +80,7 @@ class FakeSupabase {
   }
 }
 
-const WEEK_A_START = "2026-09-01";
+const WEEK_A_START = CURRENT_WEEK_START;
 const WEEK_B_START = shiftWeek(WEEK_A_START, 1); // "2026-09-08" -- a genuinely distinct week, one week later
 
 /** Week B's flights: same day-of-week template as the real seed data, but real, distinct dates/ids/week_start -- a truly second, independent week's program, not a re-tagged copy of week A's rows. */

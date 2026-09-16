@@ -78,7 +78,7 @@ function FlightDetailField({ label, value }: { label: string; value: string | nu
   );
 }
 
-function EditFlightForm({ flight, onSaved, onCancel }: { flight: Flight; onSaved: () => void; onCancel: () => void }) {
+function EditFlightForm({ flight, onSaved, onCancel }: { flight: Flight; onSaved: (newWeekStart: string) => void; onCancel: () => void }) {
   const [flightNumber, setFlightNumber] = useState(flight.flight_number);
   const [airline, setAirline] = useState(flight.airline);
   const [flightDate, setFlightDate] = useState(flight.flight_date);
@@ -113,7 +113,7 @@ function EditFlightForm({ flight, onSaved, onCancel }: { flight: Flight; onSaved
         setError(data.error ?? "Failed to save changes.");
         return;
       }
-      onSaved();
+      onSaved(data.flight.week_start);
     } finally {
       setSubmitting(false);
     }
@@ -186,7 +186,7 @@ function EditFlightForm({ flight, onSaved, onCancel }: { flight: Flight; onSaved
  * here is invented; a field with no data (e.g. gate, equipment code) is
  * simply omitted rather than shown as a placeholder.
  */
-function FlightDetailPanel({ flight, onClose, onChanged }: { flight: Flight; onClose: () => void; onChanged: () => void }) {
+function FlightDetailPanel({ flight, onClose, onChanged }: { flight: Flight; onClose: () => void; onChanged: (newWeekStart?: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -231,9 +231,9 @@ function FlightDetailPanel({ flight, onClose, onChanged }: { flight: Flight; onC
         {editing ? (
           <EditFlightForm
             flight={flight}
-            onSaved={() => {
+            onSaved={(newWeekStart) => {
               setEditing(false);
-              onChanged();
+              onChanged(newWeekStart);
               onClose();
             }}
             onCancel={() => setEditing(false)}
@@ -298,7 +298,7 @@ function FlightDetailPanel({ flight, onClose, onChanged }: { flight: Flight; onC
  * regardless of whether ATLAS generates any workforce coverage for it —
  * that distinction belongs to Flight Coverage, not this view.
  */
-export function FlightScheduleView({ flights, onChanged }: { flights: Flight[]; onChanged: () => void }) {
+export function FlightScheduleView({ flights, onChanged }: { flights: Flight[]; onChanged: (newWeekStart?: string) => void }) {
   const [selected, setSelected] = useState<Flight | null>(null);
   const groups = groupByDay(flights);
 

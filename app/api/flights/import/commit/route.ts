@@ -33,7 +33,7 @@ export async function POST(req: Request) {
 
   let rows;
   try {
-    rows = validateImportFile(csv, existingKeys);
+    rows = validateImportFile(csv, existingKeys, week_start);
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
   }

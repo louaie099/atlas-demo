@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
 import {
   generateDraftPlan,
   regenerateDraftPlan,
@@ -132,7 +132,7 @@ class FakeSupabase {
   }
 }
 
-const WEEK_START = "2026-09-01";
+const WEEK_START = CURRENT_WEEK_START;
 const WEEK_LABEL = "Test Week";
 
 /**

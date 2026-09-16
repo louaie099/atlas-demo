@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   const existingKeys = new Set((existing ?? []).map((f) => `${f.flight_date}|${f.flight_number}`));
 
   try {
-    const rows = validateImportFile(csv, existingKeys);
+    const rows = validateImportFile(csv, existingKeys, week_start);
     const summary = {
       total: rows.length,
       ready: rows.filter((r) => r.status === "ready").length,

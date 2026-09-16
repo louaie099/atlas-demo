@@ -209,7 +209,7 @@ export default function PlanningPage() {
             {tab === "flights" && weekStart && (
               <div className="flex gap-2">
                 <ImportFlightsDialog weekStart={weekStart} onImported={() => loadWeeklyPlan(weekStart)} />
-                <AddFlightForm weekStart={weekStart} onAdded={() => loadWeeklyPlan(weekStart)} />
+                <AddFlightForm weekStart={weekStart} onAdded={(newFlightWeekStart) => loadWeeklyPlan(newFlightWeekStart)} />
               </div>
             )}
           </div>
@@ -217,7 +217,9 @@ export default function PlanningPage() {
           {tab === "flights" && (
             <>
               {flights === null && <p className="text-sm text-muted">Loading flight schedule...</p>}
-              {flights && weekStart && <FlightScheduleView flights={flights} onChanged={() => loadWeeklyPlan(weekStart)} />}
+              {flights && weekStart && (
+                <FlightScheduleView flights={flights} onChanged={(newWeekStart) => loadWeeklyPlan(newWeekStart ?? weekStart)} />
+              )}
               {flights && flights.length === 0 && (
                 <div className="bg-white border border-border rounded-xl2 px-4 py-6 text-center text-sm text-muted">
                   No scheduled flights for this week yet. Use Import Flights or Add Flight above.

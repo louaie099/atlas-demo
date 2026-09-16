@@ -11,7 +11,7 @@ import { Button, Card } from "./ui";
  * staffing number, a role, or a classification the person would
  * otherwise have to guess.
  */
-export function AddFlightForm({ weekStart, onAdded }: { weekStart: string; onAdded: () => void }) {
+export function AddFlightForm({ weekStart, onAdded }: { weekStart: string; onAdded: (newFlightWeekStart: string) => void }) {
   const [open, setOpen] = useState(false);
   const [flightNumber, setFlightNumber] = useState("");
   const [airline, setAirline] = useState("Royal Air Maroc");
@@ -53,7 +53,7 @@ export function AddFlightForm({ weekStart, onAdded }: { weekStart: string; onAdd
       }
       setFlightNumber("");
       setDestination("");
-      onAdded();
+      onAdded(data.flight.week_start);
       setOpen(false);
     } finally {
       setSubmitting(false);
