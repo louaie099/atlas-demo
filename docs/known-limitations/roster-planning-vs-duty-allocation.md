@@ -84,11 +84,95 @@ This is a genuinely new objective for the joint solver, not a parameter
 tweak — expect it to change how `generateFlexiblePoolShifts` scores
 candidates, not just its inputs.
 
+## Confirmed so far (RAM Handling / Moses, 2026-09-17)
+
+A heavy-week stress test (152 synthetic flights, week of 2026-09-07) made
+this limitation concrete and live: 133 of 201 employees (66%) flagged with
+`consecutive_off_violation` (3-7 straight OFF days), and Qatar Airways
+duty coverage failed because only 2 of 7 authorized employees were ever
+rostered in at all — the other 5 sat OFF the entire week. Real answers
+gathered from that:
+
+- **The principle is confirmed, the number is not.** Employees are
+  scheduled according to their real working-hours obligation, never
+  purely because a day's flight demand happens to justify it — see
+  `lib/labor-rules.ts`'s `workingHoursObligationHours` /
+  `lib/planning/roster-obligation.ts` (added as scaffolding, currently
+  `null`/not-evaluable — nothing reads it yet). The exact target/shape
+  (flat weekly hours, minimum shift count, an average over some period,
+  something else) is still NOT confirmed. Do not guess it.
+- **The 42h reference period is still unconfirmed** — no change from
+  above; `working_hours_reference_period_days` stays `null`.
+- **Cross-team redeployment is confirmed, in one specific shape.** A
+  foreign-company ACE remains a RAM Handling employee. Their company
+  operation has priority and creates a hard protected window around the
+  real flight (now correctly enforced — see the shipped duty-generation.ts
+  fix for the cross-company double-booking bug this exposed). Outside
+  that window, if their RAM shift is still active, they are real
+  available RAM capacity according to their actual qualifications — not
+  "foreign duty or OFF for the day." Transit is the one confirmed
+  exception: once clocked in, a Transit agent stays committed to Transit
+  for the whole shift, never partially available (unchanged,
+  `isTransitTeam`). Do NOT generalize this redeployment behavior to
+  Mesure/Profiling yet — not confirmed either way.
+- **Team headcounts are placeholders until confirmed individually, not
+  collectively.** Gulf Air was corrected from a demo placeholder (6
+  people / 2 per flight) to the real number (8 people / 8 per flight —
+  see the shipped company-config.ts + employee-generator.ts patch).
+  Confirmed detail not yet modeled: Gulf Air's 8 is 7 ACE + 1 leader, and
+  the leader coordinates rather than filling a generic Check-in-style
+  slot — today's model treats all 8 as interchangeable "Company Team"
+  members. Qatar Airways (7/2), Emirates (9/3), Etihad (5/2), Air France
+  (5/3), and Mesure (12/4) are all still unconfirmed demo values and
+  should be treated with the same suspicion Gulf Air's turned out to
+  deserve.
+- **Headcount flatness is confirmed only for Gulf Air (flat, 8/flight,
+  every flight).** Whether Qatar/Emirates/Etihad/Air France ever scale
+  with aircraft type, booking pressure, or day of week is NOT confirmed.
+  RAM's own Gate/Boarding/Profiling/Mesure headcount already legitimately
+  varies by aircraft class via `ram-staffing-matrix.ts` — that mechanism
+  is unrelated and unaffected.
+- **Fairness has a confirmed qualitative floor, no confirmed target.**
+  The objective is NOT "make everyone's duty count equal" — it's "don't
+  repeatedly overuse the same eligible employees while leaving comparable
+  eligible employees unused," evaluated over a rolling window across
+  weeks, never by forcing equality inside one displayed Monday-Sunday
+  week. No confirmed weighting across hours/duty-count/shift-type/
+  historical-workload yet — don't invent one.
+- **OFF-day rotation shape is NOT uniform across teams by assumption.**
+  15h rest / max-2-consecutive-OFF / continuous cross-week planning are
+  confirmed and universal. The JR→NT→OFF→OFF fixed cycle is confirmed
+  ONLY for Transit/Leaders (Duty Officers' exact rotation is still
+  insufficiently confirmed). General T1 is NOT confirmed to use that
+  cycle. Foreign-company teams follow their real flight program plus
+  compatible RAM shifts, not a blindly-applied fixed cycle. Do not
+  generalize any one team's confirmed shape onto another.
+
+None of the above is wired into generation yet — see
+`lib/planning/roster-obligation.ts`'s doc comment for why implementing
+against a partially-confirmed principle without a real number would
+repeat exactly the mistake this document exists to prevent.
+
 ## Sequencing
 
-1. Multi-week Flight Program / Import Flights (in progress) — unaffected by
-   this document, proceed unchanged.
-2. Confirm the real RAM Handling working-hours/roster obligation with
-   management — not something ATLAS or this document should guess.
-3. Redesign roster generation (Stage 6) against the confirmed obligation,
-   jointly with everything listed above.
+1. Multi-week Flight Program / Import Flights — done.
+2. Heavy-week stress test against the real planner — done; this is what
+   surfaced the 66%-of-workforce consecutive-OFF finding and the Qatar
+   Airways coverage failure that made this document concrete instead of
+   theoretical.
+3. Two isolated bug fixes the stress test exposed, unrelated to this
+   redesign — done: the foreign-company protected-window double-booking
+   (duty-generation.ts), and the `isStale` false-positive from unordered
+   Postgres row fetches (`hashPlanInputs`).
+4. Confirm real per-team facts as they surface — in progress. Gulf Air's
+   real headcount (8, composition 7+1 leader) is confirmed; see above for
+   what's still open per team.
+5. Confirm the real RAM Handling working-hours/roster obligation (the
+   number/shape, not just the principle) with management — still open,
+   blocks step 6 entirely.
+6. Redesign roster generation (Stage 6) against the confirmed obligation,
+   jointly with everything listed above — not started; data-model
+   scaffolding only (`working_hours_obligation_hours`,
+   `roster-obligation.ts`) is in place so step 6 has a real place to read
+   a confirmed number from once it exists, without guessing in the
+   meantime.
