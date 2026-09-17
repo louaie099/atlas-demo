@@ -1,7 +1,7 @@
 import { Employee, Flight, StaffingRequirement, Assignment, Config, WeeklyPlanRosterEntry } from "../types";
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
-import { getEmployeeForeignCommitments } from "../foreign-company-window";
+import { getEmployeeForeignCommitments, computeForeignCompanyProtectedWindow } from "../foreign-company-window";
 import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay } from "./shift-generation";
 import { getShiftTimesAs } from "../shift-templates";
 import { isGenerationDrivenPopulation } from "./workforce-pools";
@@ -396,7 +396,28 @@ export function generateDutiesForDay(
           window,
           reasoning: candidate.reasoning,
         });
-        busyWindows[candidate.employee.id] = [...(busyWindows[candidate.employee.id] ?? []), window];
+        // The window recorded here is what makes this employee unavailable
+        // to every LATER requirement resolved in this same day's pass (see
+        // this loop's own busyWindows accumulation). For an ordinary
+        // RAM/internal requirement, the requirement's own operational
+        // window is correct and already matches computeBusyWindowsForDay's
+        // pre-pass treatment of existing assignments. But a company_config
+        // (foreign-carrier) requirement's real unavailability is the WIDER
+        // protected window (4h30 before departure -- computeForeignCompany
+        // ProtectedWindow, the same generic, airline-agnostic function
+        // computeBusyWindowsForDay's own pre-pass already uses via
+        // getEmployeeForeignCommitments for assignments made in EARLIER
+        // calls/days). Recording only the narrow operational window here
+        // let an employee assigned to one foreign company's duty earlier in
+        // THIS SAME day's pass still look free for a different (or the
+        // same) foreign company's later, protected-window-overlapping
+        // requirement -- confirmed live as the Meriem/Noureddine Gulf
+        // Air + Qatar Airways double-booking. Using the protected window
+        // for company_config sources here closes that gap without
+        // widening anything for RAM requirements, and without naming any
+        // specific airline or employee.
+        const busyWindow = requirement.source === "company_config" ? computeForeignCompanyProtectedWindow(flight) : window;
+        busyWindows[candidate.employee.id] = [...(busyWindows[candidate.employee.id] ?? []), busyWindow];
         filled++;
       }
 

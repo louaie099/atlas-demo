@@ -299,6 +299,120 @@ describe("generateDutiesForDay", () => {
   });
 });
 
+describe("generateDutiesForDay — foreign-company PROTECTED windows (4h30 before departure) are real unavailability, not just the narrow task window", () => {
+  // Root cause of the live Meriem/Noureddine Gulf Air + Qatar Airways
+  // double-booking: within a single generateDutiesForDay pass, a newly
+  // assigned company_config duty only recorded the requirement's own
+  // narrow operational window (getRequirementWindow -- ~30min for a
+  // foreign carrier) as "busy" for later requirements in the same pass,
+  // never the WIDER protected commitment window (4h30 before departure,
+  // computeForeignCompanyProtectedWindow) that getEmployeeForeignCommitments
+  // already used correctly for assignments made in earlier calls/days.
+  // These scenarios use fictional airline names ("Company A"/"Company B")
+  // that don't appear anywhere in lib/company-config.ts, and a
+  // parameterized employee id, specifically to prove the fix is generic
+  // over source === "company_config" and never keys off a specific
+  // airline or employee.
+
+  it("Company A's protected window prohibits a same-employee Company B duty whose own narrow window doesn't overlap Company A's narrow window at all", () => {
+    // Company A departs 07:45: narrow (task) window 07:00-07:30, protected
+    // window 03:15-07:45 (4h30 before departure).
+    const flightA = makeFlight({ id: "fa", airline: "Company A", scheduled_departure: "07:45", boarding_window_start: null, boarding_window_end: null });
+    const reqA = makeRequirement({ id: "req-a", flight_id: "fa", role: "Company Team", source: "company_config", total_requirement: 1 });
+    // Company B departs 08:15: narrow window 07:30-08:00 -- does NOT
+    // overlap Company A's narrow window (07:00-07:30, boundary-touching,
+    // not overlapping) but DOES fall inside Company A's protected window
+    // (03:15-07:45, overlap 07:30-07:45).
+    const flightB = makeFlight({ id: "fb", airline: "Company B", scheduled_departure: "08:15", boarding_window_start: null, boarding_window_end: null });
+    const reqB = makeRequirement({ id: "req-b", flight_id: "fb", role: "Company Team", source: "company_config", total_requirement: 1 });
+
+    const employee = makeEmployee({
+      id: "ace-1",
+      skills: [],
+      foreign_company_authorizations: ["Company A", "Company B"],
+      rest_before_shift_hours: 24,
+      weekly_hours: 0,
+    });
+    const generatedShifts = [{ employeeId: "ace-1", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
+
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, reqB], [flightA, flightB], [employee], generatedShifts, [], CONFIG);
+
+    expect(duties).toHaveLength(1);
+    expect(duties[0].requirementId).toBe("req-a"); // earlier narrow window is processed first
+    expect(unfilled).toEqual([{ dayOfWeek: "Wednesday", requirementId: "req-b", role: "Company Team", stillNeeded: 1 }]);
+  });
+
+  it("Company A's protected window prohibits the same employee from a RAM (fixed_rule) duty whose window falls inside the protected window but outside Company A's own narrow window", () => {
+    const flightA = makeFlight({ id: "fa", airline: "Company A", scheduled_departure: "07:45", boarding_window_start: null, boarding_window_end: null }); // narrow 07:00-07:30, protected 03:15-07:45
+    const reqA = makeRequirement({ id: "req-a", flight_id: "fa", role: "Company Team", source: "company_config", total_requirement: 1 });
+    // RAM Boarding, standard aircraft: T-60 window. Departure 08:30 -> window 07:30-08:30.
+    // Doesn't overlap Company A's narrow window (07:00-07:30, boundary), but
+    // 07:30-07:45 falls inside Company A's protected window.
+    const ramFlight = makeFlight({ id: "ram", airline: "Royal Air Maroc", scheduled_departure: "08:30" });
+    const ramReq = makeRequirement({ id: "req-ram", flight_id: "ram", role: "Boarding", source: "fixed_rule", total_requirement: 1 });
+
+    const employee = makeEmployee({
+      id: "ace-2",
+      skills: ["Boarding"],
+      foreign_company_authorizations: ["Company A"],
+      rest_before_shift_hours: 24,
+      weekly_hours: 0,
+    });
+    const generatedShifts = [{ employeeId: "ace-2", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
+
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG);
+
+    expect(duties).toHaveLength(1);
+    expect(duties[0].requirementId).toBe("req-a");
+    expect(unfilled).toEqual([{ dayOfWeek: "Wednesday", requirementId: "req-ram", role: "Boarding", stillNeeded: 1 }]);
+  });
+
+  it("sequential reuse is preserved: a duty genuinely before or after Company A's protected window is still allowed for the same employee", () => {
+    const flightA = makeFlight({ id: "fa", airline: "Company A", scheduled_departure: "07:45", boarding_window_start: null, boarding_window_end: null }); // protected 03:15-07:45
+    const reqA = makeRequirement({ id: "req-a", flight_id: "fa", role: "Company Team", source: "company_config", total_requirement: 1 });
+    // RAM Boarding well clear of the protected window: departure 10:00 -> window 09:00-10:00.
+    const ramFlight = makeFlight({ id: "ram", airline: "Royal Air Maroc", scheduled_departure: "10:00" });
+    const ramReq = makeRequirement({ id: "req-ram", flight_id: "ram", role: "Boarding", source: "fixed_rule", total_requirement: 1 });
+
+    const employee = makeEmployee({
+      id: "ace-3",
+      skills: ["Boarding"],
+      foreign_company_authorizations: ["Company A"],
+      rest_before_shift_hours: 24,
+      weekly_hours: 0,
+    });
+    const generatedShifts = [{ employeeId: "ace-3", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
+
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG);
+
+    expect(unfilled).toHaveLength(0);
+    expect(duties).toHaveLength(2);
+    expect(duties.every((d) => d.employeeId === "ace-3")).toBe(true);
+  });
+
+  it("is fully generic: the same behavior holds for an unrelated pair of fictional carriers never mentioned in lib/company-config.ts, proving nothing is keyed off a specific airline or employee id", () => {
+    const flightX = makeFlight({ id: "fx", airline: "Widget Airways", scheduled_departure: "19:45", boarding_window_start: null, boarding_window_end: null }); // narrow 19:00-19:30, protected 15:15-19:45
+    const reqX = makeRequirement({ id: "req-x", flight_id: "fx", role: "Company Team", source: "company_config", total_requirement: 1 });
+    const flightY = makeFlight({ id: "fy", airline: "Acme Air Cargo", scheduled_departure: "20:15", boarding_window_start: null, boarding_window_end: null }); // narrow 19:30-20:00 (touches, doesn't overlap fx's narrow), overlaps fx's protected
+    const reqY = makeRequirement({ id: "req-y", flight_id: "fy", role: "Company Team", source: "company_config", total_requirement: 1 });
+
+    const employee = makeEmployee({
+      id: "some-random-employee-id-42",
+      skills: [],
+      foreign_company_authorizations: ["Widget Airways", "Acme Air Cargo"],
+      rest_before_shift_hours: 24,
+      weekly_hours: 0,
+    });
+    const generatedShifts = [{ employeeId: "some-random-employee-id-42", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: [] }]; // AP02: 13:45-23:15, covers both evening windows
+
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqX, reqY], [flightX, flightY], [employee], generatedShifts, [], CONFIG);
+
+    expect(duties).toHaveLength(1);
+    expect(duties[0].requirementId).toBe("req-x");
+    expect(unfilled).toEqual([{ dayOfWeek: "Wednesday", requirementId: "req-y", role: "Company Team", stillNeeded: 1 }]);
+  });
+});
+
 describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manual assignment (Find Agent / Assign API) must use, not just automatic generation", () => {
   it("excludes an employee whose persisted roster entry for this day is 'off' — a fixed labor-rule protection (e.g. max consecutive off days) manual assignment must never be able to override", () => {
     const offEmployee = makeEmployee({ id: "e1" });
