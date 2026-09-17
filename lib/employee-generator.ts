@@ -301,7 +301,10 @@ export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeS
 const FOREIGN_GROUPS: GenSpec[] = [
   { count: 9, skills: ["Boarding"], assignment: "Emirates", shift_code: "NR01", weekly_hours: 26, foreign_company_authorizations: ["Emirates", "Etihad"], keepWednesdayWorking: true },
   { count: 7, skills: ["Boarding"], assignment: "Qatar Airways", shift_code: "NR01", weekly_hours: 24, foreign_company_authorizations: ["Qatar Airways", "Gulf Air"], keepWednesdayWorking: true },
-  { count: 6, skills: ["Boarding"], assignment: "Gulf Air", shift_code: "MT02", weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
+  // Confirmed by RAM Handling (Moses, 2026-09-17): the real dedicated
+  // Gulf Air team is 8 agents, not the earlier illustrative 6 -- matches
+  // the corrected 8-agent-per-flight headcount in company-config.ts.
+  { count: 8, skills: ["Boarding"], assignment: "Gulf Air", shift_code: "MT02", weekly_hours: 25, foreign_company_authorizations: ["Gulf Air"], keepWednesdayWorking: true },
   { count: 5, skills: ["Boarding"], assignment: "Etihad", shift_code: "NR02", weekly_hours: 23, foreign_company_authorizations: ["Etihad", "Emirates"], keepWednesdayWorking: true },
   // Corrected: baseline was AP01 (13:45-22:45). AF1234 departs 10:30, so
   // its protected window (~06:00-10:30) requires an early-morning shift

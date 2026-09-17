@@ -33,7 +33,10 @@ const COMPANY_STAFFING_CONFIG: Record<string, { role: string; headcount: number;
   "Qatar Airways": { role: "Company Team", headcount: 2, assignmentWindowMinutes: 60 },
   Emirates: { role: "Company Team", headcount: 3, assignmentWindowMinutes: 60 },
   Etihad: { role: "Company Team", headcount: 2, assignmentWindowMinutes: 45 },
-  "Gulf Air": { role: "Company Team", headcount: 2, assignmentWindowMinutes: 45 },
+  // Confirmed by RAM Handling (Moses, 2026-09-17): the real Gulf Air
+  // operation needs 8 agents per flight, not the earlier illustrative 2 --
+  // corrected from real ground knowledge, not a guess.
+  "Gulf Air": { role: "Company Team", headcount: 8, assignmentWindowMinutes: 45 },
   "Air France": { role: "Company Team", headcount: 3, assignmentWindowMinutes: 60 },
   // Turkish Airlines deliberately absent — demonstrates the "unmanaged,
   // no requirement generated at all" path for an unconfigured carrier
