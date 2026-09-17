@@ -46,6 +46,12 @@ describe("resolved default labor rules — confirmed management policy values", 
     expect(resolved.workingHoursReferencePeriodDaysSource).toBe("unconfirmed_prototype");
   });
 
+  it("workingHoursObligationHours is NOT confirmed — the principle (schedule to obligation, not just demand) is confirmed, but the real target/shape is not, and must never default to the 42h ceiling", () => {
+    expect(resolved.workingHoursObligationHours).toBeNull();
+    expect(resolved.workingHoursObligationHoursSource).toBe("unconfirmed_prototype");
+    expect(resolved.workingHoursObligationHours).not.toBe(resolved.maximumAverageWeeklyWorkingHours);
+  });
+
   it("DEFAULT_LABOR_RULES has exactly one (default/unscoped) rule set", () => {
     expect(DEFAULT_LABOR_RULES.length).toBe(1);
     expect(DEFAULT_LABOR_RULES[0].scope).toEqual({});
@@ -66,5 +72,11 @@ describe("Config (lib/seed-data.ts) — threads the resolved labor rules through
     expect(CONFIG.maximum_average_weekly_working_hours).toBe(resolved.maximumAverageWeeklyWorkingHours);
     expect(CONFIG.working_hours_reference_period_days).toBe(resolved.workingHoursReferencePeriodDays);
     expect(CONFIG.working_hours_reference_period_days).toBeNull();
+  });
+
+  it("CONFIG.working_hours_obligation_hours mirrors the resolved labor rules exactly — never defaulted to the 42h ceiling", () => {
+    const resolved = resolveDefaultLaborRules();
+    expect(CONFIG.working_hours_obligation_hours).toBe(resolved.workingHoursObligationHours);
+    expect(CONFIG.working_hours_obligation_hours).toBeNull();
   });
 });

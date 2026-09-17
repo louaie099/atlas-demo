@@ -300,6 +300,20 @@ export interface Config {
   // lib/planning/average-hours.ts's evaluateAverageWorkingHours. Do not
   // treat null as "assume 7 days."
   working_hours_reference_period_days: number | null;
+  // NOT YET CONFIRMED, and a genuinely different concept from the 42h
+  // ceiling above — a target/floor (how much an employee should be
+  // scheduled to work), not a maximum. Confirmed as a PRINCIPLE (see
+  // lib/labor-rules.ts's workingHoursObligationHours and
+  // docs/known-limitations/roster-planning-vs-duty-allocation.md): an
+  // employee's schedule is driven by their real working-hours
+  // obligation, never purely by whether that day's flight demand
+  // happens to justify rostering them. null = no real target/shape has
+  // been confirmed yet, so no roster-generation logic may derive
+  // demand-independent scheduling decisions from this value — see
+  // lib/planning/roster-obligation.ts. Do not default this to
+  // maximum_average_weekly_working_hours; that would silently repurpose
+  // a confirmed ceiling as an unconfirmed floor.
+  working_hours_obligation_hours: number | null;
   // DEPRECATED — superseded by checkin_demand_policy below, which
   // generalizes Check-in demand to every RAM flight (see
   // lib/planning/checkin-demand.ts). Kept only because some UI/demand-

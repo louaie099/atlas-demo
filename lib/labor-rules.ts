@@ -107,6 +107,27 @@ export interface LaborRules {
   // average-hours compliance right now" (see
   // lib/planning/average-hours.ts).
   workingHoursReferencePeriodDays: RuleValue<number | null>;
+  // NOT YET CONFIRMED — a genuinely different concept from the 42h value
+  // above, not a rephrasing of it. Confirmed by RAM Handling (Moses,
+  // 2026-09-17) as a real PRINCIPLE: an employee is scheduled to work
+  // according to their real working-hours obligation, never purely
+  // because that day's flight demand happens to justify it (see
+  // docs/known-limitations/roster-planning-vs-duty-allocation.md) — an
+  // employee with no specific flight duty during part of a scheduled
+  // shift is still WORKING, available capacity, not OFF. What was
+  // explicitly NOT confirmed is the actual number/shape of that
+  // obligation (a flat weekly hours target, a minimum shift count, an
+  // averaged target over some period, or something else). `value: null`
+  // means "no real obligation target has been confirmed yet" — every
+  // consumer must treat null as "cannot evaluate obligation compliance,
+  // and cannot yet drive demand-independent roster generation from this
+  // number" (see lib/planning/roster-obligation.ts). Do not default this
+  // to `maximumAverageWeeklyWorkingHours` (42h) — that is a confirmed
+  // CEILING on average hours, never confirmed as the target/floor every
+  // employee should be scheduled to reach; conflating the two would be
+  // guessing a business rule this codebase's own conventions exist to
+  // avoid.
+  workingHoursObligationHours: RuleValue<number | null>;
 }
 
 /**
@@ -141,6 +162,7 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
     maximumAverageWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
     workingHoursReferencePeriodDays: { value: null, source: "unconfirmed_prototype" },
+    workingHoursObligationHours: { value: null, source: "unconfirmed_prototype" },
   },
 ];
 
@@ -158,6 +180,9 @@ export interface ResolvedLaborRules {
   // null = not yet confirmed. See workingHoursReferencePeriodDays above.
   workingHoursReferencePeriodDays: number | null;
   workingHoursReferencePeriodDaysSource: LaborRuleSource;
+  // null = not yet confirmed. See workingHoursObligationHours above.
+  workingHoursObligationHours: number | null;
+  workingHoursObligationHoursSource: LaborRuleSource;
 }
 
 function isEffective(rule: LaborRules, date: string): boolean {
@@ -218,6 +243,8 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     maximumAverageWeeklyWorkingHoursSource: rule.maximumAverageWeeklyWorkingHours.source,
     workingHoursReferencePeriodDays: rule.workingHoursReferencePeriodDays.value,
     workingHoursReferencePeriodDaysSource: rule.workingHoursReferencePeriodDays.source,
+    workingHoursObligationHours: rule.workingHoursObligationHours.value,
+    workingHoursObligationHoursSource: rule.workingHoursObligationHours.source,
   };
 }
 

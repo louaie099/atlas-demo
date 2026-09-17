@@ -24,6 +24,7 @@ export const CONFIG: Config = {
   minimum_rest_hours: DEFAULT_RULES.minimumRestHours,
   maximum_average_weekly_working_hours: DEFAULT_RULES.maximumAverageWeeklyWorkingHours,
   working_hours_reference_period_days: DEFAULT_RULES.workingHoursReferencePeriodDays,
+  working_hours_obligation_hours: DEFAULT_RULES.workingHoursObligationHours,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
   checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,
