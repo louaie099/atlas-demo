@@ -166,9 +166,34 @@ export function generateObligationToppedUpShifts(
         break;
       }
 
+      // FORWARD lookahead against tomorrow's REAL demand-driven shift, if
+      // one already exists (the same forward-half-of-the-rest-check
+      // reasoning as shift-generation.ts's own nextDayBaselineShift):
+      // without this, a top-up shift added here could leave the
+      // immediately following day's already-fixed demand-driven shift
+      // under-rested. Left unguarded, the universal whole-week safety net
+      // (enforceRestInvariantAcrossWeek) would still catch the resulting
+      // violation -- but since it walks strictly forward, it would drop
+      // the LATER (real, demand-justified) shift rather than this
+      // synthetic top-up one, silently trading away genuine coverage for
+      // an obligation top-up. Checking it here means this stage only ever
+      // adds a day when doing so is compatible with what's already
+      // real, never at the expense of it.
+      const nextDay = daysOrder[i + 1];
+      const nextFixed = nextDay ? (demandDrivenShiftsByDay[nextDay] ?? []).find((x) => x.employeeId === employee.id) : undefined;
+      const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode) : null;
+
       const legal = catalogCodes.find((c) => {
-        if (!priorShift) return true;
-        return restHoursBetween(priorShift.shift_start, priorShift.shift_end, minutesToTime(c.entreeMin)) >= minimumRestHours;
+        if (priorShift) {
+          const entreeTime = minutesToTime(c.entreeMin);
+          if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
+        }
+        if (nextFixedShift) {
+          const entreeTime = minutesToTime(c.entreeMin);
+          const sortieTime = minutesToTime(c.sortieMin);
+          if (restHoursBetween(entreeTime, sortieTime, nextFixedShift.shift_start) < minimumRestHours) return false;
+        }
+        return true;
       });
 
       if (!legal) {
