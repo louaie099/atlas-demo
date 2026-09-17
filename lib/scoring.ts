@@ -72,7 +72,16 @@ export function scoreCandidates(
   employees: Employee[],
   config: Config,
   occupiedWindows: Record<string, TimeWindow[]> = {},
-  requiredAuthorization?: string
+  requiredAuthorization?: string,
+  // FAIRNESS AS A SOFT OBJECTIVE, USING HOURS (see
+  // lib/fairness-config.ts's doc comment for the full priority-order
+  // rationale). Real hours already scheduled for each employee THIS
+  // WINDOW/week, used ONLY to break ties within the "recommended" group
+  // when config.fairness_weights.workloadHoursWeight > 0 — never to
+  // exclude or downgrade anyone, and never consulted at all while the
+  // weight is 0 (the default). Defaults to an empty map so every existing
+  // caller/test keeps working unchanged.
+  hoursScheduledThisWindow: Map<string, number> = new Map()
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e): e is RosteredEmployee => {
     if (!e.active) return false;
@@ -154,5 +163,21 @@ export function scoreCandidates(
     };
   });
 
-  return results.sort((a, b) => (a.status === b.status ? 0 : a.status === "recommended" ? -1 : 1));
+  return results.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "recommended" ? -1 : 1;
+    // Hours-based fairness tie-break — soft objective #4 in the priority
+    // chain (see fairness-config.ts). Gated behind a non-zero weight so
+    // the default (0) reproduces today's stable, input-order result
+    // exactly; Array.prototype.sort is stable, so returning 0 here for
+    // every pair when the weight is 0 is a genuine no-op, not an
+    // approximation. Only compares within the same status group — a
+    // "flagged" candidate never gets reordered relative to a
+    // "recommended" one by this signal.
+    if (config.fairness_weights.workloadHoursWeight > 0) {
+      const hoursA = hoursScheduledThisWindow.get(a.employee.id) ?? 0;
+      const hoursB = hoursScheduledThisWindow.get(b.employee.id) ?? 0;
+      if (hoursA !== hoursB) return hoursA - hoursB; // fewer scheduled hours first
+    }
+    return 0;
+  });
 }

@@ -3,6 +3,7 @@ import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest } from "./shift-generation";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict } from "./specialized-team-generation";
+import { generateObligationToppedUpShifts } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
@@ -280,12 +281,35 @@ export function generateDraftWeeklyPlan(
   // persistence) runs on this REPAIRED result, never the raw one -- a
   // role a dropped shift would have covered becomes genuine, honestly
   // reported uncovered demand instead of an illegal roster.
-  const { repaired: generatedShiftsByDay, dropped: flexibleRestDropped } = enforceRestInvariantAcrossWeek(
+  const { repaired: demandDrivenShiftsByDay, dropped: flexibleRestDropped } = enforceRestInvariantAcrossWeek(
     daysOrder,
     rawGeneratedShiftsByDay,
     config.minimum_rest_hours,
     priorWeekBoundaryContext
   );
+
+  // STAGE 2 of the redesigned pipeline (workforce obligation -> CONTINUOUS
+  // ROSTER GENERATION -> shift assignment -> ...): see
+  // lib/planning/roster-generation.ts's own doc comment for the full
+  // rationale. A genuine no-op while config.working_hours_obligation_hours
+  // stays null (today's real-world default) -- obligationToppedUpByDay is
+  // then empty for every day and `generatedShiftsByDay` below is
+  // byte-for-byte identical to `demandDrivenShiftsByDay`. Only once a real
+  // obligation is confirmed and configured does this add real, additional
+  // rostered-but-not-demand-justified days for the flexible pool, on top
+  // of (never instead of) Stage 6's own demand-driven result.
+  const obligationToppedUpByDay = generateObligationToppedUpShifts(
+    daysOrder,
+    employees,
+    demandDrivenShiftsByDay,
+    config,
+    priorWeekBoundaryContext,
+    config.minimum_rest_hours
+  );
+  const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
+  for (const day of daysOrder) {
+    generatedShiftsByDay[day] = [...demandDrivenShiftsByDay[day], ...obligationToppedUpByDay[day]];
+  }
 
   // Profiling/Mesure and every foreign-company team now also get a REAL,
   // generation-time roster instead of a static baseline (see
@@ -418,6 +442,19 @@ export function generateDraftWeeklyPlan(
     };
   });
 
+  // Hours-based fairness input for Stage 9 (see scoring.ts's
+  // hoursScheduledThisWindow doc comment) -- total real generated shift
+  // hours per employee across the WHOLE week's final roster, computed
+  // once here so every day's duty-scoring pass shares the same fairness
+  // signal. A genuine no-op while config.fairness_weights.workloadHoursWeight
+  // is 0 (the default) -- this map is only ever consulted then.
+  const hoursScheduledThisWindow = new Map<string, number>();
+  for (const day of daysOrder) {
+    for (const g of finalGeneratedShiftsByDay[day] ?? []) {
+      hoursScheduledThisWindow.set(g.employeeId, (hoursScheduledThisWindow.get(g.employeeId) ?? 0) + getShiftDurationHours(g.shiftCode));
+    }
+  }
+
   const dutiesByDay: Record<string, GeneratedDuty[]> = {};
   const allUnfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
@@ -430,7 +467,8 @@ export function generateDraftWeeklyPlan(
       finalGeneratedShiftsByDay[day] ?? [],
       existingAssignments,
       config,
-      restHoursByEmployeeDay
+      restHoursByEmployeeDay,
+      hoursScheduledThisWindow
     );
     dutiesByDay[day] = duties;
     allUnfilled.push(...unfilled);

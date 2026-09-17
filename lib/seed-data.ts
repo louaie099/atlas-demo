@@ -10,6 +10,7 @@ import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycl
 import { usesFixedCycleRotation } from "./teams";
 import { flightDateFor, weekLabelFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
+import { DEFAULT_FAIRNESS_WEIGHTS } from "./fairness-config";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
 // from lib/labor-rules.ts, not hand-picked here — 15h rest is confirmed
@@ -25,6 +26,11 @@ export const CONFIG: Config = {
   maximum_average_weekly_working_hours: DEFAULT_RULES.maximumAverageWeeklyWorkingHours,
   working_hours_reference_period_days: DEFAULT_RULES.workingHoursReferencePeriodDays,
   working_hours_obligation_hours: DEFAULT_RULES.workingHoursObligationHours,
+  // NOT YET CONFIRMED — null, exactly like working_hours_obligation_hours
+  // itself; see lib/types.ts's Config doc comment and
+  // lib/planning/roster-generation.ts. Never default this away.
+  working_hours_obligation_reference_period_days: null,
+  fairness_weights: DEFAULT_FAIRNESS_WEIGHTS,
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
   checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,

@@ -54,6 +54,23 @@ export interface Employee {
   off_days: string[];
   foreign_company_authorizations: string[]; // e.g. ["Qatar Airways"] — companies they're TRAINED/AUTHORIZED to work (capability). Does NOT mean currently placed there — that's what `assignment` represents. Being authorized never removes RAM availability outside an actual protected window (see foreign-company-window.ts).
   active: boolean; // workforce status — editable only by Administrators (see lib/roles.ts). An inactive employee is never a scoring candidate.
+  // TEAM COMPOSITION — a genuinely separate concept from `skills`
+  // (qualification) and `assignment` (current placement): this is the
+  // employee's ROLE/RESPONSIBILITY within their own team, e.g. an
+  // interchangeable "ace" ground-service agent vs. a "leader" who
+  // coordinates the team rather than filling a generic staffing slot.
+  // Optional and `undefined` for every employee whose team has no
+  // confirmed role split (see lib/company-config.ts's
+  // getCompanyTeamRoleConfig) — undefined means "no distinct role
+  // configured, fully interchangeable," the same behavior every team had
+  // before this field existed. Only set (currently only for Gulf Air,
+  // 7 ace + 1 leader — a confirmed real fact, see company-config.ts) once
+  // a company's real role split is confirmed; never guessed for any other
+  // team. This is NOT a qualification (`skills`) and NOT the per-flight
+  // STAFFING REQUIREMENT count (StaffingRequirement.total_requirement) —
+  // those three stay separate concepts on purpose so a future team can
+  // have distinct roles without distinct skills, or vice versa.
+  team_role?: "ace" | "leader";
   // Employee-level BASELINE/TEMPLATE pattern — one entry per day of a
   // generic week, each with its own shift code or "off" status. For a
   // static/fixed-planning-team/foreign-committed employee this template
@@ -341,6 +358,26 @@ export interface Config {
   normal_weekly_off_days: number;
   max_consecutive_off_days: number;
   renfort_weekly_off_days: number;
+  // NOT YET CONFIRMED — mirrors working_hours_reference_period_days'
+  // "null means not configured" convention, but for the OBLIGATION
+  // (target/floor) rather than the 42h ceiling: the number of days
+  // `working_hours_obligation_hours` is defined over (e.g. a flat weekly
+  // figure would be 7; an averaged figure over some longer window would
+  // be that window's length). null means "no real horizon confirmed yet"
+  // — lib/planning/roster-generation.ts must never guess one (e.g. by
+  // defaulting to the displayed week's own length) while this stays null;
+  // it only prorates a window's target once both this AND
+  // working_hours_obligation_hours are non-null. See
+  // docs/known-limitations/roster-planning-vs-duty-allocation.md.
+  working_hours_obligation_reference_period_days: number | null;
+  // Soft-objective weighting for scoreCandidates' fairness tie-break (see
+  // lib/scoring.ts and lib/fairness-config.ts). Every weight defaults to
+  // 0/neutral — a genuine no-op that reproduces today's candidate order
+  // exactly — until a real weighting is confirmed; see
+  // lib/fairness-config.ts's own doc comment for why this follows the
+  // same LaborRuleSource "don't invent a coefficient" convention as
+  // lib/labor-rules.ts, even though it isn't itself a LaborRules entry.
+  fairness_weights: import("./fairness-config").FairnessWeights;
 }
 
 export interface AgentScheduleEntry {

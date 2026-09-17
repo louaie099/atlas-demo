@@ -240,7 +240,14 @@ export function generateDutiesForDay(
   // must reflect the rest actually implied by their real generated/
   // persisted shift, never a stale value left over from whatever their
   // OLD static template happened to imply.
-  actualRestHoursByDay?: ActualRestHoursByEmployeeDay
+  actualRestHoursByDay?: ActualRestHoursByEmployeeDay,
+  // Hours-based fairness input (see scoring.ts's own doc comment on its
+  // `hoursScheduledThisWindow` parameter) — real hours already scheduled
+  // per employee this week, from the plan's own generated roster.
+  // Defaults to empty so every existing caller/test keeps working
+  // unchanged; only relevant while config.fairness_weights.workloadHoursWeight
+  // is non-zero.
+  hoursScheduledThisWindow: Map<string, number> = new Map()
 ): { duties: GeneratedDuty[]; unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] } {
   const dayFlightIds = new Set(flights.filter((f) => f.day_of_week === dayOfWeek).map((f) => f.id));
   const dayRequirements = requirements
@@ -368,7 +375,7 @@ export function generateDutiesForDay(
         }
 
         const requiredAuthorization = requirement.source === "company_config" ? flight.airline : undefined;
-        const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization);
+        const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow);
         const recommended = results.filter((r) => r.status === "recommended");
 
         if (

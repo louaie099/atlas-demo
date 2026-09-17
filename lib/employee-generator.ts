@@ -2,7 +2,7 @@ import { Employee } from "./types";
 import { getShiftTimesAs, restHoursForDailyRepeatingShift } from "./shift-templates";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { companyOperatingDays } from "./flight-generator";
-import { getCompanyRequiredAgents } from "./company-config";
+import { getCompanyRequiredAgents, getCompanyTeamRoleConfig } from "./company-config";
 import { resolveDefaultLaborRules } from "./labor-rules";
 import { deriveTeamRotation, DemandDay, RotationInfeasibleError } from "./rotation-feasibility";
 import { FixedCycleDefinition, JR_NT_OFF_OFF_CYCLE, offDaysForDisplayedWeek, maxConsecutiveOffInCycle } from "./fixed-cycle-rotation";
@@ -450,6 +450,15 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
 
   for (const spec of FOREIGN_GROUPS) {
     const offDaysByMember = offDaysForForeignGroup(spec);
+    // TEAM COMPOSITION (see company-config.ts's TeamRoleConfig doc
+    // comment): only set team_role when this company has a CONFIRMED
+    // role split — today, only Gulf Air (7 ACE + 1 Leader). Every other
+    // group gets `team_role: undefined` (the field is simply omitted),
+    // preserving the fully-interchangeable behavior every group has
+    // always had. Deterministic assignment: the first `leaderCount`
+    // members of the group are the Leader(s), matching how every other
+    // per-member property here is derived from a fixed index `n`.
+    const roleConfig = getCompanyTeamRoleConfig(spec.assignment);
 
     for (let n = 0; n < spec.count; n++) {
       const name = nameForIndex(i);
@@ -468,6 +477,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
         off_days: offDaysByMember[n],
         foreign_company_authorizations: spec.foreign_company_authorizations ?? [],
         active: true,
+        ...(roleConfig ? { team_role: (n < roleConfig.leaderCount ? "leader" : "ace") as "ace" | "leader" } : {}),
       });
       i++;
     }

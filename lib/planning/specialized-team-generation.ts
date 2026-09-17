@@ -1,9 +1,10 @@
 import { Employee, Flight } from "../types";
 import { DailyDemand, demandClustersForRole } from "./demand-aggregation";
 import { selectCompatibleShiftCodes, planForeignCompanyDay } from "../foreign-shift-planning";
-import { getCompanyRequiredAgents } from "../company-config";
+import { getCompanyRequiredAgents, getCompanyTeamRoleConfig, TeamRoleConfig } from "../company-config";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { getShiftTimesAs } from "../shift-templates";
+import { isRedeploymentAllowed } from "../teams";
 
 /**
  * Generation-time roster derivation for the "middle" specialized
@@ -76,7 +77,11 @@ function assignPoolToWindow(
   window: { start: string; end: string },
   headcount: number,
   priorDayShift: PriorDayShiftMap,
-  minimumRestHours: number
+  minimumRestHours: number,
+  // See teams.ts's isRedeploymentAllowed / foreign-shift-planning.ts's
+  // preferExtended doc comments. Default false — every existing caller
+  // unaffected, identical shift selection as before.
+  preferExtended = false
 ): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
   const assigned: { employeeId: string; shiftCode: string }[] = [];
   for (const employee of pool) {
@@ -94,13 +99,62 @@ function assignPoolToWindow(
       prior?.shift_start ?? null,
       prior?.shift_end ?? null,
       minimumRestHours,
-      true
+      true,
+      preferExtended
     );
     if (candidates.length > 0) {
       assigned.push({ employeeId: employee.id, shiftCode: candidates[0].code });
     }
   }
   return { assigned, shortfall: Math.max(0, headcount - assigned.length) };
+}
+
+/**
+ * TEAM COMPOSITION (see company-config.ts's TeamRoleConfig doc comment):
+ * splits a pool into its ACE and Leader sub-populations for a team with a
+ * CONFIRMED role split. When no split is confirmed for this team
+ * (`roleConfig === null` — every team today except Gulf Air), everyone is
+ * treated as one interchangeable pool, in the `aces` bucket, exactly the
+ * pre-existing behavior — `leaders` is empty and never consulted.
+ */
+function partitionPoolByRole(pool: Employee[], roleConfig: TeamRoleConfig | null): { aces: Employee[]; leaders: Employee[] } {
+  if (!roleConfig) return { aces: pool, leaders: [] };
+  return {
+    aces: pool.filter((e) => e.team_role !== "leader"),
+    leaders: pool.filter((e) => e.team_role === "leader"),
+  };
+}
+
+/**
+ * Assigns a pool to a window, respecting a confirmed team-role split when
+ * one exists: ACE slots are filled ONLY from non-leader members (up to
+ * `roleConfig.aceCount`), Leader slots ONLY from leader members (up to
+ * `roleConfig.leaderCount`) — a Leader never silently fills an ACE slot,
+ * and vice versa, even if the other sub-pool runs short (that shows up as
+ * a genuine, honestly-reported shortfall instead). When `roleConfig` is
+ * null, this is byte-for-byte the original single-pool assignPoolToWindow
+ * call with the full headcount — no behavior change for any team without
+ * a confirmed split.
+ */
+function assignPoolToWindowWithRoles(
+  pool: Employee[],
+  window: { start: string; end: string },
+  headcount: number,
+  roleConfig: TeamRoleConfig | null,
+  priorDayShift: PriorDayShiftMap,
+  minimumRestHours: number,
+  preferExtended = false
+): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
+  if (!roleConfig) {
+    return assignPoolToWindow(pool, window, headcount, priorDayShift, minimumRestHours, preferExtended);
+  }
+  const { aces, leaders } = partitionPoolByRole(pool, roleConfig);
+  const aceResult = assignPoolToWindow(aces, window, roleConfig.aceCount, priorDayShift, minimumRestHours, preferExtended);
+  const leaderResult = assignPoolToWindow(leaders, window, roleConfig.leaderCount, priorDayShift, minimumRestHours, preferExtended);
+  return {
+    assigned: [...aceResult.assigned, ...leaderResult.assigned],
+    shortfall: aceResult.shortfall + leaderResult.shortfall,
+  };
 }
 
 /**
@@ -125,6 +179,7 @@ export function generateProfilingMesureShifts(
 
   for (const team of ["Profiling", "Mesure"]) {
     const pool = employees.filter((e) => e.active && e.assignment === team);
+    const preferExtended = isRedeploymentAllowed(team);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
 
     for (const day of daysOrder) {
@@ -133,7 +188,7 @@ export function generateProfilingMesureShifts(
       let remainingPool = pool;
 
       for (const cluster of clusters) {
-        const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours);
+        const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended);
         dayAssignments.push(...assigned);
         const assignedIds = new Set(assigned.map((a) => a.employeeId));
         remainingPool = remainingPool.filter((e) => !assignedIds.has(e.id));
@@ -201,6 +256,8 @@ export function generateForeignCompanyShifts(
     const pool = employees.filter((e) => e.active && e.assignment === company);
     if (pool.length === 0) continue;
     const headcount = getCompanyRequiredAgents(company);
+    const roleConfig = getCompanyTeamRoleConfig(company);
+    const preferExtended = isRedeploymentAllowed(company);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
 
     for (const day of daysOrder) {
@@ -208,7 +265,15 @@ export function generateForeignCompanyShifts(
       let dayAssignments: { employeeId: string; shiftCode: string }[] = [];
 
       if (plan && headcount !== undefined) {
-        const { assigned, shortfall } = assignPoolToWindow(pool, plan.combinedWindow, headcount, priorDayShift, minimumRestHours);
+        const { assigned, shortfall } = assignPoolToWindowWithRoles(
+          pool,
+          plan.combinedWindow,
+          headcount,
+          roleConfig,
+          priorDayShift,
+          minimumRestHours,
+          preferExtended
+        );
         dayAssignments = assigned;
         if (shortfall > 0) {
           conflicts.push({ team: company, dayOfWeek: day, window: plan.combinedWindow, needed: headcount, covered: headcount - shortfall });

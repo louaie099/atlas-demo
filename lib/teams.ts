@@ -110,6 +110,43 @@ export function isTransitTeam(assignment: string): boolean {
 }
 
 /**
+ * CROSS-TEAM REDEPLOYMENT POLICY — config-only, never a branch on a
+ * specific company/team name inside planner logic. Confirmed, in one
+ * specific shape (Moses, 2026-09-17): a foreign-company ACE remains
+ * available RAM capacity outside their protected commitment window, IF
+ * their RAM shift is still active — this already works generically today
+ * via lib/scoring.ts's scoreCandidates (it only ever excludes an employee
+ * for a genuinely OVERLAPPING protected window, never their whole
+ * assignment), so no flag is needed to turn that ALREADY-confirmed
+ * behavior on for foreign companies.
+ *
+ * What IS genuinely new here: whether a Profiling/Mesure employee's
+ * generated shift is allowed to EXTEND beyond their own team's demand
+ * window (see specialized-team-generation.ts/foreign-shift-planning.ts's
+ * `preferExtended`), creating real slack time scoreCandidates can then
+ * offer for other RAM duty — this was NOT confirmed for Mesure/Profiling
+ * (see the known-limitations doc) and defaults to `false`/unconfigured
+ * for every team, including every foreign company, until a specific team
+ * is explicitly opted in here. This table therefore governs "may this
+ * team's shift be extended for redeployment," not "is a foreign ACE ever
+ * reachable outside their window" (already true regardless of this
+ * table).
+ *
+ * Transit is the ONE hard, non-configurable exception: `isTransitTeam`
+ * always returns false from `isRedeploymentAllowed`, unconditionally,
+ * regardless of any entry that could ever be added here — there is
+ * deliberately no way to flip that off via configuration, per the
+ * explicit instruction that Transit's full-shift commitment is a hard
+ * rule, never a policy choice.
+ */
+const TEAM_REDEPLOYMENT_POLICY: Record<string, boolean> = {};
+
+export function isRedeploymentAllowed(assignment: string): boolean {
+  if (isTransitTeam(assignment)) return false; // hard, non-configurable exception — see doc comment above
+  return TEAM_REDEPLOYMENT_POLICY[assignment] === true;
+}
+
+/**
  * The single, centralized list of operational placements an employee can
  * be assigned to — internal RAM teams and foreign companies together,
  * flat, exactly as an operator thinks about workforce groups (Employees

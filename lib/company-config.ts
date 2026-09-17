@@ -48,6 +48,39 @@ const COMPANY_STAFFING_CONFIG: Record<string, { role: string; headcount: number;
 export const CONFIGURED_COMPANIES = Object.keys(COMPANY_STAFFING_CONFIG);
 
 /**
+ * TEAM COMPOSITION — a distinct concept from `role`/`headcount` above,
+ * which is the per-flight STAFFING REQUIREMENT (how many people this
+ * company's operation needs at all). This is about who, among that
+ * headcount, holds which RESPONSIBILITY: a confirmed real split for
+ * Gulf Air (Moses, 2026-09-17): the 8-person team is 7 ACE ground-
+ * service agents + 1 Leader who coordinates the team rather than filling
+ * a generic slot. `aceCount + leaderCount` MUST equal that company's
+ * `headcount` above — both numbers are the same confirmed real fact,
+ * just split by role instead of totaled.
+ *
+ * A company absent from this table (every one besides Gulf Air today)
+ * has NO CONFIRMED ROLE SPLIT — getCompanyTeamRoleConfig returns null,
+ * and every consumer must treat null as "this team's members are fully
+ * interchangeable," exactly the behavior that existed before this table
+ * did. Do not add Qatar Airways/Emirates/Etihad/Air France/Mesure here
+ * speculatively — per the explicit instruction, only a confirmed split
+ * belongs here, and none of those is confirmed yet (see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md).
+ */
+export interface TeamRoleConfig {
+  aceCount: number;
+  leaderCount: number;
+}
+
+const COMPANY_TEAM_ROLE_CONFIG: Record<string, TeamRoleConfig> = {
+  "Gulf Air": { aceCount: 7, leaderCount: 1 },
+};
+
+export function getCompanyTeamRoleConfig(company: string): TeamRoleConfig | null {
+  return COMPANY_TEAM_ROLE_CONFIG[company] ?? null;
+}
+
+/**
  * The per-flight agent requirement for a configured company — the same
  * headcount classifyCompanyRequirement derives, exposed directly for
  * callers (e.g. the Rotation Feasibility Engine's wiring layer in

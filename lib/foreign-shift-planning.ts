@@ -75,10 +75,11 @@ export function selectCompatibleShiftCode(
   adjacentShiftStart?: string | null,
   adjacentShiftEnd?: string | null,
   minimumRestHours?: number,
-  allowLateStart = false
+  allowLateStart = false,
+  preferExtended = false
 ): string | null {
   return (
-    selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours, allowLateStart)[0]
+    selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours, allowLateStart, preferExtended)[0]
       ?.code ?? null
   );
 }
@@ -109,7 +110,21 @@ export function selectCompatibleShiftCodes(
   adjacentShiftStart?: string | null,
   adjacentShiftEnd?: string | null,
   minimumRestHours?: number,
-  allowLateStart = false
+  allowLateStart = false,
+  // CROSS-TEAM REDEPLOYMENT (see teams.ts's isRedeploymentAllowed and the
+  // known-limitations doc): default false, every existing caller
+  // unaffected. When true, reverses ONLY the second tie-break — among
+  // candidates tied on start-side coverage loss, prefer the LONGEST
+  // compatible shift rather than the shortest. A specialized/foreign
+  // team's window is exactly what their own commitment needs; picking a
+  // longer catalog shift than strictly required leaves genuine, real
+  // slack time either before or after that window on the employee's
+  // actual shift — time scoreCandidates can then legitimately offer for
+  // other RAM duty, since a person really is on shift then, not "OFF but
+  // pretending to be available." Never changes which codes are
+  // ELIGIBLE (the filter above, and the optional rest filter below, are
+  // both unaffected) — only which eligible code is preferred first.
+  preferExtended = false
 ): { code: string; entree: string; sortie: string }[] {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
@@ -138,7 +153,7 @@ export function selectCompatibleShiftCodes(
     if (lossA !== lossB) return lossA - lossB;
     const durationA = a.sortieMin - a.entreeMin;
     const durationB = b.sortieMin - b.entreeMin;
-    return durationA - durationB;
+    return preferExtended ? durationB - durationA : durationA - durationB;
   });
 
   return candidates.map((c) => ({ code: c.code, entree: minutesToTime(c.entreeMin), sortie: minutesToTime(c.sortieMin) }));
