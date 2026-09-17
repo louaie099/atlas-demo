@@ -57,15 +57,49 @@ export function planIdForWeek(weekStart: string): string {
 }
 
 /**
+ * Sorts object keys recursively (arrays keep their element order, only
+ * each object's own key order is normalized) so JSON.stringify never
+ * varies with incidental key-insertion order -- a defensive companion to
+ * the row-order fix below, not itself the live bug.
+ */
+function canonicalizeKeyOrder(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeKeyOrder);
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) sorted[key] = canonicalizeKeyOrder(record[key]);
+    return sorted;
+  }
+  return value;
+}
+
+/**
  * Deterministic, dependency-free content hash (FNV-1a, 32-bit) of the
  * facts a plan revision was generated from. Used ONLY to DETECT that the
  * underlying flights/employees/config have changed since a draft was
  * generated (see WeeklyPlan.generated_from_hash's doc comment in
  * lib/types.ts) -- never a cryptographic guarantee, and this milestone
  * does not yet act on a mismatch beyond making it visible.
+ *
+ * `flights` and `employees` are both fetched with a plain
+ * `.select("*")` and NO `.order(...)` at every call site that feeds this
+ * function (both the generation path in this file and the isStale check
+ * in app/api/planning/weekly-view/route.ts) -- Postgres makes no row-
+ * order guarantee for a query without an explicit ORDER BY, so the same
+ * logical rows can legitimately come back in a different physical order
+ * on two separate calls. Hashing the raw JSON.stringify of an ordering-
+ * sensitive array made that a false positive: an unordered re-fetch of
+ * byte-identical data could hash differently and flip `isStale` to true
+ * with nothing having actually changed (confirmed live immediately after
+ * a fresh Make Planning run). Both collections are logically unordered
+ * SETS of rows keyed by `id`, so they're sorted by `id` before hashing --
+ * this is the actual fix. `config` is a single object, not a collection,
+ * so it needs no reordering.
  */
 export function hashPlanInputs(flights: Flight[], employees: Employee[], config: Config): string {
-  const payload = JSON.stringify({ flights, employees, config });
+  const canonicalFlights = [...flights].sort((a, b) => a.id.localeCompare(b.id));
+  const canonicalEmployees = [...employees].sort((a, b) => a.id.localeCompare(b.id));
+  const payload = JSON.stringify(canonicalizeKeyOrder({ flights: canonicalFlights, employees: canonicalEmployees, config }));
   let hash = 0x811c9dc5;
   for (let i = 0; i < payload.length; i++) {
     hash ^= payload.charCodeAt(i);
