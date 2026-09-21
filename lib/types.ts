@@ -346,6 +346,15 @@ export interface Config {
   // ALL of them are prototype — none has been confirmed as real
   // management policy yet).
   checkin_demand_policy: import("./planning/checkin-demand").CheckinDemandPolicy;
+  // The LIVE Check-in demand policy as of the 2026-09-21 zone-model
+  // cutover — see lib/planning/checkin-zone-demand.ts. checkin_demand_policy
+  // above is kept only because the old per-flight
+  // computeGeneralizedCheckinRequirement/isCheckinApplicable functions
+  // still reference its type; the live pipeline (generate-draft-plan.ts)
+  // reads THIS field for actual Check-in demand/placement now. Same
+  // unconfirmed-prototype status as its predecessor — see that file's doc
+  // comment.
+  zone_checkin_demand_policy: import("./planning/checkin-zone-demand").ZoneCheckinDemandPolicy;
   // Resolved labor-rule values (see lib/labor-rules.ts) — the single
   // source every generator/validator must read instead of hardcoding its
   // own copy of the confirmed OFF-day protections. normal_weekly_off_days

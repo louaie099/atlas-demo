@@ -9,6 +9,11 @@ import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHours
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
 import { getShiftDurationHours } from "../shift-templates";
 import { CONFIGURED_COMPANIES } from "../company-config";
+import { computeForeignCompanyProtectedWindow } from "../foreign-company-window";
+import { TimeWindow } from "../scoring";
+import { CheckinZoneId, CHECKIN_ZONE_IDS } from "../checkin-zones";
+import { aggregateAllZonesDailyDemand, zoneDemandClusters, ZoneDailyDemand } from "./zone-demand-aggregation";
+import { computeDefaultCheckinZonePlacement, ZoneCoverageDuty } from "./checkin-zone-placement";
 
 /** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
 export interface PlanRosterEntryDraft {
@@ -18,12 +23,42 @@ export interface PlanRosterEntryDraft {
   shift_code: string | null;
 }
 
+/**
+ * The pure, not-yet-persisted shape of one checkin_zone_requirements row
+ * (see supabase/migrations/0015_checkin_zones.sql / lib/types.ts's
+ * ZoneCheckinRequirement) -- `id`/`plan_id` are added by the persistence
+ * layer (weekly-plan-service.ts), never computed here, matching
+ * PlanRosterEntryDraft's own convention above.
+ */
+export interface ZoneRequirementDraft {
+  zone: CheckinZoneId;
+  day_of_week: string;
+  window_start: string;
+  window_end: string;
+  required_headcount: number;
+  source: "automatic" | "manual";
+  reasoning: string;
+  contributingFlightIds: string[];
+}
+
 export interface DraftWeeklyPlan {
   weekLabel: string;
   daysOrder: string[];
   requirements: StaffingRequirement[];
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>;
   dutiesByDay: Record<string, GeneratedDuty[]>;
+  // T1 Check-in ZONE model (2026-09-21 cutover) -- computed entirely
+  // separately from the flight-anchored `requirements`/`dutiesByDay`
+  // above (see lib/checkin-zones.ts's module doc comment for why Check-in
+  // is no longer a per-flight requirement at all). `zoneRequirementsByDay`
+  // is DEMAND (aggregateAllZonesDailyDemand/zoneDemandClusters); one entry
+  // per contiguous demand cluster per zone per day. `zoneDutiesByDay` is
+  // DEFAULT PLACEMENT (computeDefaultCheckinZonePlacement) -- a genuinely
+  // separate concept (see that module's doc comment): placement duties
+  // never feed back into or inflate zoneRequirementsByDay's
+  // required_headcount.
+  zoneRequirementsByDay: Record<string, ZoneRequirementDraft[]>;
+  zoneDutiesByDay: Record<string, ZoneCoverageDuty[]>;
   // The full, plan-scoped roster for the week -- every employee, every
   // day, "when are they planned to work and with what shift code" --
   // computed once here so persistence never has to re-derive it from
@@ -65,6 +100,14 @@ export interface DraftWeeklyPlan {
  * informed by what the demand-driven engine actually decided rather than
  * a template that no longer exists for this population.
  */
+function zoneTimeToMinutes(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+function zoneWindowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
+  return zoneTimeToMinutes(a.start) < zoneTimeToMinutes(b.end) && zoneTimeToMinutes(b.start) < zoneTimeToMinutes(a.end);
+}
+
 function runShiftGenerationPass(
   daysOrder: string[],
   employees: Employee[],
@@ -474,6 +517,114 @@ export function generateDraftWeeklyPlan(
     allUnfilled.push(...unfilled);
   }
 
+  // T1 CHECK-IN ZONE MODEL (2026-09-21 cutover) -- runs AFTER every
+  // flight/specialized/company duty above is already placed, exactly per
+  // the confirmed priority order (see checkin-zone-placement.ts's module
+  // doc comment). Two genuinely separate computations, per day:
+  //
+  //  1. ZONE DEMAND (zoneRequirementsByDay) -- the real aggregated
+  //     workload each zone needs, from this week's RAM flight program
+  //     alone (aggregateAllZonesDailyDemand/zoneDemandClusters). Entirely
+  //     independent of how many employees happen to be free.
+  //  2. DEFAULT PLACEMENT (zoneDutiesByDay) -- where an otherwise-idle
+  //     ELIGIBLE rostered employee is positioned once their higher-
+  //     priority duties (dutiesByDay[day], just computed above) are
+  //     placed. Never reads zoneRequirementsByDay as a cap -- see the
+  //     "REQUIRED-STAYS-AT-DEMAND invariant" test in
+  //     tests/checkin-zone-placement.test.ts.
+  const requirementsById = new Map(requirements.map((r) => [r.id, r]));
+  const zoneRequirementsByDay: Record<string, ZoneRequirementDraft[]> = {};
+  const zoneDutiesByDay: Record<string, ZoneCoverageDuty[]> = {};
+
+  for (const day of daysOrder) {
+    const dayFlights = flights.filter((f) => f.day_of_week === day && f.operator_type === "atlas_managed");
+    const zoneDemandByZone = aggregateAllZonesDailyDemand(day, dayFlights, config.zone_checkin_demand_policy);
+
+    const zoneRequirements: ZoneRequirementDraft[] = [];
+    for (const zone of CHECKIN_ZONE_IDS) {
+      const clusters = zoneDemandClusters(zoneDemandByZone[zone]);
+      for (const cluster of clusters) {
+        zoneRequirements.push({
+          zone,
+          day_of_week: day,
+          window_start: cluster.start,
+          window_end: cluster.end,
+          required_headcount: cluster.peak,
+          source: "automatic",
+          reasoning: `Aggregate T1 Check-in demand for ${cluster.start}–${cluster.end} across ${cluster.contributingFlightIds.length} flight(s) sharing this zone (prototype/configurable demand policy, not yet confirmed management policy -- see lib/planning/checkin-zone-demand.ts).`,
+          contributingFlightIds: cluster.contributingFlightIds,
+        });
+      }
+    }
+    zoneRequirementsByDay[day] = zoneRequirements;
+
+    // Busy windows for placement: this day's higher-priority duties
+    // (Gate/Boarding/Profiling/Mesure/foreign-company), using the SAME
+    // protected-window substitution duty-generation.ts's own busyWindows
+    // accumulation uses for a company_config-sourced duty (the requirement's
+    // real unavailability is the wider 4h30 protected window, not its
+    // narrow operational window) -- see generateDutiesForDay's own
+    // busyWindow comment. Foreign-company employees are excluded from
+    // default placement eligibility today regardless (isRedeploymentAllowed
+    // has no confirmed team yet -- see teams.ts), so this mainly matters
+    // for forward-compatibility once a team IS opted in.
+    const busyWindowsForPlacement: Record<string, TimeWindow[]> = {};
+    for (const duty of dutiesByDay[day]) {
+      const requirement = requirementsById.get(duty.requirementId);
+      const flight = flights.find((f) => f.id === duty.flightId);
+      const window: TimeWindow =
+        requirement?.source === "company_config" && flight ? computeForeignCompanyProtectedWindow(flight) : duty.window;
+      busyWindowsForPlacement[duty.employeeId] = [...(busyWindowsForPlacement[duty.employeeId] ?? []), window];
+    }
+
+    // Same day-effective pool shape duty-generation.ts builds internally
+    // (effectiveShiftForDay substituted shift_start/shift_end) -- rest
+    // isn't relevant to default placement (it only fills remaining time of
+    // an already-legal, already-rest-checked shift), so it's left as-is.
+    const dayEffectivePool = employeesForPipeline
+      .map((e) => {
+        const effective = effectiveShiftForDay(e, day, finalGeneratedShiftsByDay[day] ?? []);
+        if (!effective) return null;
+        return { ...e, shift_start: effective.shift_start, shift_end: effective.shift_end };
+      })
+      .filter((e): e is Employee & { shift_start: string; shift_end: string } => e !== null);
+
+    const placementDuties = computeDefaultCheckinZonePlacement(day, dayEffectivePool, busyWindowsForPlacement, zoneDemandByZone);
+    zoneDutiesByDay[day] = placementDuties;
+
+    // A placement duty must always be able to reference a REAL zone
+    // requirement row (checkin_zone_assignments.zone_requirement_id is a
+    // NOT NULL FK -- see the migration), even when that placement happens
+    // during a moment the zone has zero automatic demand (e.g. an idle ACE
+    // positioned in a zone between demand clusters, or entirely outside
+    // any of them). Rather than fabricate a nonzero requirement number
+    // just to have somewhere to attach the assignment, this adds a
+    // required_headcount: 0 "coverage-only" requirement row scoped to
+    // exactly that placement window -- an honest representation of
+    // "someone is positioned here, but the demand engine itself found no
+    // aggregate need at this moment" (deduplicated by identical
+    // zone/day/window so several employees sharing the same free interval
+    // reuse one row, never one row per employee).
+    for (const duty of placementDuties) {
+      const overlapping = zoneRequirements.find((r) => r.zone === duty.zone && zoneWindowsOverlap({ start: r.window_start, end: r.window_end }, duty.window));
+      if (overlapping) continue;
+      const alreadySynthesized = zoneRequirements.find(
+        (r) => r.zone === duty.zone && r.window_start === duty.window.start && r.window_end === duty.window.end && r.required_headcount === 0
+      );
+      if (alreadySynthesized) continue;
+      zoneRequirements.push({
+        zone: duty.zone,
+        day_of_week: day,
+        window_start: duty.window.start,
+        window_end: duty.window.end,
+        required_headcount: 0,
+        source: "automatic",
+        reasoning: `No aggregate T1 Check-in demand computed for ${duty.window.start}–${duty.window.end} in this zone; row exists only so an idle-time default placement here (see checkin-zone-placement.ts) has a real zone requirement to attach to.`,
+        contributingFlightIds: [],
+      });
+    }
+  }
+
   const rosterEntries: PlanRosterEntryDraft[] = [];
   for (const day of daysOrder) {
     for (const employee of employeesForPipeline) {
@@ -552,6 +703,8 @@ export function generateDraftWeeklyPlan(
     requirements,
     generatedShiftsByDay: finalGeneratedShiftsByDay,
     dutiesByDay,
+    zoneRequirementsByDay,
+    zoneDutiesByDay,
     rosterEntries,
     issues,
     configurationIssues,

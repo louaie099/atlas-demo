@@ -80,7 +80,6 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   });
   await persistDraftPlanBundle(supabase, bundle);
 
-  const at535Requirement = requirements.find((r) => r.flight_id === "at535" && r.role === "Check-in")!;
   const at201Boarding = bundle.assignments.filter((a) => {
     const req = requirements.find((r) => r.id === a.staffing_requirement_id);
     return req?.flight_id === "at201" && req.role === "Boarding";
@@ -101,7 +100,12 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
     {
       id: "audit-1",
       step_number: 1,
-      description: `Weekly plan validated — AT535 Check-in requirement computed: baseline ${at535Requirement.baseline_requirement} + overbooking reinforcement ${at535Requirement.additional_requirement} = ${at535Requirement.total_requirement} (gap: ${at535Requirement.total_requirement - 4})`,
+      // Check-in is no longer a per-flight requirement (see
+      // lib/planning/weekly-requirements.ts's 2026-09-21 cutover) — its
+      // coverage is now reported via checkin_zone_requirements/
+      // checkin_zone_assignments (see buildDraftPlanBundle's zoneRequirements),
+      // summarized here instead of one flight's old AT535 number.
+      description: `Weekly plan validated — T1 Check-in zone demand computed across ${bundle.zoneRequirements.length} zone/window requirement(s) for the week (see checkin_zone_requirements).`,
     },
     {
       id: "audit-2",

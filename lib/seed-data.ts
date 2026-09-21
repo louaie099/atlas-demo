@@ -10,6 +10,7 @@ import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycl
 import { usesFixedCycleRotation } from "./teams";
 import { flightDateFor, weekLabelFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
+import { DEFAULT_ZONE_CHECKIN_DEMAND_POLICY } from "./planning/checkin-zone-demand";
 import { DEFAULT_FAIRNESS_WEIGHTS } from "./fairness-config";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
@@ -34,6 +35,7 @@ export const CONFIG: Config = {
   baseline_checkin_requirement: 4,
   overbooking_checkin_reinforcement: 2,
   checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,
+  zone_checkin_demand_policy: DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
   normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
   max_consecutive_off_days: DEFAULT_RULES.maxConsecutiveOffDays,
   renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,

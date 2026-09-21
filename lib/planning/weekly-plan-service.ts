@@ -1,10 +1,22 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { Employee, Flight, Config, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, Assignment, AssignmentModification } from "../types";
+import {
+  Employee,
+  Flight,
+  Config,
+  StaffingRequirement,
+  WeeklyPlan,
+  WeeklyPlanRosterEntry,
+  Assignment,
+  AssignmentModification,
+  ZoneCheckinRequirement,
+  ZoneCheckinAssignment,
+} from "../types";
 import { generateDraftWeeklyPlan } from "./generate-draft-plan";
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
 import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
+import { CheckinZoneId } from "../checkin-zones";
 
 /**
  * Keeps `staffing_requirements` in sync with the flight set a plan is
@@ -148,6 +160,16 @@ export interface DraftPlanBundle {
   plan: WeeklyPlan;
   rosterEntries: WeeklyPlanRosterEntry[];
   assignments: Assignment[];
+  // T1 Check-in ZONE model (2026-09-21 cutover) -- PARALLEL rows, never
+  // merged into `assignments`/`requirements` above (see
+  // supabase/migrations/0015_checkin_zones.sql's doc comment).
+  // `zoneRequirements` is DEMAND (one row per contiguous zone/day demand
+  // cluster); `zoneAssignments` is DEFAULT PLACEMENT, one row per employee
+  // per free interval, source "atlas_generated" -- both distinct from a
+  // human_modified Find Agent zone-gap fill (see the zone-candidates/
+  // zone-assign API routes).
+  zoneRequirements: ZoneCheckinRequirement[];
+  zoneAssignments: ZoneCheckinAssignment[];
   summary: PlanSummary;
 }
 
@@ -212,6 +234,78 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     shift_code: r.shift_code,
   }));
 
+  // T1 Check-in ZONE model (2026-09-21 cutover) -- deterministic ids
+  // mirror the existing `req-<flightId>-<role>`/`assign-<planId>-...`
+  // convention: `zonereq-<planId>-<day>-<zone>-<index>` (index is this
+  // day+zone's own cluster/synthesized-row order, stable across a
+  // byte-identical regeneration) and
+  // `zoneassign-<planId>-<zoneRequirementId>-<employeeId>`.
+  const zoneRequirements: ZoneCheckinRequirement[] = [];
+  const zoneRequirementIdByDayZoneWindow = new Map<string, string>();
+  for (const day of daysOrder) {
+    const perZoneIndex = new Map<CheckinZoneId | string, number>();
+    for (const r of draft.zoneRequirementsByDay[day] ?? []) {
+      const index = perZoneIndex.get(r.zone) ?? 0;
+      perZoneIndex.set(r.zone, index + 1);
+      const id = `zonereq-${planId}-${day}-${r.zone}-${index}`;
+      zoneRequirements.push({
+        id,
+        plan_id: planId,
+        zone: r.zone,
+        day_of_week: r.day_of_week,
+        window_start: r.window_start,
+        window_end: r.window_end,
+        required_headcount: r.required_headcount,
+        source: r.source,
+        reasoning: r.reasoning,
+        contributingFlightIds: r.contributingFlightIds,
+      });
+      zoneRequirementIdByDayZoneWindow.set(`${day}|${r.zone}|${r.window_start}|${r.window_end}`, id);
+    }
+  }
+
+  function findZoneRequirementIdFor(day: string, zone: CheckinZoneId, window: { start: string; end: string }): string {
+    // Placement duties are matched back to the zone requirement row
+    // generate-draft-plan.ts already guaranteed exists for this exact
+    // window (either a real demand cluster or the zero-headcount
+    // "coverage-only" synthesized row -- see that file's own comment) --
+    // this never needs to create a row itself, only look one up.
+    const direct = zoneRequirementIdByDayZoneWindow.get(`${day}|${zone}|${window.start}|${window.end}`);
+    if (direct) return direct;
+    // Fallback: an overlapping (not necessarily identical) window, for
+    // robustness against a future change to the overlap-matching logic in
+    // generate-draft-plan.ts -- picks the first requirement row for this
+    // day/zone that overlaps at all.
+    const candidate = zoneRequirements.find((r) => r.plan_id === planId && r.day_of_week === day && r.zone === zone);
+    if (!candidate) {
+      throw new Error(
+        `No checkin_zone_requirements row found for ${zone} on ${day} at ${window.start}-${window.end} -- generate-draft-plan.ts should have guaranteed one exists for every placement duty's window.`
+      );
+    }
+    return candidate.id;
+  }
+
+  const allZoneDuties = Object.values(draft.zoneDutiesByDay).flat();
+  const zoneAssignments: ZoneCheckinAssignment[] = allZoneDuties.map((d) => {
+    const zoneRequirementId = findZoneRequirementIdFor(d.dayOfWeek, d.zone, d.window);
+    // Suffixed with the placement window (colons stripped) rather than
+    // just <zoneRequirementId>-<employeeId> -- an employee can have TWO
+    // separate free intervals on the same day that both happen to fall
+    // under the same zone requirement row (e.g. two short gaps either
+    // side of a lunch-hour duty, both inside one wide demand cluster);
+    // without this suffix those would collide on the same id.
+    const windowSuffix = `${d.window.start}-${d.window.end}`.replace(/:/g, "");
+    return {
+      id: `zoneassign-${planId}-${zoneRequirementId}-${d.employeeId}-${windowSuffix}`,
+      plan_id: planId,
+      zone_requirement_id: zoneRequirementId,
+      employee_id: d.employeeId,
+      source: "atlas_generated",
+      created_by: null,
+      assigned_at: draft.generatedAt,
+    };
+  });
+
   const allDuties = Object.values(draft.dutiesByDay).flat();
   const assignments: Assignment[] = allDuties.map((d) => ({
     id: `assign-${planId}-${d.requirementId}-${d.employeeId}`,
@@ -232,7 +326,40 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     hardRestViolations: draft.issues.filter((i) => i.type === "rest_violation").length,
   };
 
-  return { plan, rosterEntries, assignments, summary };
+  return { plan, rosterEntries, assignments, zoneRequirements, zoneAssignments, summary };
+}
+
+/**
+ * Persists the T1 Check-in ZONE rows (checkin_zone_requirements, its real
+ * join table checkin_zone_requirement_contributing_flights, and
+ * checkin_zone_assignments) -- shared by persistDraftPlanBundle and
+ * regenerateDraftPlan below, exactly like every other table in this file.
+ * `contributingFlightIds` lives on ZoneCheckinRequirement in memory but is
+ * NOT a column on checkin_zone_requirements itself (see the migration) --
+ * it's split out into its own join-table rows here, never sent as a
+ * nested/JSON column.
+ */
+async function persistZoneRequirementsAndAssignments(
+  supabase: SupabaseClient,
+  zoneRequirements: ZoneCheckinRequirement[],
+  zoneAssignments: ZoneCheckinAssignment[]
+): Promise<void> {
+  if (zoneRequirements.length > 0) {
+    const rows = zoneRequirements.map(({ contributingFlightIds, ...row }) => row);
+    const { error } = await supabase.from("checkin_zone_requirements").insert(rows);
+    if (error) throw new Error(`Persisting checkin zone requirements failed: ${error.message}`);
+
+    const joinRows = zoneRequirements.flatMap((r) => r.contributingFlightIds.map((flight_id) => ({ zone_requirement_id: r.id, flight_id })));
+    if (joinRows.length > 0) {
+      const { error: joinErr } = await supabase.from("checkin_zone_requirement_contributing_flights").insert(joinRows);
+      if (joinErr) throw new Error(`Persisting checkin zone requirement contributing flights failed: ${joinErr.message}`);
+    }
+  }
+
+  if (zoneAssignments.length > 0) {
+    const { error } = await supabase.from("checkin_zone_assignments").insert(zoneAssignments);
+    if (error) throw new Error(`Persisting checkin zone assignments failed: ${error.message}`);
+  }
 }
 
 /** The actual I/O for a freshly-built bundle -- shared by generateDraftPlan below AND lib/reset-database.ts, so Reset Demo persists through this exact same step, never a parallel insert path. */
@@ -249,6 +376,8 @@ export async function persistDraftPlanBundle(supabase: SupabaseClient, bundle: D
     const { error: assignErr } = await supabase.from("assignments").insert(bundle.assignments);
     if (assignErr) throw new Error(`Persisting plan assignments failed: ${assignErr.message}`);
   }
+
+  await persistZoneRequirementsAndAssignments(supabase, bundle.zoneRequirements, bundle.zoneAssignments);
 
   // See verifyPlanPersisted's doc comment: a client library reporting no
   // `error` is NOT proof the write is actually visible to the very next
@@ -556,6 +685,15 @@ export async function regenerateDraftPlan(
   const { error: deleteRosterErr } = await supabase.from("weekly_plan_roster_entries").delete().eq("plan_id", planId);
   if (deleteRosterErr) throw new Error(deleteRosterErr.message);
 
+  // Zone assignments/requirements are wiped and re-inserted exactly like
+  // assignments/roster entries above -- checkin_zone_assignments and
+  // checkin_zone_requirement_contributing_flights both cascade-delete via
+  // their FK to checkin_zone_requirements (see the migration), so deleting
+  // the requirements row is sufficient to clear all three tables for this
+  // plan.
+  const { error: deleteZoneReqErr } = await supabase.from("checkin_zone_requirements").delete().eq("plan_id", planId);
+  if (deleteZoneReqErr) throw new Error(deleteZoneReqErr.message);
+
   await persistStaffingRequirementsForFlights(supabase, flights as Flight[], config);
 
   const bundle = buildDraftPlanBundle({
@@ -592,6 +730,8 @@ export async function regenerateDraftPlan(
     const { error } = await supabase.from("assignments").insert(bundle.assignments);
     if (error) throw new Error(`Persisting plan assignments failed: ${error.message}`);
   }
+
+  await persistZoneRequirementsAndAssignments(supabase, bundle.zoneRequirements, bundle.zoneAssignments);
 
   // Read-your-own-write verification -- this is a permanent safety check,
   // independent of the (now removed) deployed-diagnostics investigation:
