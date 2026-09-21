@@ -68,6 +68,17 @@ create table if not exists checkin_zone_assignments (
   plan_id text not null references weekly_plans(id) on delete cascade,
   zone_requirement_id text not null references checkin_zone_requirements(id) on delete cascade,
   employee_id text not null references employees(id) on delete cascade,
+  -- This EMPLOYEE's own actual covered interval within the parent zone
+  -- requirement's (possibly wider) demand window -- e.g. a requirement
+  -- spanning 07:00-09:15 can have one employee covering only 07:00-08:00
+  -- of it (their free interval was shorter -- see
+  -- lib/planning/checkin-zone-placement.ts). Deliberately NOT assumed to
+  -- equal the parent requirement's window_start/window_end, so Agent
+  -- Schedule renders "T1 Main Check-in · counters 30–76 · 05:45–08:30"
+  -- as this employee's REAL covered time, never the zone's aggregate
+  -- demand window.
+  window_start text not null,
+  window_end text not null,
   -- 'atlas_generated' | 'human_modified' — identical vocabulary to
   -- assignments.source (lib/types.ts's AssignmentSource), so Find Agent's
   -- existing "human modification against a draft plan" semantics apply

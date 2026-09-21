@@ -300,6 +300,8 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
       plan_id: planId,
       zone_requirement_id: zoneRequirementId,
       employee_id: d.employeeId,
+      window_start: d.window.start,
+      window_end: d.window.end,
       source: "atlas_generated",
       created_by: null,
       assigned_at: draft.generatedAt,
@@ -880,15 +882,41 @@ export async function loadPersistedPlanView(
   if (flightErr) throw new Error(flightErr.message);
   const flightIds = (flights ?? []).map((f) => f.id);
 
-  const [rosterEntries, { data: assignments, error: assignErr }, { data: requirements, error: reqErr }, { data: employees, error: empErr }] = await Promise.all([
+  const [
+    rosterEntries,
+    { data: assignments, error: assignErr },
+    { data: requirements, error: reqErr },
+    { data: employees, error: empErr },
+    { data: zoneRequirementRows, error: zoneReqErr },
+    { data: zoneAssignmentRows, error: zoneAssignErr },
+  ] = await Promise.all([
     fetchAllRosterEntriesForPlan(supabase, planId),
     supabase.from("assignments").select("*").eq("plan_id", planId),
     flightIds.length > 0 ? supabase.from("staffing_requirements").select("*").in("flight_id", flightIds) : Promise.resolve({ data: [], error: null }),
     supabase.from("employees").select("*"),
+    supabase.from("checkin_zone_requirements").select("*").eq("plan_id", planId),
+    supabase.from("checkin_zone_assignments").select("*").eq("plan_id", planId),
   ]);
-  if (assignErr || reqErr || empErr) {
-    throw new Error((assignErr || reqErr || empErr)!.message);
+  if (assignErr || reqErr || empErr || zoneReqErr || zoneAssignErr) {
+    throw new Error((assignErr || reqErr || empErr || zoneReqErr || zoneAssignErr)!.message);
   }
+
+  const zoneRequirementIds = (zoneRequirementRows ?? []).map((r) => r.id as string);
+  const { data: contributingFlightRows, error: contribErr } =
+    zoneRequirementIds.length > 0
+      ? await supabase.from("checkin_zone_requirement_contributing_flights").select("*").in("zone_requirement_id", zoneRequirementIds)
+      : { data: [], error: null };
+  if (contribErr) throw new Error(contribErr.message);
+
+  const contributingByRequirement = new Map<string, string[]>();
+  for (const row of contributingFlightRows ?? []) {
+    const key = row.zone_requirement_id as string;
+    contributingByRequirement.set(key, [...(contributingByRequirement.get(key) ?? []), row.flight_id as string]);
+  }
+  const zoneRequirements: ZoneCheckinRequirement[] = (zoneRequirementRows ?? []).map((r) => ({
+    ...(r as Omit<ZoneCheckinRequirement, "contributingFlightIds">),
+    contributingFlightIds: contributingByRequirement.get(r.id as string) ?? [],
+  }));
 
   return buildPersistedWeeklyPlanView(
     plan,
@@ -897,6 +925,8 @@ export async function loadPersistedPlanView(
     requirements as StaffingRequirement[],
     flights as Flight[],
     employees as Employee[],
-    daysOrder
+    daysOrder,
+    zoneRequirements,
+    zoneAssignmentRows as ZoneCheckinAssignment[]
   );
 }

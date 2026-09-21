@@ -420,6 +420,12 @@ export interface ZoneCheckinAssignment {
   plan_id: string;
   zone_requirement_id: string;
   employee_id: string;
+  // This employee's own real covered interval -- may be narrower than the
+  // parent ZoneCheckinRequirement's window_start/window_end (see
+  // supabase/migrations/0015_checkin_zones.sql's doc comment on this
+  // column). Never assumed equal to the parent requirement's window.
+  window_start: string;
+  window_end: string;
   source: AssignmentSource;
   created_by: string | null;
   assigned_at: string;
@@ -461,6 +467,23 @@ export interface AgentScheduleDuty {
 // foreign-company protected commitment, and one or more RAM duties on the
 // same day. Each fact is its own field so the UI composes them rather than
 // picking one label to represent the whole day.
+/**
+ * A T1 Check-in ZONE duty on a specific day -- rendered completely
+ * differently from AgentScheduleDuty ("AT740 · Gate"): a zone duty shows
+ * as "T1 Main Check-in · counters 30–76 · 05:45–08:30", never a flight
+ * number, because a zone duty was never anchored to one specific flight
+ * in the first place (see lib/checkin-zones.ts's module doc comment).
+ * Optional on AgentDayEntry (default/undefined -> render as empty) so the
+ * LIVE pre-persistence preview (weekly-plan-view.ts, not on the
+ * production read path -- see persisted-plan-view.ts for the one that
+ * actually populates this) never needs updating just to keep compiling.
+ */
+export interface AgentZoneDuty {
+  zone: import("./checkin-zones").CheckinZoneId;
+  window: { start: string; end: string };
+  status: "confirmed" | "assigned"; // same provenance convention as AgentScheduleDuty.status
+}
+
 export interface AgentDayEntry {
   dayOfWeek: string;
   status: "working" | "off";
@@ -469,5 +492,6 @@ export interface AgentDayEntry {
   shiftEnd: string | null;
   foreignCommitments: import("./foreign-company-window").ForeignCommitment[];
   duties: AgentScheduleDuty[];
+  zoneDuties?: AgentZoneDuty[];
   issues: import("./planning/validation").PlanIssue[];
 }

@@ -9,12 +9,16 @@ import {
   AgentScheduleEntry,
   AgentDayEntry,
   AgentScheduleDuty,
+  AgentZoneDuty,
+  ZoneCheckinRequirement,
+  ZoneCheckinAssignment,
 } from "../types";
 import { buildRosterViewsFromItems, CoverageItem } from "./weekly-plan-view";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { getShiftTimesAs } from "../shift-templates";
 import { PlanIssue } from "./validation";
+import { CHECKIN_ZONES } from "../checkin-zones";
 
 /**
  * Reads an ALREADY-PERSISTED WeeklyPlan back into the same
@@ -32,11 +36,68 @@ import { PlanIssue } from "./validation";
  * plan's `plan_id` by the caller (a thin DB-read concern, not this pure
  * function's).
  */
+/**
+ * ONE T1 Check-in zone requirement's coverage -- the zone-model analogue
+ * of RosterRequirementView, kept as a genuinely separate type (never
+ * merged into RosterRequirementView, whose `flight` field a zone
+ * requirement has no single equivalent for -- see `contributingFlights`
+ * below instead). `assignedEmployees`/`proposedEmployees` follow the exact
+ * same human_modified/atlas_generated display-bucket convention as
+ * RosterRequirementView.
+ */
+export interface ZoneCoverageView {
+  requirement: ZoneCheckinRequirement;
+  assignedEmployees: Employee[];
+  proposedEmployees: Employee[];
+  gap: number;
+  contributingFlights: Flight[];
+}
+
 export interface PersistedWeeklyPlanView {
   plan: WeeklyPlan;
   flights: Flight[];
   roster: RosterRequirementView[];
   schedule: AgentScheduleEntry[];
+  zoneCoverage: ZoneCoverageView[];
+}
+
+function buildZoneCoverageViews(
+  zoneRequirements: ZoneCheckinRequirement[],
+  zoneAssignments: ZoneCheckinAssignment[],
+  employees: Employee[],
+  flights: Flight[]
+): ZoneCoverageView[] {
+  const employeesById = new Map(employees.map((e) => [e.id, e]));
+  const flightsById = new Map(flights.map((f) => [f.id, f]));
+
+  const views: ZoneCoverageView[] = zoneRequirements.map((requirement) => {
+    const forRequirement = zoneAssignments.filter((a) => a.zone_requirement_id === requirement.id);
+    const assignedIds = Array.from(new Set(forRequirement.filter((a) => a.source === "human_modified").map((a) => a.employee_id)));
+    const proposedIds = Array.from(
+      new Set(forRequirement.filter((a) => a.source === "atlas_generated" && !assignedIds.includes(a.employee_id)).map((a) => a.employee_id))
+    );
+    const assignedEmployees = assignedIds.map((id) => employeesById.get(id)).filter((e): e is Employee => Boolean(e));
+    const proposedEmployees = proposedIds.map((id) => employeesById.get(id)).filter((e): e is Employee => Boolean(e));
+    const contributingFlights = requirement.contributingFlightIds.map((id) => flightsById.get(id)).filter((f): f is Flight => Boolean(f));
+
+    return {
+      requirement,
+      assignedEmployees,
+      proposedEmployees,
+      gap: Math.max(0, requirement.required_headcount - assignedEmployees.length - proposedEmployees.length),
+      contributingFlights,
+    };
+  });
+
+  // Same display ordering convention as buildRosterViewsFromItems: day,
+  // then window start, then a stable zone tie-break.
+  views.sort((a, b) => {
+    if (a.requirement.day_of_week !== b.requirement.day_of_week) return a.requirement.day_of_week.localeCompare(b.requirement.day_of_week);
+    if (a.requirement.window_start !== b.requirement.window_start) return a.requirement.window_start.localeCompare(b.requirement.window_start);
+    return a.requirement.zone.localeCompare(b.requirement.zone);
+  });
+
+  return views;
 }
 
 export function buildPersistedWeeklyPlanView(
@@ -46,7 +107,9 @@ export function buildPersistedWeeklyPlanView(
   requirements: StaffingRequirement[],
   flights: Flight[],
   employees: Employee[],
-  daysOrder: string[]
+  daysOrder: string[],
+  zoneRequirements: ZoneCheckinRequirement[] = [],
+  zoneAssignments: ZoneCheckinAssignment[] = []
 ): PersistedWeeklyPlanView {
   const items: CoverageItem[] = assignments.map((a) => ({
     requirementId: a.staffing_requirement_id,
@@ -69,10 +132,13 @@ export function buildPersistedWeeklyPlanView(
     daysOrder,
     plan.issues,
     rosterEntries,
-    plan.config_snapshot.checkin_demand_policy
+    plan.config_snapshot.checkin_demand_policy,
+    zoneAssignments,
+    zoneRequirements
   );
+  const zoneCoverage = buildZoneCoverageViews(zoneRequirements, zoneAssignments, employees, flights);
 
-  return { plan, flights, roster, schedule };
+  return { plan, flights, roster, schedule, zoneCoverage };
 }
 
 function buildPersistedAgentScheduleEntries(
@@ -83,13 +149,20 @@ function buildPersistedAgentScheduleEntries(
   daysOrder: string[],
   planIssues: PlanIssue[],
   rosterEntries: WeeklyPlanRosterEntry[],
-  checkinPolicy: import("./checkin-demand").CheckinDemandPolicy
+  checkinPolicy: import("./checkin-demand").CheckinDemandPolicy,
+  zoneAssignments: ZoneCheckinAssignment[] = [],
+  zoneRequirements: ZoneCheckinRequirement[] = []
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
   const rosterByEmployeeDay = new Map<string, WeeklyPlanRosterEntry>(
     rosterEntries.map((r) => [`${r.employee_id}|${r.day_of_week}`, r])
   );
+  const zoneRequirementsById = new Map<string, ZoneCheckinRequirement>(zoneRequirements.map((r) => [r.id, r]));
+  const zoneAssignmentsByEmployee = new Map<string, ZoneCheckinAssignment[]>();
+  for (const za of zoneAssignments) {
+    zoneAssignmentsByEmployee.set(za.employee_id, [...(zoneAssignmentsByEmployee.get(za.employee_id) ?? []), za]);
+  }
 
   const issuesByEmployeeDay = new Map<string, PlanIssue[]>();
   const weeklyIssuesByEmployee = new Map<string, PlanIssue[]>();
@@ -146,6 +219,19 @@ function buildPersistedAgentScheduleEntries(
         }
         dayDuties.sort((a, b) => a.window.start.localeCompare(b.window.start));
 
+        const zoneDuties: AgentZoneDuty[] = (zoneAssignmentsByEmployee.get(employee.id) ?? [])
+          .map((za) => {
+            const requirement = zoneRequirementsById.get(za.zone_requirement_id);
+            if (!requirement || requirement.day_of_week !== day) return null;
+            return {
+              zone: requirement.zone,
+              window: { start: za.window_start, end: za.window_end },
+              status: (za.source === "human_modified" ? "confirmed" : "assigned") as "confirmed" | "assigned",
+            };
+          })
+          .filter((d): d is AgentZoneDuty => d !== null)
+          .sort((a, b) => a.window.start.localeCompare(b.window.start));
+
         return {
           dayOfWeek: day,
           status: isOff ? "off" : "working",
@@ -154,6 +240,7 @@ function buildPersistedAgentScheduleEntries(
           shiftEnd: shiftTimes?.shift_end ?? null,
           foreignCommitments: foreignCommitmentsAll.filter((c) => c.dayOfWeek === day),
           duties: dayDuties,
+          zoneDuties,
           issues: issuesByEmployeeDay.get(`${employee.id}|${day}`) ?? [],
         };
       });
