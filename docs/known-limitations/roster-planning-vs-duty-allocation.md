@@ -216,6 +216,102 @@ continuity. A genuine cross-week fairness ledger is a larger addition
 working-hours obligation, which also needs a real hours-history), not
 implemented here — flagged, not silently left as if solved.
 
+## T1 Check-in ZONE model — started (RAM Handling / product owner, 2026-09-21)
+
+Confirmed separately, from a real CMN Check-in/Boarding agent: RAM does
+NOT staff Terminal 1 Check-in per flight. RAM operates shared Check-in
+zones; an agent works a zone/counter range and processes passengers from
+whichever flights currently have Check-in open there. The old per-flight
+`checkin-demand.ts`/`weekly-requirements.ts` model (one requirement row
+per flight, agents effectively "belonging" to one flight) overstates
+demand and misrepresents the real operation. The confirmed real pipeline
+is:
+
+> RAM flight program → which T1 zone each flight uses → which flights
+> currently have Check-in open → combined workload in that zone →
+> required T1 Check-in workforce → agents assigned to the zone/counters.
+
+**Confirmed and implemented this session:**
+- The six-zone taxonomy (`lib/checkin-zones.ts`): Upper floor Main
+  Check-in (30–76), Upper floor Business Check-in (76–86), Floor 0
+  Italy/Spain (1–19), Floor 0 Domestic (20–26), Staff Check-in (26–30),
+  Oversized Baggage (one dedicated function). Business/Staff/Oversized
+  exist as real, addressable zones but get NO invented automatic demand
+  formula (`demandMode: "manual"`) — per the explicit instruction not to
+  fabricate a coefficient "for completeness."
+- Destination-based zone routing (`classifyCheckinZone`) — Italy/Spain
+  routes from destination/IATA data only, never flight number. This is a
+  genuinely SEPARATE classification axis from
+  `classifyDestinationOperationally`'s RAM operational category (Spain is
+  "Europe/Schengen" for Gate/Boarding/Profiling purposes and
+  "Italy/Spain zone" for Check-in purposes — two unrelated facts about
+  the same destination, deliberately not merged).
+- Zone-level, time-bucketed AGGREGATE demand (`lib/planning/checkin-zone-
+  demand.ts`, `lib/planning/zone-demand-aggregation.ts`) — the shared
+  per-zone `base_agents` is applied ONCE per 30-minute bucket that has any
+  active flight, with each flight contributing only its own incremental
+  complexity delta (destination category / Dreamliner / booking pressure)
+  on top, floored by a per-active-flight minimum. This reuses
+  `checkin-demand.ts`'s existing prototype coefficients (still entirely
+  `unconfirmed_prototype`-grade — none of these numbers are real RAM
+  policy) rather than inventing a new "real-sounding" formula.
+- DEFAULT idle-time T1 Check-in PLACEMENT
+  (`lib/planning/checkin-zone-placement.ts`) — for a rostered General T1
+  ACE (or any other ACE population `isRedeploymentAllowed` already
+  permits), after existing higher-priority duties are placed, their
+  remaining free shift interval(s) default to Check-in zone coverage,
+  split around existing commitments so the timeline never overlaps.
+  Reuses `isTransitTeam`/`isFixedPlanningTeam`/`isProfilingOrMesureAssigned`/
+  `isRedeploymentAllowed` exactly, never a parallel eligibility engine.
+  Explicitly kept as a SEPARATE concept from zone DEMAND — a placement
+  duty's existence never inflates a zone's `required_headcount`; the two
+  are computed by entirely independent functions (`tests/checkin-zone-
+  placement.test.ts`'s "REQUIRED-STAYS-AT-DEMAND invariant" test proves
+  this directly: placement always places every eligible idle employee
+  regardless of what any zone's own demand happens to require).
+- Persistence schema for the parallel zone-requirement/zone-assignment
+  model (`supabase/migrations/0015_checkin_zones.sql`,
+  `ZoneCheckinRequirement`/`ZoneCheckinAssignment` in `lib/types.ts`) —
+  new tables alongside the existing flight-anchored
+  `staffing_requirements`/`assignments`, with a real join table
+  (`checkin_zone_requirement_contributing_flights`) for the
+  zone-to-contributing-flights relationship rather than a JSON blob.
+
+**Deliberately NOT done this session (flagged, not hand-waved):**
+- The new zone engine is NOT yet wired into `generate-draft-plan.ts`'s
+  live pipeline in place of the old per-flight Check-in path, the new
+  persistence tables are NOT yet written to by `weekly-plan-service.ts`,
+  and Flight Coverage / Agent Schedule / the summary bar / Find Agent are
+  NOT yet zone-aware. The old per-flight Check-in requirement
+  (`checkin-demand.ts`, still referenced from `weekly-requirements.ts`)
+  remains the one actually driving the displayed Weekly Plan and the
+  regression suite. Removing it live requires touching demand
+  aggregation's contribution to flexible-pool shift generation (a much
+  larger blast radius than Check-in display alone — Stage 6's own
+  rostering volume is partly driven by aggregate role demand, which today
+  includes per-flight Check-in), the persisted-plan-view/weekly-plan-view
+  read paths, the API routes Find Agent depends on, and a meaningful
+  fraction of the existing regression suite's specific numeric
+  assertions. Given the explicit instruction to keep every existing
+  Gate/Boarding/Profiling/Mesure/foreign-company test and behavior
+  unchanged, that full cutover was judged too large a single-session
+  change to make safely and is left as a well-tested, ready-to-integrate
+  standalone subsystem rather than a rushed, partially-verified live
+  swap. See the delivered report for the exact reasoning and the
+  suggested next step (a dedicated cutover pass that updates
+  `generate-draft-plan.ts`, the two plan-view builders, the UI
+  components, and the affected test files together).
+- Zone-specific qualifications (e.g. "Main Check-in qualified" vs
+  "Italy/Spain qualified") are NOT modeled — any Check-in-qualified ACE is
+  eligible for any ordinary zone today, per the explicit instruction not
+  to invent this distinction; `Employee` carries no field for it yet
+  (a future optional zone-qualification list is the intended extension
+  point, left unused/empty rather than hardcoded absent everywhere).
+- The exact counter boundaries at 76 (Main/Business) and 26
+  (Domestic/Staff) remain literal, unresolved overlaps — see
+  `lib/checkin-zones.ts`'s `overlapsWith` field — pending a real decision
+  from RAM Handling, never silently picked.
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
