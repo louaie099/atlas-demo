@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { maxConsecutiveOffCyclic, checkConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
-import { checkConsecutiveOff } from "../lib/planning/validation";
+import { maxConsecutiveOffCyclic, checkConsecutiveOffCyclic, checkOffDaysSeparated } from "../lib/planning/consecutive-off";
+import { checkConsecutiveOff, checkSeparatedOffDays } from "../lib/planning/validation";
 import { EMPLOYEES, CONFIG } from "../lib/seed-data";
 import { Employee, WeeklyShiftEntry } from "../lib/types";
 
@@ -67,6 +67,44 @@ describe("checkConsecutiveOff (validation wiring)", () => {
       { assignment: "Transit" }
     );
     expect(checkConsecutiveOff(employee, CONFIG)).toBeNull();
+  });
+});
+
+describe("checkOffDaysSeparated / checkSeparatedOffDays (Part 2 — soft consecutive-OFF preference)", () => {
+  it("does not flag a normal employee whose 2 OFF days ARE consecutive", () => {
+    const employee = makeEmployee(
+      DAYS.map((d, i) => ({ day_of_week: d, shift_code: i < 5 ? "MT01" : null, status: i < 5 ? "working" : "off" }))
+    );
+    expect(checkOffDaysSeparated(employee, DAYS, CONFIG.normal_weekly_off_days)).toBeNull();
+    expect(checkSeparatedOffDays(employee, DAYS, CONFIG)).toBeNull();
+  });
+
+  it("flags (but never blocks) a legal separated-OFF pattern, e.g. WORK-OFF-WORK-WORK-OFF-WORK-WORK", () => {
+    const pattern = ["W", "O", "W", "W", "O", "W", "W"] as const;
+    const employee = makeEmployee(
+      DAYS.map((d, i) => ({ day_of_week: d, shift_code: pattern[i] === "W" ? "MT01" : null, status: pattern[i] === "W" ? "working" : "off" }))
+    );
+    const finding = checkOffDaysSeparated(employee, DAYS, CONFIG.normal_weekly_off_days);
+    expect(finding).not.toBeNull();
+    expect(finding!.offDays).toEqual(["Tuesday", "Friday"]);
+    const issue = checkSeparatedOffDays(employee, DAYS, CONFIG);
+    expect(issue?.type).toBe("separated_off_days");
+  });
+
+  it("never flags a Transit/Leaders (fixed-cycle) employee — governed by their own confirmed rotation, not this general preference", () => {
+    const pattern = ["W", "O", "W", "W", "O", "W", "W"] as const;
+    const employee = makeEmployee(
+      DAYS.map((d, i) => ({ day_of_week: d, shift_code: pattern[i] === "W" ? "JR02" : null, status: pattern[i] === "W" ? "working" : "off" })),
+      { assignment: "Transit" }
+    );
+    expect(checkSeparatedOffDays(employee, DAYS, CONFIG)).toBeNull();
+  });
+
+  it("does not flag an employee whose OFF-day count differs from the confirmed normal target (out of scope for this preference)", () => {
+    const employee = makeEmployee(
+      DAYS.map((d, i) => ({ day_of_week: d, shift_code: i < 6 ? "MT01" : null, status: i < 6 ? "working" : "off" })) // only 1 OFF day
+    );
+    expect(checkOffDaysSeparated(employee, DAYS, CONFIG.normal_weekly_off_days)).toBeNull();
   });
 });
 

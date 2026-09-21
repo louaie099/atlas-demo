@@ -148,10 +148,46 @@ gathered from that:
   compatible RAM shifts, not a blindly-applied fixed cycle. Do not
   generalize any one team's confirmed shape onto another.
 
-None of the above is wired into generation yet — see
+The working-HOURS obligation number/shape is still unwired (see
 `lib/planning/roster-obligation.ts`'s doc comment for why implementing
 against a partially-confirmed principle without a real number would
-repeat exactly the mistake this document exists to prevent.
+repeat exactly the mistake this document exists to prevent) — but see the
+2026-09-21 update immediately below for what IS now wired.
+
+## Confirmed and implemented (RAM Handling / product owner, 2026-09-21)
+
+Two further, narrower facts were confirmed and are now implemented in
+`lib/planning/roster-generation.ts`'s `generateObligationToppedUpShifts`
+(see that module's own doc comment for the full mechanism):
+
+- **"5 WORK + 2 OFF, independent of demand" is its own confirmed rule,
+  separate from the still-unconfirmed hours number.** A normal flexible
+  ACE is now topped up toward `daysOrder.length -
+  config.normal_weekly_off_days` worked days EVERY run, regardless of
+  whether `working_hours_obligation_hours` is ever configured — this was
+  previously a complete no-op while that number stayed `null` (today's
+  real-world default), which is exactly the "OFF all week" / "1-2 days
+  worked" outcome this document originally flagged as unacceptable. The
+  heavy-week stress test's 33-employees-OFF-all-week and
+  66%-consecutive-OFF-violation findings (below) are now 0 and ~16%
+  respectively under the SAME synthetic 152-flight week — see the
+  before/after benchmark the product owner requested, recorded in the
+  delivered session report.
+- **Consecutive OFF days is a confirmed SOFT preference, never a hard
+  constraint.** When there's a real choice of which days to leave OFF,
+  the top-up stage prefers to consolidate the 2 OFF days into one block
+  (e.g. Sat/Sun) — but a legal SEPARATED pattern (e.g. Tue + Fri) remains
+  fully valid whenever consecutive isn't achievable without a real
+  staffing/rest tradeoff. See `lib/planning/validation.ts`'s
+  `separated_off_days` PlanIssue (a non-blocking recommendation, distinct
+  from the unrelated, unchanged, hard `consecutive_off_violation` ceiling)
+  and `lib/planning/consecutive-off.ts`'s `checkOffDaysSeparated`.
+
+Still NOT confirmed, and NOT guessed: the actual weekly-hours obligation
+number/shape (`working_hours_obligation_hours`) and its reference period
+(`working_hours_obligation_reference_period_days`) — both remain `null`
+until management provides a real value; the day-count top-up above does
+not depend on either.
 
 ## Sequencing
 
@@ -171,8 +207,10 @@ repeat exactly the mistake this document exists to prevent.
    number/shape, not just the principle) with management — still open,
    blocks step 6 entirely.
 6. Redesign roster generation (Stage 6) against the confirmed obligation,
-   jointly with everything listed above — not started; data-model
-   scaffolding only (`working_hours_obligation_hours`,
-   `roster-obligation.ts`) is in place so step 6 has a real place to read
-   a confirmed number from once it exists, without guessing in the
-   meantime.
+   jointly with everything listed above — PARTIALLY DONE (2026-09-21):
+   the "5 WORK + 2 OFF, independent of demand" day-count rule and the
+   consecutive-OFF soft preference are implemented and always-on for the
+   general flexible ACE pool (see the confirmed-and-implemented section
+   above). The weekly-HOURS obligation top-up remains fully scaffolded
+   but inert (`working_hours_obligation_hours` stays `null`) until
+   management confirms the real number/shape — nothing here guesses it.

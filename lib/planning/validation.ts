@@ -3,7 +3,7 @@ import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
 import { evaluateAverageWorkingHours } from "./average-hours";
 import { usesFixedCycleRotation } from "../teams";
-import { checkConsecutiveOffCyclic } from "./consecutive-off";
+import { checkConsecutiveOffCyclic, checkOffDaysSeparated } from "./consecutive-off";
 // JR_NT_OFF_OFF_CYCLE is imported directly (not looked up per-team) because
 // every fixed-cycle team today shares this one confirmed cycle definition
 // (see lib/teams.ts's FIXED_CYCLE_TEAMS and lib/employee-generator.ts's
@@ -35,12 +35,24 @@ import { isGenerationDrivenPopulation } from "./workforce-pools";
 // type surfaces the same finding as a visible, non-blocking warning
 // instead (see checkRestBetweenDays and enforceRestInvariantAcrossWeek's
 // own doc comments for the full reasoning).
+// "separated_off_days" is a NEW, SOFT, non-blocking recommendation (Part
+// 2 of the product owner's confirmed guidance) — distinct from the hard
+// `consecutive_off_violation` above (the unrelated max-2-consecutive-OFF
+// ceiling, unchanged). It flags a normal flexible employee whose two
+// (config.normal_weekly_off_days) OFF days in this displayed window are
+// legal but SEPARATED rather than one consecutive block — never a
+// validation failure, just a recommendation surfaced in Plan Warnings so
+// a planner can see it and decide whether operational reality justifies
+// it (see lib/planning/consecutive-off.ts's checkOffDaysSeparated and
+// roster-generation.ts's own consecutive-OFF preference, which already
+// tries to avoid this outcome whenever legally possible).
 export type PlanIssueType =
   | "unfilled_duty"
   | "rest_violation"
   | "weekly_hours_violation"
   | "consecutive_off_violation"
-  | "cross_week_continuity_uncertain";
+  | "cross_week_continuity_uncertain"
+  | "separated_off_days";
 
 export interface PlanIssue {
   type: PlanIssueType;
@@ -345,6 +357,26 @@ export function checkConsecutiveOff(employee: Employee, config: Config): PlanIss
 }
 
 /**
+ * SOFT recommendation (Part 2, confirmed): a normal flexible employee's
+ * two OFF days are legal either way, but consecutive is preferred where
+ * operationally possible. Fixed-cycle teams (Transit/Leaders/Duty
+ * Officers) are excluded, exactly like checkConsecutiveOff above — their
+ * own confirmed rotation shape governs them, not this general preference.
+ * Never returns anything for an employee outside the confirmed
+ * normal-OFF-day count (see checkOffDaysSeparated's own doc comment).
+ */
+export function checkSeparatedOffDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue | null {
+  if (usesFixedCycleRotation(employee.assignment)) return null;
+  const finding = checkOffDaysSeparated(employee, daysOrder, config.normal_weekly_off_days);
+  if (!finding) return null;
+  return {
+    type: "separated_off_days",
+    employeeId: employee.id,
+    description: `${employee.name}: OFF days (${finding.offDays.join(", ")}) are legal but separated rather than one consecutive block — consecutive OFF days are preferred where operationally possible, though a separated pattern remains fully valid.`,
+  };
+}
+
+/**
  * Stage 10 of the planning pipeline. Deliberately does NOT include a
  * separate overlap detector — generateDutiesForDay already prevents
  * overlapping assignments by construction (proven by
@@ -382,6 +414,8 @@ export function validateWeeklyPlan(
     if (hoursIssue) issues.push(hoursIssue);
     const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);
+    const separatedOffIssue = checkSeparatedOffDays(employee, daysOrder, config);
+    if (separatedOffIssue) issues.push(separatedOffIssue);
   }
 
   return issues;

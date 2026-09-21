@@ -435,13 +435,22 @@ describe("weekly-plan-service — loadPersistedPlanView", () => {
     // The specific employee most likely to land past row 1000 in
     // insertion order (last in the seed array, i.e. the last-generated
     // group) must resolve to a genuine, non-default Sunday status --
-    // never silently coerced to "off" by a missing row.
+    // never silently coerced to "off" by a missing row. Compared against
+    // the draft's own real GENERATED roster entry for this employee/day
+    // (never Employee.weekly_shifts -- that static baseline is
+    // documented as a non-authoritative fallback for the flexible pool,
+    // e.g. once roster-generation.ts's confirmed "5 WORK + 2 OFF"
+    // top-up -- see docs/known-limitations/roster-planning-vs-duty-
+    // allocation.md -- legitimately schedules this employee on a day
+    // their static template shows as off).
     const lastEmployee = EMPLOYEES[EMPLOYEES.length - 1];
     const lastEntry = view!.schedule.find((e) => e.employee.id === lastEmployee.id);
     expect(lastEntry).toBeDefined();
     const lastSunday = lastEntry!.days.find((d) => d.dayOfWeek === "Sunday")!;
-    const expectedSunday = lastEmployee.weekly_shifts.find((s) => s.day_of_week === "Sunday")!;
-    expect(lastSunday.status).toBe(expectedSunday.status);
+    const persistedRosterRows = (fake.from("weekly_plan_roster_entries").rows ?? []) as { employee_id: string; day_of_week: string; status: "working" | "off" }[];
+    const expectedEntry = persistedRosterRows.find((r) => r.employee_id === lastEmployee.id && r.day_of_week === "Sunday");
+    expect(expectedEntry).toBeDefined();
+    expect(lastSunday.status).toBe(expectedEntry!.status);
   });
 });
 

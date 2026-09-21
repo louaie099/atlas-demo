@@ -47,6 +47,54 @@ export interface ConsecutiveOffViolation {
   maxConsecutiveOffDays: number;
 }
 
+export interface SeparatedOffDaysFinding {
+  employeeId: string;
+  employeeName: string;
+  offDays: string[];
+}
+
+/**
+ * SOFT preference check (Part 2 of the product owner's confirmed
+ * guidance): a normal flexible employee's `normalWeeklyOffDays` OFF days
+ * should normally form ONE CONSECUTIVE block within the displayed window
+ * (e.g. Sat/Sun) — but a legal SEPARATED pattern (e.g. Tue + Fri) must
+ * remain fully valid, never blocked. This function only ever FLAGS, never
+ * fails, that softer case — see lib/planning/validation.ts's
+ * `separated_off_days` PlanIssue, wired in as a non-blocking Plan Warning
+ * distinct from `consecutive_off_violation` (the unrelated, unchanged,
+ * hard max-2-consecutive-OFF ceiling).
+ *
+ * Deliberately scoped to EXACTLY `normalWeeklyOffDays` OFF days in this
+ * window: an employee with a different OFF-day count already has a
+ * different, more specific finding elsewhere (an obligation shortfall,
+ * an unfilled_duty, or a consecutive_off_violation) — this preference is
+ * only meaningful once the normal 5-worked/`normalWeeklyOffDays`-OFF
+ * shape itself is already met.
+ *
+ * Reuses maxConsecutiveOffCyclic (the same wraparound-aware run-length
+ * convention as the hard check above) rather than a separate ad-hoc
+ * adjacency test: the OFF days are consecutive, in the cyclic sense this
+ * whole module already uses, exactly when the longest OFF run equals the
+ * total OFF-day count (i.e. every OFF day belongs to the same one run).
+ */
+export function checkOffDaysSeparated(
+  employee: Employee,
+  daysOrder: string[],
+  normalWeeklyOffDays: number
+): SeparatedOffDaysFinding | null {
+  const statusByDay = daysOrder.map((day) => {
+    const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
+    return { status: (entry?.status ?? "off") as "working" | "off" };
+  });
+  const offDays = daysOrder.filter((day, i) => statusByDay[i].status === "off");
+  if (offDays.length !== normalWeeklyOffDays) return null; // out of scope for this preference — see doc comment above
+
+  const longestRun = maxConsecutiveOffCyclic(statusByDay);
+  if (longestRun >= offDays.length) return null; // already one consecutive block — compliant with the preference
+
+  return { employeeId: employee.id, employeeName: employee.name, offDays };
+}
+
 /**
  * Checks one employee's weekly_shifts (already in day order) for a
  * consecutive-OFF violation against the RESOLVED labor-rule threshold
