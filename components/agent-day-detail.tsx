@@ -1,7 +1,8 @@
-import { AgentDayEntry, AgentScheduleDuty } from "@/lib/types";
+import { AgentDayEntry, AgentScheduleDuty, AgentZoneDuty } from "@/lib/types";
 import { Badge } from "./ui";
 import { TeamBadge } from "./team-badge";
 import { ROSTER_COLORS } from "@/lib/roster-colors";
+import { CHECKIN_ZONES } from "@/lib/checkin-zones";
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
@@ -64,6 +65,22 @@ function buildTimeline(day: AgentDayEntry): Segment[] {
       tone: d.status,
     });
   }
+  // T1 Check-in ZONE duties -- rendered with the zone's own label, never a
+  // flight number (a zone duty was never anchored to one specific flight
+  // in the first place; see lib/checkin-zones.ts). Same confirmed/assigned
+  // tone convention as an ordinary flight duty.
+  for (const z of day.zoneDuties ?? []) {
+    let s = timeToMinutes(z.window.start);
+    let e = timeToMinutes(z.window.end);
+    if (s < shiftStartMin) s += 1440;
+    if (e <= s) e += 1440;
+    events.push({
+      startMin: s,
+      endMin: e,
+      label: CHECKIN_ZONES[z.zone].label,
+      tone: z.status,
+    });
+  }
 
   events.sort((a, b) => a.startMin - b.startMin);
 
@@ -90,6 +107,33 @@ function DutyRow({ duty }: { duty: AgentScheduleDuty }) {
       <div>
         <span className="font-medium text-ink">{duty.flightNumber}</span>{" "}
         <span className="text-muted">· {duty.role}</span>{" "}
+        <span className="text-xs text-muted">
+          ({duty.window.start}–{duty.window.end})
+        </span>
+      </div>
+      <Badge tone={duty.status === "assigned" ? "brand" : "good"}>
+        {duty.status === "assigned" ? "Assigned" : "Confirmed"}
+      </Badge>
+    </div>
+  );
+}
+
+/**
+ * "T1 Main Check-in · counters 30–76 · 05:45–08:30" -- never a flight
+ * number or role, per the explicit instruction that a zone duty renders
+ * completely differently from a per-flight one (DutyRow above). This is a
+ * default IDLE-TIME PLACEMENT (see checkin-zone-placement.ts's own doc
+ * comment), not a claim that this employee alone covers the zone's whole
+ * required headcount -- see the zone coverage card for the real
+ * required/assigned/gap numbers.
+ */
+function ZoneDutyRow({ duty }: { duty: AgentZoneDuty }) {
+  const zone = CHECKIN_ZONES[duty.zone];
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm bg-surface rounded-lg px-3 py-2">
+      <div>
+        <span className="font-medium text-ink">{zone.label}</span>{" "}
+        <span className="text-muted">· {zone.countersLabel}</span>{" "}
         <span className="text-xs text-muted">
           ({duty.window.start}–{duty.window.end})
         </span>
@@ -182,10 +226,21 @@ export function AgentDayDetail({ day }: { day: AgentDayEntry }) {
             ))}
           </div>
         </div>
-      ) : (
+      ) : (day.zoneDuties ?? []).length === 0 ? (
         <p className="text-sm text-muted">
           No flight duty generated for this day yet — available to RAM / General T1.
         </p>
+      ) : null}
+
+      {(day.zoneDuties ?? []).length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <h4 className="text-xs font-semibold text-muted uppercase tracking-wide">T1 Check-in zone coverage</h4>
+          <div className="flex flex-col gap-1.5">
+            {(day.zoneDuties ?? []).map((z, i) => (
+              <ZoneDutyRow key={i} duty={z} />
+            ))}
+          </div>
+        </div>
       )}
 
       {day.issues.length > 0 && (

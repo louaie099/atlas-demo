@@ -1,4 +1,5 @@
 import { Flight, RosterRequirementView } from "@/lib/types";
+import { ZoneCoverageView } from "@/lib/planning/persisted-plan-view";
 import { PlanIssue } from "@/lib/planning/validation";
 import { SummaryMetric } from "./summary-drilldown-sheet";
 
@@ -50,11 +51,17 @@ export function PlanningSummaryBar({
   flights,
   roster,
   issues,
+  zoneCoverage,
   onSelectMetric,
 }: {
   flights: Flight[];
   roster: RosterRequirementView[];
   issues: PlanIssue[];
+  // T1 Check-in ZONE coverage -- counted as its OWN bucket below, never
+  // folded into "Requirements covered"/"Staffing gaps" (flight+role slots
+  // above) -- these are two genuinely different kinds of things (see
+  // lib/checkin-zones.ts's module doc comment).
+  zoneCoverage: ZoneCoverageView[];
   // Part 3: each metric is a real drill-down control, not inert text --
   // see summary-drilldown-sheet.tsx and app/planning/page.tsx's own
   // useState for which panel (if any) is open.
@@ -65,6 +72,13 @@ export function PlanningSummaryBar({
 
   const requirementsCovered = roster.filter((v) => v.coverageStatus === "assigned").length;
   const gaps = roster.filter((v) => v.coverageStatus === "gap").length;
+
+  // required_headcount: 0 rows are the "coverage-only" synthesized rows
+  // (see generate-draft-plan.ts) -- not a real demand/coverage fact, so
+  // excluded from both zone tiles below.
+  const meaningfulZoneRequirements = zoneCoverage.filter((v) => v.requirement.required_headcount > 0);
+  const zoneCovered = meaningfulZoneRequirements.filter((v) => v.gap <= 0).length;
+  const zoneGaps = meaningfulZoneRequirements.filter((v) => v.gap > 0).length;
 
   const planWarnings = issues.filter(
     (i) =>
@@ -91,6 +105,20 @@ export function PlanningSummaryBar({
       metric: "covered",
     },
     { label: "Staffing gaps", value: gaps, dot: "bg-bad-500", hint: "Not enough valid people found -- may warrant a renfort decision — click to view and Find Agent", metric: "gaps" },
+    {
+      label: "T1 Check-in zones covered",
+      value: zoneCovered,
+      dot: "bg-brand-100",
+      hint: "T1 Check-in zone/time-window requirements fully staffed (a DIFFERENT kind of number from Requirements covered above — one zone requirement can represent several flights' combined workload, not one flight+role slot) — click to view",
+      metric: "zoneCovered",
+    },
+    {
+      label: "T1 Check-in zone gaps",
+      value: zoneGaps,
+      dot: "bg-bad-50",
+      hint: "T1 Check-in zone/time-window requirements not fully staffed — click to view and Find Agent",
+      metric: "zoneGaps",
+    },
     { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest, weekly-hours, consecutive-OFF, separated-OFF-days, or unconfirmed cross-week continuity issues in this week's plan — click to view", metric: "warnings" },
   ];
 

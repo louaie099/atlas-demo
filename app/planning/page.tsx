@@ -2,9 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Flight, RosterRequirementView, AgentScheduleEntry, WeeklyPlan } from "@/lib/types";
+import { ZoneCoverageView } from "@/lib/planning/persisted-plan-view";
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
+import { ZoneCoverageSection } from "@/components/zone-coverage-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
+import { ZoneFindAgentSheet } from "@/components/zone-find-agent-sheet";
 import { SummaryDrilldownSheet, SummaryMetric } from "@/components/summary-drilldown-sheet";
 import { AddFlightForm } from "@/components/add-flight-form";
 import { ImportFlightsDialog } from "@/components/import-flights-dialog";
@@ -76,16 +79,19 @@ export default function PlanningPage() {
   const [flights, setFlights] = useState<Flight[] | null>(null);
   const [roster, setRoster] = useState<RosterRequirementView[] | null>(null);
   const [schedule, setSchedule] = useState<AgentScheduleEntry[] | null>(null);
+  const [zoneCoverage, setZoneCoverage] = useState<ZoneCoverageView[] | null>(null);
   const [issues, setIssues] = useState<PlanIssue[]>([]);
   const [plan, setPlan] = useState<WeeklyPlan | null | undefined>(undefined); // undefined = not loaded yet
   const [isStale, setIsStale] = useState(false);
   const [openRequirementId, setOpenRequirementId] = useState<string | null>(null);
+  const [openZoneRequirementId, setOpenZoneRequirementId] = useState<string | null>(null);
   // Part 3: which PlanningSummaryBar drill-down (if any) is open, and the
   // real navigation targets it can hand off to -- same useState-driven
   // slide-over pattern as openRequirementId/FindAgentSheet above, never a
   // new top-level page.
   const [openMetric, setOpenMetric] = useState<SummaryMetric | null>(null);
   const [coverageFocus, setCoverageFocus] = useState<{ flightId: string; token: number } | null>(null);
+  const [zoneCoverageFocus, setZoneCoverageFocus] = useState<{ zoneRequirementId: string; token: number } | null>(null);
   const [scheduleFocus, setScheduleFocus] = useState<{ employeeId: string; dayOfWeek?: string; token: number } | null>(null);
 
   // weekStart is the REAL, authoritative selected week -- null only until
@@ -129,6 +135,7 @@ export default function PlanningPage() {
         setFlights(data.flights ?? []);
         setRoster(data.roster ?? []);
         setSchedule(data.schedule ?? []);
+        setZoneCoverage(data.zoneCoverage ?? []);
         setIssues(data.issues ?? []);
         setPlan(data.plan ?? null);
         setIsStale(Boolean(data.isStale));
@@ -181,7 +188,7 @@ export default function PlanningPage() {
 
       <>
           {flights && roster && (
-            <PlanningSummaryBar flights={flights} roster={roster} issues={issues} onSelectMetric={setOpenMetric} />
+            <PlanningSummaryBar flights={flights} roster={roster} issues={issues} zoneCoverage={zoneCoverage ?? []} onSelectMetric={setOpenMetric} />
           )}
 
           <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -260,6 +267,21 @@ export default function PlanningPage() {
                   </div>
                 </div>
               ))}
+
+              {/* T1 Check-in ZONE coverage -- a genuinely separate section
+                  from the per-flight rows above (Check-in is no longer a
+                  per-flight requirement; see lib/checkin-zones.ts). Shown
+                  after every day's flight rows so Flight Coverage still
+                  reads day-by-day, flight-specific coverage first. */}
+              {daysWithData.map((day) => (
+                <ZoneCoverageSection
+                  key={`zone-${day}`}
+                  day={day}
+                  views={(zoneCoverage ?? []).filter((v) => v.requirement.day_of_week === day)}
+                  onFindAgent={setOpenZoneRequirementId}
+                  focus={zoneCoverageFocus}
+                />
+              ))}
             </div>
           )}
 
@@ -277,8 +299,14 @@ export default function PlanningPage() {
           flights={flights}
           roster={roster}
           issues={issues}
+          zoneCoverage={zoneCoverage ?? []}
           onClose={() => setOpenMetric(null)}
           onFindAgent={setOpenRequirementId}
+          onFindZoneAgent={(zoneRequirementId) => {
+            setTab("coverage");
+            setZoneCoverageFocus({ zoneRequirementId, token: Date.now() });
+            setOpenZoneRequirementId(zoneRequirementId);
+          }}
           onNavigateToFlight={(flightId) => {
             setTab("coverage");
             setCoverageFocus({ flightId, token: Date.now() });
@@ -313,6 +341,14 @@ export default function PlanningPage() {
           // week, while the currently-viewed week's own view went stale.
           // Explicitly re-passing the real `weekStart` keeps the refetch
           // scoped to whatever week is actually open.
+          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined)}
+        />
+      )}
+
+      {openZoneRequirementId && (
+        <ZoneFindAgentSheet
+          zoneRequirementId={openZoneRequirementId}
+          onClose={() => setOpenZoneRequirementId(null)}
           onAssigned={() => loadWeeklyPlan(weekStart ?? undefined)}
         />
       )}
