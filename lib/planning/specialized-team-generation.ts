@@ -3,8 +3,37 @@ import { DailyDemand, demandClustersForRole } from "./demand-aggregation";
 import { selectCompatibleShiftCodes, planForeignCompanyDay } from "../foreign-shift-planning";
 import { getCompanyRequiredAgents, getCompanyTeamRoleConfig, TeamRoleConfig } from "../company-config";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
-import { getShiftTimesAs } from "../shift-templates";
+import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
 import { isRedeploymentAllowed } from "../teams";
+
+/**
+ * FAIRNESS FIX (2026-09-21): `assignPoolToWindow`/`assignPoolToWindowWithRoles`
+ * always try their `pool` argument in the order it's given, taking the
+ * first N that fit. When a team's real headcount need is smaller than the
+ * team's size (the normal case — e.g. Air France: 3 needed, 5-person
+ * team), calling both functions with the SAME static pool order every
+ * single day meant the same first N employees were assigned EVERY day,
+ * every week, while the rest of the team sat OFF permanently — not a
+ * business-rule question, a genuine correctness bug that directly
+ * contradicts ATLAS's core fairness goal (confirmed by RAM Handling,
+ * Moses, 2026-09-21: "atlas should spread the work fairly around all the
+ * agents he has").
+ *
+ * This sorts a team's pool by ascending CUMULATIVE assigned hours so far
+ * THIS WINDOW (ties broken by stable original order, so behavior is still
+ * fully deterministic) before every day's assignment call, and the caller
+ * updates the running totals after each day. This is a fairness ORDERING
+ * fix, not a policy magnitude to be left unconfirmed — it doesn't invent
+ * any new headcount, weight, or business number; it only changes WHICH
+ * already-eligible, already-interchangeable team members get picked
+ * first, which is a correctness property this codebase's own stated goal
+ * requires regardless of any confirmed/unconfirmed real-world number.
+ * Applies uniformly to Profiling, Mesure, and every foreign-company team —
+ * no per-team or per-airline special-casing.
+ */
+function sortByLeastUsedFirst(pool: Employee[], usageHours: Map<string, number>): Employee[] {
+  return [...pool].sort((a, b) => (usageHours.get(a.id) ?? 0) - (usageHours.get(b.id) ?? 0));
+}
 
 /**
  * Generation-time roster derivation for the "middle" specialized
@@ -181,11 +210,14 @@ export function generateProfilingMesureShifts(
     const pool = employees.filter((e) => e.active && e.assignment === team);
     const preferExtended = isRedeploymentAllowed(team);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
+    // See sortByLeastUsedFirst's doc comment: spreads work across the
+    // whole team instead of always favoring the same first N in `pool`.
+    const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
 
     for (const day of daysOrder) {
       const clusters = demandClustersForRole(demandByDay[day], team);
       const dayAssignments: { employeeId: string; shiftCode: string }[] = [];
-      let remainingPool = pool;
+      let remainingPool = sortByLeastUsedFirst(pool, usageHours);
 
       for (const cluster of clusters) {
         const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended);
@@ -206,6 +238,7 @@ export function generateProfilingMesureShifts(
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
         generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [team] });
+        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode));
       }
 
       const nextPriorDayShift: PriorDayShiftMap = new Map();
@@ -259,6 +292,11 @@ export function generateForeignCompanyShifts(
     const roleConfig = getCompanyTeamRoleConfig(company);
     const preferExtended = isRedeploymentAllowed(company);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
+    // See sortByLeastUsedFirst's doc comment: spreads work across the
+    // whole company team instead of always favoring the same first N in
+    // `pool` (the bug that left Tarik Idrissi/Widad Idrissi permanently
+    // OFF while Fadwa/Khalid/Marouane Idrissi took every Air France duty).
+    const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
 
     for (const day of daysOrder) {
       const plan = planForeignCompanyDay(company, day, flights);
@@ -266,7 +304,7 @@ export function generateForeignCompanyShifts(
 
       if (plan && headcount !== undefined) {
         const { assigned, shortfall } = assignPoolToWindowWithRoles(
-          pool,
+          sortByLeastUsedFirst(pool, usageHours),
           plan.combinedWindow,
           headcount,
           roleConfig,
@@ -287,6 +325,7 @@ export function generateForeignCompanyShifts(
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
         generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [company] });
+        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode));
       }
 
       const nextPriorDayShift: PriorDayShiftMap = new Map();

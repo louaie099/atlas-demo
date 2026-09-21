@@ -189,6 +189,33 @@ number/shape (`working_hours_obligation_hours`) and its reference period
 until management provides a real value; the day-count top-up above does
 not depend on either.
 
+## Fairness-rotation bug fixed (RAM Handling / product owner, 2026-09-21)
+
+Separately from the above, a real correctness bug was found live: for
+Profiling, Mesure, and every foreign-company team (confirmed on Air
+France — a 5-person team with a confirmed 3/flight headcount need), the
+same first N employees in `specialized-team-generation.ts`'s fixed pool
+order were assigned EVERY duty, every day, every week, while the
+remaining team members sat OFF permanently (Tarik/Widad Idrissi never
+worked a single day while Fadwa/Khalid/Marouane Idrissi took every Air
+France duty). This was not a business-rule ambiguity — "spread work
+fairly across the team" is a stated ATLAS design goal, not an
+unconfirmed number — so it's fixed directly: `assignPoolToWindow`/
+`assignPoolToWindowWithRoles` now receive their pool pre-sorted by
+ascending cumulative assigned hours THIS WINDOW (`sortByLeastUsedFirst`),
+so an idle team member is always preferred over one who's already
+covered several duties this week. See `tests/specialized-team-fairness.test.ts`.
+
+**Known remaining limitation**: this fairness ledger resets every
+generation run — it only spreads work WITHIN one displayed week, not
+across weeks. An employee who worked heavily last week gets no
+advantage-reset this week; nothing yet tracks cumulative hours across
+week boundaries the way `rotation-context.ts` tracks one day of rest
+continuity. A genuine cross-week fairness ledger is a larger addition
+(likely alongside whatever eventually implements the confirmed
+working-hours obligation, which also needs a real hours-history), not
+implemented here — flagged, not silently left as if solved.
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
