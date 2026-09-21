@@ -380,6 +380,42 @@ export interface Config {
   fairness_weights: import("./fairness-config").FairnessWeights;
 }
 
+/**
+ * PARALLEL to StaffingRequirement — a T1 Check-in ZONE's aggregate
+ * required headcount for one day/time-window, never anchored to a single
+ * flight (see supabase/migrations/0015_checkin_zones.sql's doc comment for
+ * why this is a separate table/type rather than a retrofit of
+ * StaffingRequirement). `zone` is one of lib/checkin-zones.ts's
+ * CheckinZoneId values. `contributingFlightIds` is the real, normalized
+ * relationship (a join table in persistence, a plain array once loaded
+ * into memory) to every flight whose Check-in demand fed this
+ * requirement's `required_headcount` — this is what Flight Coverage's
+ * zone drill-down renders.
+ */
+export interface ZoneCheckinRequirement {
+  id: string;
+  plan_id: string;
+  zone: import("./checkin-zones").CheckinZoneId;
+  day_of_week: string;
+  window_start: string; // "HH:mm"
+  window_end: string; // "HH:mm"
+  required_headcount: number;
+  source: "automatic" | "manual";
+  reasoning: string;
+  contributingFlightIds: string[];
+}
+
+/** PARALLEL to Assignment — an employee covering a ZoneCheckinRequirement instead of a StaffingRequirement. Same source/created_by/assigned_at provenance convention as Assignment, so Draft/Published/human-modification/audit semantics generalize unchanged (see AssignmentSource). */
+export interface ZoneCheckinAssignment {
+  id: string;
+  plan_id: string;
+  zone_requirement_id: string;
+  employee_id: string;
+  source: AssignmentSource;
+  created_by: string | null;
+  assigned_at: string;
+}
+
 export interface AgentScheduleEntry {
   employee: Employee;
   dayOff: boolean;
