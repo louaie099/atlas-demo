@@ -15,13 +15,17 @@ export function FindAgentSheet({
   onAssigned: () => void;
 }) {
   const [candidates, setCandidates] = useState<CandidateResult[] | null>(null);
+  const [exclusionSummary, setExclusionSummary] = useState<{ reason: string; count: number }[]>([]);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   function loadCandidates() {
     fetch(`/api/candidates/${requirementId}`)
       .then((r) => r.json())
-      .then((data) => setCandidates(data.candidates ?? []));
+      .then((data) => {
+        setCandidates(data.candidates ?? []);
+        setExclusionSummary(data.exclusionSummary ?? []);
+      });
   }
 
   useEffect(loadCandidates, [requirementId]);
@@ -74,7 +78,23 @@ export function FindAgentSheet({
         )}
 
         {candidates === null && <p className="text-sm text-muted">Evaluating candidates…</p>}
-        {candidates?.length === 0 && <p className="text-sm text-muted">No qualified candidates found.</p>}
+        {candidates?.length === 0 && (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm text-muted">
+              No qualified candidates found{exclusionSummary.length > 0 ? " — here is why every employee was excluded:" : "."}
+            </p>
+            {exclusionSummary.length > 0 && (
+              <ul className="text-xs text-muted bg-surface border border-border rounded-lg px-3 py-2 flex flex-col gap-1">
+                {exclusionSummary.map((e) => (
+                  <li key={e.reason} className="flex items-center justify-between gap-3">
+                    <span>{e.reason}</span>
+                    <span className="font-medium text-ink">{e.count}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-col gap-3">
           {candidates?.map((c) => (

@@ -5,6 +5,7 @@ import { Flight, RosterRequirementView, AgentScheduleEntry, WeeklyPlan } from "@
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
+import { SummaryDrilldownSheet, SummaryMetric } from "@/components/summary-drilldown-sheet";
 import { AddFlightForm } from "@/components/add-flight-form";
 import { ImportFlightsDialog } from "@/components/import-flights-dialog";
 import { WeekNav } from "@/components/week-nav";
@@ -79,6 +80,13 @@ export default function PlanningPage() {
   const [plan, setPlan] = useState<WeeklyPlan | null | undefined>(undefined); // undefined = not loaded yet
   const [isStale, setIsStale] = useState(false);
   const [openRequirementId, setOpenRequirementId] = useState<string | null>(null);
+  // Part 3: which PlanningSummaryBar drill-down (if any) is open, and the
+  // real navigation targets it can hand off to -- same useState-driven
+  // slide-over pattern as openRequirementId/FindAgentSheet above, never a
+  // new top-level page.
+  const [openMetric, setOpenMetric] = useState<SummaryMetric | null>(null);
+  const [coverageFocus, setCoverageFocus] = useState<{ flightId: string; token: number } | null>(null);
+  const [scheduleFocus, setScheduleFocus] = useState<{ employeeId: string; dayOfWeek?: string; token: number } | null>(null);
 
   // weekStart is the REAL, authoritative selected week -- null only until
   // the first response tells us which week the server resolved (see
@@ -172,7 +180,9 @@ export default function PlanningPage() {
       )}
 
       <>
-          {flights && roster && <PlanningSummaryBar flights={flights} roster={roster} issues={issues} />}
+          {flights && roster && (
+            <PlanningSummaryBar flights={flights} roster={roster} issues={issues} onSelectMetric={setOpenMetric} />
+          )}
 
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="flex gap-1 bg-white border border-border rounded-xl2 p-1 self-start">
@@ -244,6 +254,7 @@ export default function PlanningPage() {
                           flight={g.flight}
                           views={g.views}
                           onFindAgent={setOpenRequirementId}
+                          focus={coverageFocus}
                         />
                       ))}
                   </div>
@@ -255,16 +266,54 @@ export default function PlanningPage() {
           {tab === "schedule" && (
             <>
               {schedule === null && <p className="text-sm text-muted">Loading schedule...</p>}
-              {schedule && <AgentScheduleTable schedule={schedule} />}
+              {schedule && <AgentScheduleTable schedule={schedule} focus={scheduleFocus} />}
             </>
           )}
       </>
+
+      {openMetric && flights && roster && (
+        <SummaryDrilldownSheet
+          metric={openMetric}
+          flights={flights}
+          roster={roster}
+          issues={issues}
+          onClose={() => setOpenMetric(null)}
+          onFindAgent={setOpenRequirementId}
+          onNavigateToFlight={(flightId) => {
+            setTab("coverage");
+            setCoverageFocus({ flightId, token: Date.now() });
+          }}
+          onNavigateToWarning={(issue) => {
+            if (issue.employeeId) {
+              setTab("schedule");
+              setScheduleFocus({ employeeId: issue.employeeId, dayOfWeek: issue.dayOfWeek, token: Date.now() });
+            } else if (issue.requirementId) {
+              const view = (roster ?? []).find((v) => v.requirement.id === issue.requirementId);
+              setTab("coverage");
+              if (view) setCoverageFocus({ flightId: view.flight.id, token: Date.now() });
+            }
+          }}
+        />
+      )}
 
       {openRequirementId && (
         <FindAgentSheet
           requirementId={openRequirementId}
           onClose={() => setOpenRequirementId(null)}
-          onAssigned={loadWeeklyPlan}
+          // Real bug fix: passing `loadWeeklyPlan` directly here means
+          // FindAgentSheet's own `onAssigned()` call (no arguments) was
+          // silently refetching loadWeeklyPlan(undefined) -- which
+          // resolves to the DEFAULT demo week (CURRENT_WEEK_START, see
+          // /api/planning/weekly-view's own default), not whatever week
+          // the planner is actually looking at. A Find Agent assignment
+          // made while viewing a future/past week (via Prev/Next) would
+          // silently reset Flight Coverage/Agent Schedule back to the
+          // default week's data right after a successful assign -- the
+          // gap/coverage counts appeared to update, but for the WRONG
+          // week, while the currently-viewed week's own view went stale.
+          // Explicitly re-passing the real `weekStart` keeps the refetch
+          // scoped to whatever week is actually open.
+          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined)}
         />
       )}
     </div>

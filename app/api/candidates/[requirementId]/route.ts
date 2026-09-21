@@ -6,7 +6,89 @@ import { CONFIG, CURRENT_WEEK_START } from "@/lib/seed-data";
 import { planIdForWeek, fetchAllRosterEntriesForPlan } from "@/lib/planning/weekly-plan-service";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
+import { isFixedPlanningTeam, isTransitTeam } from "@/lib/teams";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
+
+function timeToMinutesLocal(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+function windowsOverlapLocal(a: TimeWindow, b: TimeWindow): boolean {
+  return timeToMinutesLocal(a.start) < timeToMinutesLocal(b.end) && timeToMinutesLocal(b.start) < timeToMinutesLocal(a.end);
+}
+
+/**
+ * When scoreCandidates returns zero candidates, a bare "no candidates
+ * found" leaves a Duty Officer with no idea WHY — per the product
+ * owner's explicit ask (Part 4), this reconstructs an honest breakdown
+ * of why each excluded employee was excluded, using the exact same
+ * hard-exclusion predicates scoreCandidates itself applies (see
+ * lib/scoring.ts's own doc comment on its non-negotiable exclusions).
+ * This is reporting only — it never changes who is eligible, and never
+ * offers a bypass for any of these constraints.
+ */
+function buildExclusionSummary(
+  role: string,
+  window: TimeWindow,
+  allNotYetAssigned: Employee[],
+  dayEffectivePool: Employee[],
+  occupiedWindows: Record<string, TimeWindow[]>,
+  requiredAuthorization?: string
+): { reason: string; count: number }[] {
+  const dayEffectiveIds = new Set(dayEffectivePool.map((e) => e.id));
+  const counts = {
+    inactive: 0,
+    offOrNotRostered: 0,
+    fixedOrTransitTeam: 0,
+    overlappingCommitment: 0,
+    noShiftOverlap: 0,
+    notQualifiedOrAuthorized: 0,
+  };
+
+  for (const e of allNotYetAssigned) {
+    if (!e.active) {
+      counts.inactive++;
+      continue;
+    }
+    if (!dayEffectiveIds.has(e.id)) {
+      counts.offOrNotRostered++;
+      continue;
+    }
+    const effective = dayEffectivePool.find((p) => p.id === e.id)!;
+    if (e.is_duty_officer || isFixedPlanningTeam(e.assignment) || (isTransitTeam(e.assignment) && role !== "Transit")) {
+      counts.fixedOrTransitTeam++;
+      continue;
+    }
+    if ((occupiedWindows[e.id] ?? []).some((occupied) => windowsOverlapLocal(occupied, window))) {
+      counts.overlappingCommitment++;
+      continue;
+    }
+    if (!windowsOverlapLocal(window, { start: effective.shift_start!, end: effective.shift_end! })) {
+      counts.noShiftOverlap++;
+      continue;
+    }
+    const qualifies = requiredAuthorization
+      ? effective.foreign_company_authorizations.includes(requiredAuthorization)
+      : effective.skills.includes(role);
+    if (!qualifies) counts.notQualifiedOrAuthorized++;
+    // Anyone who clears every check above already appears in
+    // scoreCandidates' own (recommended/flagged) output — this summary
+    // only needs to explain the zero-candidate case.
+  }
+
+  const labels: Record<keyof typeof counts, string> = {
+    inactive: "Inactive employee record",
+    offOrNotRostered: "OFF or not rostered this day per the current plan",
+    fixedOrTransitTeam: "On a fixed/specialized team or committed to Transit for the full shift",
+    overlappingCommitment: "Already committed to an overlapping duty or protected company window",
+    noShiftOverlap: "Shift does not overlap this requirement's time window at all",
+    notQualifiedOrAuthorized: requiredAuthorization ? `Not authorized for ${requiredAuthorization}` : `Not qualified for ${role}`,
+  };
+
+  return (Object.keys(counts) as (keyof typeof counts)[])
+    .filter((k) => counts[k] > 0)
+    .map((k) => ({ reason: labels[k], count: counts[k] }));
+}
 
 export const dynamic = "force-dynamic";
 
@@ -113,5 +195,13 @@ export async function GET(
   const requiredAuthorization = requirement.source === "company_config" ? targetFlight.airline : undefined;
   const candidates = scoreCandidates(requirement.role, window, candidatePool, effectiveConfig, occupiedWindows, requiredAuthorization);
 
-  return NextResponse.json({ candidates });
+  // Only computed when there's nothing to show — cheap, and never changes
+  // eligibility, only explains it (see buildExclusionSummary's own doc
+  // comment; Part 4 of the product owner's guidance).
+  const exclusionSummary =
+    candidates.length === 0
+      ? buildExclusionSummary(requirement.role, window, notYetAssigned, candidatePool, occupiedWindows, requiredAuthorization)
+      : undefined;
+
+  return NextResponse.json({ candidates, exclusionSummary });
 }

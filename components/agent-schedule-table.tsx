@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AgentScheduleEntry, AgentDayEntry } from "@/lib/types";
 import { Badge } from "./ui";
 import { TeamBadge } from "./team-badge";
@@ -117,9 +117,34 @@ function AgentRow({
   );
 }
 
-export function AgentScheduleTable({ schedule }: { schedule: AgentScheduleEntry[] }) {
+export function AgentScheduleTable({
+  schedule,
+  focus,
+}: {
+  schedule: AgentScheduleEntry[];
+  // Set by a Plan Warnings drill-down click (see planning-summary-bar.tsx
+  // / app/planning/page.tsx) to jump straight to the relevant employee's
+  // row and, when the warning came from a specific day, open that day's
+  // own detail panel -- real navigation from "here is the warning" to
+  // "here is the employee/day it's about," not just a tab switch. `token`
+  // is a nonce so clicking the SAME employee/day again still re-applies
+  // the focus even though the values themselves didn't change.
+  focus?: { employeeId: string; dayOfWeek?: string; token: number } | null;
+}) {
   const [filters, setFilters] = useState<AgentScheduleFilterState>(EMPTY_AGENT_SCHEDULE_FILTERS);
   const [selected, setSelected] = useState<{ entry: AgentScheduleEntry; day: AgentDayEntry } | null>(null);
+
+  useEffect(() => {
+    if (!focus) return;
+    const entry = schedule.find((e) => e.employee.id === focus.employeeId);
+    if (!entry) return;
+    setFilters((f) => ({ ...f, search: entry.employee.name }));
+    if (focus.dayOfWeek) {
+      const day = entry.days.find((d) => d.dayOfWeek === focus.dayOfWeek);
+      if (day) setSelected({ entry, day });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.employeeId, focus?.dayOfWeek, focus?.token]);
 
   const daysOrder = schedule[0]?.days.map((d) => d.dayOfWeek) ?? [];
 

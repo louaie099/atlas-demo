@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Flight, RosterRequirementView } from "@/lib/types";
 import { Badge, Button } from "./ui";
 import { TeamBadge } from "./team-badge";
@@ -118,15 +118,31 @@ export function FlightCoverageRow({
   flight,
   views,
   onFindAgent,
+  focus,
 }: {
   flight: Flight;
   views: RosterRequirementView[];
   onFindAgent: (requirementId: string) => void;
+  // Set by a Staffing Gaps / Requirements Covered drill-down click (see
+  // planning-summary-bar.tsx / app/planning/page.tsx) to auto-expand and
+  // scroll to THIS specific flight's row -- real navigation from "here is
+  // the gap" to "here is the flight and requirement it's on," not just a
+  // tab switch. `token` is a nonce so re-clicking the same flight still
+  // re-triggers the scroll.
+  focus?: { flightId: string; token: number } | null;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const rowRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!focus || focus.flightId !== flight.id) return;
+    setExpanded(true);
+    rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.flightId, focus?.token]);
 
   return (
-    <div className="bg-card border border-border rounded-xl2 shadow-soft overflow-hidden">
+    <div ref={rowRef} className="bg-card border border-border rounded-xl2 shadow-soft overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
