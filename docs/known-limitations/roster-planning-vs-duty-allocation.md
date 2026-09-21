@@ -216,7 +216,7 @@ continuity. A genuine cross-week fairness ledger is a larger addition
 working-hours obligation, which also needs a real hours-history), not
 implemented here — flagged, not silently left as if solved.
 
-## T1 Check-in ZONE model — started (RAM Handling / product owner, 2026-09-21)
+## T1 Check-in ZONE model — LIVE (RAM Handling / product owner, 2026-09-21)
 
 Confirmed separately, from a real CMN Check-in/Boarding agent: RAM does
 NOT staff Terminal 1 Check-in per flight. RAM operates shared Check-in
@@ -230,6 +230,14 @@ is:
 > RAM flight program → which T1 zone each flight uses → which flights
 > currently have Check-in open → combined workload in that zone →
 > required T1 Check-in workforce → agents assigned to the zone/counters.
+
+Update (same day, later cutover pass): the product owner reviewed the
+standalone engine described below and asked for it to actually replace
+the old per-flight path end to end — "a backend engine nobody calls
+doesn't satisfy 'implement this.'" That cutover is now done and is what
+actually drives the displayed Weekly Plan, not the old per-flight
+Check-in requirement. See the new "Confirmed and LIVE" section below for
+exactly what changed and what remains genuinely open.
 
 **Confirmed and implemented this session:**
 - The six-zone taxonomy (`lib/checkin-zones.ts`): Upper floor Main
@@ -277,30 +285,99 @@ is:
   (`checkin_zone_requirement_contributing_flights`) for the
   zone-to-contributing-flights relationship rather than a JSON blob.
 
-**Deliberately NOT done this session (flagged, not hand-waved):**
-- The new zone engine is NOT yet wired into `generate-draft-plan.ts`'s
-  live pipeline in place of the old per-flight Check-in path, the new
-  persistence tables are NOT yet written to by `weekly-plan-service.ts`,
-  and Flight Coverage / Agent Schedule / the summary bar / Find Agent are
-  NOT yet zone-aware. The old per-flight Check-in requirement
-  (`checkin-demand.ts`, still referenced from `weekly-requirements.ts`)
-  remains the one actually driving the displayed Weekly Plan and the
-  regression suite. Removing it live requires touching demand
-  aggregation's contribution to flexible-pool shift generation (a much
-  larger blast radius than Check-in display alone — Stage 6's own
-  rostering volume is partly driven by aggregate role demand, which today
-  includes per-flight Check-in), the persisted-plan-view/weekly-plan-view
-  read paths, the API routes Find Agent depends on, and a meaningful
-  fraction of the existing regression suite's specific numeric
-  assertions. Given the explicit instruction to keep every existing
-  Gate/Boarding/Profiling/Mesure/foreign-company test and behavior
-  unchanged, that full cutover was judged too large a single-session
-  change to make safely and is left as a well-tested, ready-to-integrate
-  standalone subsystem rather than a rushed, partially-verified live
-  swap. See the delivered report for the exact reasoning and the
-  suggested next step (a dedicated cutover pass that updates
-  `generate-draft-plan.ts`, the two plan-view builders, the UI
-  components, and the affected test files together).
+**Confirmed and LIVE (cutover pass, same day):**
+- `lib/planning/weekly-requirements.ts` no longer generates the old
+  per-flight Check-in `StaffingRequirement` row for RAM/atlas_managed
+  flights (`isCheckinApplicable`/`computeGeneralizedCheckinRequirement`
+  are no longer called from the live requirement-generation path). Every
+  other role's requirement row (Gate/Boarding/Profiling/Mesure) for the
+  same flight is untouched. `checkin-demand.ts` and its exports still
+  exist in the codebase — other code/tests may still reference
+  `CheckinDemandPolicy` types — but nothing on the live path invokes it
+  any more.
+- `lib/planning/generate-draft-plan.ts` now calls
+  `aggregateAllZonesDailyDemand`/`zoneDemandClusters` against the week's
+  RAM flights to compute each day's zone requirements BEFORE any
+  placement runs, and calls `computeDefaultCheckinZonePlacement` for
+  eligible rostered employees after Gate/Boarding/Profiling/Mesure/
+  foreign-company duties are placed for the day, reusing
+  `duty-generation.ts`'s exact busy-windows shape. `DraftWeeklyPlan` now
+  carries `zoneRequirementsByDay`/`zoneDutiesByDay` alongside the
+  existing per-flight structures.
+- `lib/planning/weekly-plan-service.ts`'s `buildDraftPlanBundle` builds
+  `ZoneCheckinRequirement`/`ZoneCheckinAssignment` rows with deterministic
+  IDs and persists them into the new `checkin_zone_requirements`/
+  `checkin_zone_assignments`/`checkin_zone_requirement_contributing_flights`
+  tables, following the same Draft/config_snapshot persistence pattern as
+  `staffing_requirements`/`assignments`. `regenerateDraftPlan` deletes and
+  rebuilds these rows by `plan_id` the same way it already does for the
+  flight-anchored tables. `loadPersistedPlanView` reads all three tables
+  back and reassembles `ZoneCheckinRequirement[]` with
+  `contributingFlightIds` for the UI.
+- Flight Coverage now has a dedicated zone-coverage section
+  (`components/zone-coverage-card.tsx`) showing each zone's window,
+  required/assigned/gap, and a drill-down of contributing flights sourced
+  from the join table — kept as a sibling section rather than forced into
+  `flight-coverage-card.tsx`'s per-flight layout. `agent-day-detail.tsx`
+  renders a zone duty as "T1 Main Check-in · counters 30–76 ·
+  HH:MM–HH:MM" using the assignment's OWN `window_start`/`window_end`
+  (not the parent requirement's, potentially wider, window) so a
+  narrower individual placement never gets misrepresented as the whole
+  demand window; every other role's rendering is unchanged.
+  `planning-summary-bar.tsx`/`summary-drilldown-sheet.tsx` add
+  "T1 Check-in zones covered"/"T1 Check-in zone gaps" as their OWN
+  counted bucket, with tooltip copy explicit that this is a different
+  kind of number from "Requirements covered"/"Staffing gaps" (one zone
+  requirement can represent several flights' combined workload, not one
+  flight+role slot).
+- Find Agent has a zone-gap variant: new routes
+  `/api/checkin-zone-candidates/[zoneRequirementId]` and
+  `/api/checkin-zone-assign` (`components/zone-find-agent-sheet.tsx`),
+  reusing `scoreCandidates`/`computeBusyWindowsForDay`/the existing
+  day-effective-pool logic rather than a parallel eligibility engine.
+  Clicking a zone gap in the Staffing Gaps drill-down opens this variant;
+  a successful assignment persists as `human_modified` and updates the
+  zone's coverage, following the same audit convention as `/api/assign`.
+- End-to-end coverage against the real seeded week
+  (`tests/zone-plan-integration.test.ts`) proves the wiring itself, not
+  just the individual unit-tested modules: no per-flight Check-in row is
+  generated any more, `required_headcount` is architecturally independent
+  of how many employees got placed (computed before placement runs at
+  all), only the three ordinary zones ever receive default placement,
+  no employee is ever double-booked across two zone duties on the same
+  day, and every persisted zone assignment references a real zone
+  requirement row (FK integrity).
+- A before/after benchmark on the same 152-flight heavy week (via a git
+  worktree at the pre-cutover commit) confirms every
+  Gate/Boarding/Profiling/Mesure/Company-Team duty count, required count,
+  staffing gap, and hard violation (rest/consecutive-OFF) is
+  byte-identical before and after the cutover. One genuine, expected
+  side effect was found and is reported here rather than hidden: removing
+  Check-in from Stage 6's aggregate demand shifted the flexible pool's own
+  working-day distribution slightly (more people land on the
+  demand-independent "5 WORK + 2 OFF" top-up rather than a
+  demand-driven extra day, since that demand no longer includes
+  Check-in's contribution), which also reduced `separated_off_days`
+  warnings and slightly lowered mean scheduled hours. This is a real,
+  legitimate downstream consequence of correcting the demand model, not a
+  bug — but it is a visible change in the roster shape and should be
+  reviewed by RAM Handling like any other planning-quality shift.
+- Observed characteristic of the current placement heuristic (not a
+  bug, but worth flagging): `pickDefaultZone` always assigns a free
+  interval to whichever ordinary zone has the highest concurrent demand
+  at that interval's midpoint. On the heavy-week benchmark this
+  concentrated the large majority of placement duties into
+  `t1_main_checkin` (401 of 406) and a handful into `t1_italy_spain` (5),
+  with zero landing in `t1_domestic` despite `t1_domestic` having 14
+  non-zero-required requirement rows of its own. The REQUIRED headcount
+  per zone is unaffected (it is computed independently, before
+  placement), but actual staffing coverage in `t1_domestic` on that week
+  relies entirely on Find Agent / renfort rather than default placement.
+  A future improvement could balance placement across zones with unmet
+  demand rather than always picking the single busiest one.
+
+**Still genuinely open (not part of this cutover, flagged not
+hand-waved):**
 - Zone-specific qualifications (e.g. "Main Check-in qualified" vs
   "Italy/Spain qualified") are NOT modeled — any Check-in-qualified ACE is
   eligible for any ordinary zone today, per the explicit instruction not
@@ -311,6 +388,11 @@ is:
   (Domestic/Staff) remain literal, unresolved overlaps — see
   `lib/checkin-zones.ts`'s `overlapsWith` field — pending a real decision
   from RAM Handling, never silently picked.
+- There is no `assignment_modifications`-equivalent audit table for zone
+  assignment edits yet — a zone Find-Agent assignment is persisted and
+  marked `human_modified` on the assignment row itself, but a dedicated
+  history/audit trail (mirroring whatever exists for flight+role
+  assignment edits) was not built this session.
 
 ## Sequencing
 
