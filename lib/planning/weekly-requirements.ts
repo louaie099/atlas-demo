@@ -2,7 +2,6 @@ import { Flight, StaffingRequirement, Config } from "../types";
 import { classifyRamGateAndBoardingRequirements, missingOperationRuleRequirement } from "../operation-rules";
 import { classifyProfilingRequirement, classifyMesureRequirement } from "./specialized-demand";
 import { classifyCompanyRequirement } from "../company-config";
-import { isCheckinApplicable, computeGeneralizedCheckinRequirement } from "./checkin-demand";
 
 /**
  * Classifies a single flight into its staffing requirement(s), using the
@@ -17,20 +16,25 @@ import { isCheckinApplicable, computeGeneralizedCheckinRequirement } from "./che
  *
  * RAM/atlas_managed flights go through operation-rules.ts (Gate +
  * Boarding) plus specialized-demand.ts (Profiling, and Mesure where
- * applicable) plus checkin-demand.ts (Check-in — GENERALIZED to every
- * atlas_managed flight via a configurable/prototype policy, never a
- * single hardcoded flight id; see that file's doc comment for what's
- * confirmed vs prototype). Self-managed (foreign carrier) flights go
- * through company-config.ts instead, and never also get a RAM Check-in
- * row — see isCheckinApplicable.
+ * applicable). Self-managed (foreign carrier) flights go through
+ * company-config.ts instead.
  *
- * Check-in is intentionally NOT gated on the RAM Gate/Boarding/Profiling
- * matrix having an established rule for this flight's (destination
- * category, aircraft) pair — Check-in demand exists independently of
- * whether that separate security-staffing matrix happens to be
- * configured for this destination, so a flight can have a real Check-in
- * requirement even while its Gate/Boarding is reported as
- * needs_configuration.
+ * CHECK-IN — CUT OVER to the T1 ZONE model (2026-09-21): this function no
+ * longer produces a per-flight "Check-in" StaffingRequirement row for any
+ * RAM flight. RAM does not staff Check-in per flight in reality — see
+ * lib/checkin-zones.ts's module doc comment for the confirmed real
+ * pipeline (flight -> zone -> combined zone workload -> required
+ * workforce -> zone assignment). Check-in demand/coverage is now computed
+ * entirely by the zone engine (lib/planning/zone-demand-aggregation.ts,
+ * lib/planning/checkin-zone-placement.ts) and persisted separately (see
+ * checkin_zone_requirements/checkin_zone_assignments,
+ * supabase/migrations/0015_checkin_zones.sql) — never as a
+ * StaffingRequirement row any more. The old per-flight model
+ * (checkin-demand.ts's isCheckinApplicable/computeGeneralizedCheckinRequirement)
+ * is INTENTIONALLY left in the codebase, unreferenced from this live path
+ * — some types/tests still reference CheckinDemandPolicy — but is never
+ * called from here again. Gate/Boarding/Profiling/Mesure generation below
+ * is completely unaffected by this change.
  *
  * MANAGED vs SCHEDULED: a flight existing in the weekly schedule does not
  * by itself mean ATLAS generates workforce coverage for it. A self-managed
@@ -53,27 +57,21 @@ export function classifyFlightRequirements(
     return companyRequirement ? [companyRequirement] : [];
   }
 
-  const checkin = isCheckinApplicable(flight)
-    ? [computeGeneralizedCheckinRequirement(flight, config.checkin_demand_policy)]
-    : [];
-
   const gateAndBoarding = classifyRamGateAndBoardingRequirements(flight);
   if (!gateAndBoarding) {
     // No established rule at all for this (aircraft, destination category)
     // combination — one honest "needs configuration" row for Gate/
     // Boarding/Profiling/Mesure, not a separate fabricated row per role.
-    // Check-in is reported alongside it regardless (see the module doc
-    // comment above) rather than being swallowed by the same
-    // needs_configuration placeholder — they are genuinely independent
-    // facts about this flight.
-    return [...checkin, missingOperationRuleRequirement(flight)];
+    // Check-in is never part of this list any more (see the module doc
+    // comment above) — it's computed entirely by the separate zone engine.
+    return [missingOperationRuleRequirement(flight)];
   }
 
   const specialized = [classifyProfilingRequirement(flight), classifyMesureRequirement(flight)].filter(
     (r): r is Omit<StaffingRequirement, "id" | "flight_id"> => r !== null
   );
 
-  return [...checkin, ...gateAndBoarding, ...specialized];
+  return [...gateAndBoarding, ...specialized];
 }
 
 /**
