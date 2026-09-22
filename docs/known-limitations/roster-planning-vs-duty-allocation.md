@@ -394,6 +394,136 @@ hand-waved):**
   history/audit trail (mirroring whatever exists for flight+role
   assignment edits) was not built this session.
 
+## Foreign-company roster/redeployment/double-booking audit fixed (RAM Handling / product owner, 2026-09-22)
+
+A completed audit (reproduced against the live code, all three cited line
+ranges confirmed unchanged) found three related defects affecting EVERY
+configured foreign company generically (not specific to any one airline
+used in the reproduced examples). All three are now fixed:
+
+1. **Foreign-company employees now get a normal RAM weekly roster.**
+   `specialized-team-generation.ts`'s `generateForeignCompanyShifts`
+   previously left a foreign-company employee with NO roster entry at all
+   (reading as OFF downstream) on any day their own company had no flight,
+   or on a flight day if they weren't one of the N selected — even though
+   they remain RAM Handling employees. Fixed by reusing the SAME
+   "5 WORK + 2 OFF, independent of demand" day-count/consecutive-OFF-
+   preference logic `roster-generation.ts`'s `generateObligationToppedUpShifts`
+   already established for the flexible General T1 pool: that per-employee
+   core was factored out into a new shared function,
+   `computeEmployeeDayCountTopUp` (in `roster-generation.ts`), so the two
+   populations' soft consecutive-OFF preference can never drift apart. A
+   day this top-up adds is a real, honest RAM-compatible working day (the
+   shortest-legal-catalog-code rule, exactly as the flexible pool's own
+   top-up picks) — never a fabricated company duty, and never folded into
+   `isFlexibleGeneralPool` (foreign-company employees remain a distinct
+   population, still excluded from generic Boarding/Gate/Check-in demand
+   matching outside their real company role). `generateForeignCompanyShifts`
+   takes an optional `config` parameter; without it, the top-up is a
+   strict no-op (backward compatible with every existing caller/test).
+   `generate-draft-plan.ts` now passes the real `Config`.
+2. **Cross-team redeployment now defaults to TRUE for every configured
+   foreign company.** `teams.ts`'s `TEAM_REDEPLOYMENT_POLICY` table was
+   empty for every company, so `isRedeploymentAllowed` always returned
+   `false`, silently disabling the "return remaining shift time to RAM T1
+   capacity" mechanism in `checkin-zone-placement.ts` (which was already
+   built correctly). `isRedeploymentAllowed` now defaults to `true` for
+   every entry in `CONFIGURED_COMPANIES`, generically — never a per-
+   airline branch — while an explicit entry in `TEAM_REDEPLOYMENT_POLICY`
+   (still empty today) can still override a specific company if a future
+   exception is confirmed. Transit remains the one hard, non-configurable
+   exception (`isTransitTeam` short-circuits before any table/company
+   lookup, unconditionally). Mesure/Profiling are NOT foreign companies
+   (not in `CONFIGURED_COMPANIES`) and are therefore untouched by this
+   change — their redeployment status remains the separate, still
+   genuinely unconfirmed question it always was; nothing here decides it
+   either way. Fixed/fixed-cycle teams (Leaders/Duty Officers/Caisse-BCB)
+   are likewise never foreign companies, so the new default never reaches
+   them.
+   - A SEPARATE, narrower policy dimension — whether a team's generated
+     shift should PREFER the longest compatible catalog code (deliberately
+     manufacturing MORE redeployment slack than the minimal covering shift
+     naturally leaves) — was split out into its own function,
+     `isShiftExtensionPreferred` (still governed by the now-otherwise-
+     unused `TEAM_REDEPLOYMENT_POLICY` table, so still `false` for every
+     team today). This was investigated and deliberately NOT defaulted to
+     `true` alongside `isRedeploymentAllowed`: doing so caused real
+     rest-feasibility shortfalls in a production-shaped regression test
+     (a deliberately-lengthened shift on one day left insufficient rest
+     before the next day's real commitment) — an unconfirmed, unintended
+     side effect, not a business rule this audit confirmed. The confirmed
+     principle (idle time on an ALREADY-selected, minimally-sized covering
+     shift becomes real RAM capacity) does not require ATLAS to
+     intentionally lengthen anyone's shift, and doesn't depend on this
+     flag to have effect.
+3. **The exact double-booking scenario from the audit is now rejected.**
+   `duty-generation.ts`'s `generateDutiesForDay` clustering pass (the
+   union-find overlap grouping) and its `scoreCandidates` call both used
+   to treat a `company_config` requirement's conflict window as
+   `getRequirementWindow`'s narrow generic default (`departure-45min` to
+   `departure-15min`, since a foreign flight doesn't set
+   `boarding_window_start/end`) rather than the WIDE real protected window
+   (`computeForeignCompanyProtectedWindow`, ~4h30 before departure) that
+   `computeBusyWindowsForDay` already correctly used for busy-blocking.
+   Fixed by computing a `conflictWindows[i]` array (protected window for
+   `company_config` sources, the requirement's own window for everything
+   else) and using it for BOTH the clustering overlap decision AND the
+   `scoreCandidates` call that actually decides eligibility against
+   `busyWindows` — clustering alone was investigated and found
+   insufficient: the double-booking could still occur depending on which
+   of two same-day requirements happened to be resolved first, unless the
+   window used to check a candidate's OTHER busy commitments is also
+   widened for the requirement actually being scored. `getRequirementWindow`
+   itself is UNCHANGED — every RAM (`fixed_rule`/`demand_forecast`)
+   requirement's window, and the requirement's own window as stored on the
+   `GeneratedDuty` (used for display and for RAM-to-RAM busy-window
+   bookkeeping), are exactly as before; only the conflict-detection window
+   for a `company_config` requirement was widened, and only at the two
+   places that decide "does this employee conflict with this company
+   duty."
+
+**Before/after benchmark (same 152-flight heavy week, week of
+2026-09-07, via a git worktree at the pre-fix commit):**
+
+| Metric | Before | After |
+|---|---|---|
+| Foreign-company employees' working-days histogram | `{1:1, 2:20, 3:5, 5:8}` (34 employees, most at 2 days) | `{4:14, 5:20}` (all at 4 or 5 days) |
+| Foreign-company employees OFF all week | 0 | 0 |
+| Double-bookings (employee with two overlapping duties, real protected window vs RAM window) | **9** | **0** |
+| `consecutive_off_violation` (hard) | 23 | 2 |
+| `separated_off_days` (soft) | 32 | 35 |
+| `unfilled_duty` | 4 | 5 |
+| Gate duties / required | 73 / 73 | 73 / 73 (unchanged) |
+| Boarding duties / required | 73 / 73 | 73 / 73 (unchanged) |
+| Profiling duties / required | 60 / 61 | 60 / 61 (unchanged) |
+| Mesure duties / required | 68 / 80 | 68 / 80 (unchanged) |
+| Company Team duties / required | 121 / 121 | 120 / 121 |
+| `rest_violation` (hard) | 0 | 0 |
+| T1 Check-in zone placement duties for foreign-company employees | 0 | 0 (see note below) |
+
+The one Company Team duty that went from filled to unfilled (121→120) is
+the direct, correct consequence of fix #3: the previously double-booked
+employee is no longer silently double-counted as covering both their RAM
+duty and the company duty, so one of the two now correctly shows as a
+real, honest shortfall instead of a fabricated double coverage. Every
+Gate/Boarding/Profiling/Mesure count is byte-identical before and after,
+confirming the fixes are scoped to foreign-company handling only.
+
+**T1 Check-in placement duties for foreign-company employees stayed at
+0 before AND after** — this is a genuine, disclosed limitation of the
+CURRENT SEED DATA, not of the fix: `isEligibleForDefaultCheckinPlacement`
+correctly requires the Check-in skill (an existing, unrelated, unchanged
+requirement — see checkin-zone-placement.ts), and none of this seed
+week's 34 foreign-company employees happen to hold that skill. The
+mechanism itself is directly unit-tested and confirmed working (see
+`tests/foreign-company-redeployment-default.test.ts` and the extended
+`tests/checkin-zone-placement.test.ts`): a foreign-company employee who
+DOES hold the Check-in skill is placed in a T1 Check-in zone for their
+free time outside their protected window, exactly as the confirmed model
+requires. Whether real Gulf Air/Qatar Airways/etc. ACEs hold a Check-in
+qualification in reality is a real-world data question for RAM Handling,
+outside this fix's scope.
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
