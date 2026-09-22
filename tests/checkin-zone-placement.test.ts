@@ -76,10 +76,24 @@ describe("computeDefaultCheckinZonePlacement", () => {
     expect(duties).toEqual([]);
   });
 
-  it("never places a foreign-company-assigned employee whose team redeployment is not allowed", () => {
+  it("DOES place a foreign-company-assigned employee outside their protected window, now that redeployment defaults to true for every configured company (2026-09-22)", () => {
+    // No busy window recorded here -- a real protected window would already
+    // be part of `busy` (see the "protected foreign-company commitment
+    // window" test above and the REDEPLOYMENT tests below), so this
+    // exercises the eligibility gate itself: a Gulf Air-assigned, Check-in-
+    // qualified, otherwise-idle employee is now a real placement candidate.
     const employee = makeEmployee({ id: "e1", assignment: "Gulf Air" });
     const duties = computeDefaultCheckinZonePlacement("Wednesday", [employee], {}, {});
-    expect(duties).toEqual([]); // TEAM_REDEPLOYMENT_POLICY has no entries today -- isRedeploymentAllowed("Gulf Air") is false
+    expect(duties.length).toBe(1);
+    expect(duties[0].employeeId).toBe("e1");
+  });
+
+  it("still never places a foreign-company employee DURING their real protected window -- that window is recorded as busy before this stage ever runs", () => {
+    const employee = makeEmployee({ id: "e1", assignment: "Gulf Air" });
+    const busy = { e1: [{ start: "05:45", end: "10:15" }] }; // protected window covers the shift start
+    const duties = computeDefaultCheckinZonePlacement("Wednesday", [employee], busy, {});
+    expect(duties.length).toBe(1);
+    expect(duties[0].window).toEqual({ start: "10:15", end: "14:45" }); // only the time AFTER the protected window is offered
   });
 
   it("never places an employee without the Check-in skill", () => {

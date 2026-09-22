@@ -165,7 +165,9 @@ const TEAM_REDEPLOYMENT_POLICY: Record<string, boolean> = {};
 
 export function isRedeploymentAllowed(assignment: string): boolean {
   if (isTransitTeam(assignment)) return false; // hard, non-configurable exception — see doc comment above
-  return TEAM_REDEPLOYMENT_POLICY[assignment] === true;
+  if (assignment in TEAM_REDEPLOYMENT_POLICY) return TEAM_REDEPLOYMENT_POLICY[assignment]; // explicit per-team override, if one is ever confirmed
+  if (CONFIGURED_COMPANIES.includes(assignment)) return true; // NEW DEFAULT: every configured foreign company redeploys by default (2026-09-22)
+  return false; // every other team (Mesure/Profiling, fixed-planning teams, General T1) — unchanged, still unconfirmed/not-applicable
 }
 
 /**

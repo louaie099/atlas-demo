@@ -277,12 +277,22 @@ describe("team composition — Gulf Air's confirmed 7 ACE + 1 Leader split", () 
   });
 });
 
-describe("cross-team redeployment — extendable to Mesure/Profiling only via explicit config, Transit never redeployable", () => {
-  it("teams.ts's isRedeploymentAllowed defaults to false for every team and company, and is hard-false for Transit unconditionally", () => {
+describe("cross-team redeployment — default-true for every configured foreign company (2026-09-22), still unconfirmed for Mesure/Profiling, Transit never redeployable", () => {
+  it("teams.ts's isRedeploymentAllowed defaults to TRUE for every configured foreign company, stays false for Mesure/Profiling/fixed-planning teams, and is hard-false for Transit unconditionally", () => {
     expect(isRedeploymentAllowed("Mesure")).toBe(false);
     expect(isRedeploymentAllowed("Profiling")).toBe(false);
-    expect(isRedeploymentAllowed("Gulf Air")).toBe(false);
     expect(isRedeploymentAllowed("Transit")).toBe(false);
+    // Every CONFIGURED_COMPANIES entry redeploys by default now — generic,
+    // never a per-airline special case (see teams.ts's doc comment).
+    for (const company of CONFIGURED_COMPANIES) {
+      expect(isRedeploymentAllowed(company)).toBe(true);
+    }
+    // Fixed-planning/fixed-cycle teams are never foreign companies, so the
+    // new default never reaches them.
+    expect(isRedeploymentAllowed("Leaders")).toBe(false);
+    expect(isRedeploymentAllowed("Duty Officers")).toBe(false);
+    expect(isRedeploymentAllowed("Caisse/BCB")).toBe(false);
+    expect(isRedeploymentAllowed("General T1 Pool")).toBe(false);
   });
 
   it("selectCompatibleShiftCodes' preferExtended flag prefers the LONGEST compatible catalog shift, never changing which codes are eligible", () => {
