@@ -320,6 +320,36 @@ export function generateDutiesForDay(
   // no-double-booking enforcement are all exactly as strict as before --
   // this only changes WHICH ORDER requirements are offered to the same
   // pool, never weakens what counts as eligible.
+  // FIX (2026-09-22 — see docs/known-limitations/roster-planning-vs-duty-
+  // allocation.md's audit finding #3): a company_config requirement's real
+  // conflict window is the WIDE protected window
+  // (computeForeignCompanyProtectedWindow, ~4h30 before departure) — the
+  // SAME window computeBusyWindowsForDay already uses for busy-blocking —
+  // not getRequirementWindow's narrow generic default (which falls
+  // through to `departure-45min` to `departure-15min` for a foreign
+  // flight, since it doesn't set boarding_window_start/end). Using the
+  // narrow window here let a real double-booking through: an employee
+  // could hold both a RAM Boarding duty and a foreign-company duty whose
+  // real protected window swallowed the Boarding duty's operational
+  // window, because the two requirements' narrow windows didn't overlap
+  // even though the employee's real, physical unavailability windows did.
+  //
+  // `conflictWindows[i]` is used ONLY for this clustering overlap decision
+  // and for the scoreCandidates call below (which is what actually decides
+  // eligibility against `busyWindows`) — `dayRequirements[i].window`
+  // itself (the requirement's own displayed/operational window, used for
+  // the GeneratedDuty's stored `window` and its busyWindows entry for
+  // OTHER, RAM requirements) is deliberately left unchanged. Investigated
+  // and confirmed safe: getRequirementWindow's return value is still used
+  // as-is for every RAM (fixed_rule/demand_forecast) requirement — this
+  // only widens the conflict window for `company_config` sources, and
+  // only for the two places that actually decide "does this employee
+  // conflict with this company duty" (clustering + scoreCandidates), never
+  // for what's persisted/displayed as the duty's own window.
+  const conflictWindows: TimeWindow[] = dayRequirements.map(({ requirement, flight, window }) =>
+    requirement.source === "company_config" ? computeForeignCompanyProtectedWindow(flight) : window
+  );
+
   const n = dayRequirements.length;
   const parent = Array.from({ length: n }, (_, i) => i);
   function find(x: number): number {
@@ -336,7 +366,7 @@ export function generateDutiesForDay(
   }
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      if (windowsOverlap(dayRequirements[i].window, dayRequirements[j].window)) union(i, j);
+      if (windowsOverlap(conflictWindows[i], conflictWindows[j])) union(i, j);
     }
   }
   const clusterMembers = new Map<number, number[]>();
@@ -375,7 +405,16 @@ export function generateDutiesForDay(
         }
 
         const requiredAuthorization = requirement.source === "company_config" ? flight.airline : undefined;
-        const results = scoreCandidates(requirement.role, window, dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow);
+        // Uses conflictWindows[idx] (the wide protected window for a
+        // company_config requirement, the requirement's own window for
+        // everything else — see this function's comment above the
+        // clustering pass) so a candidate's ALREADY-recorded busy windows
+        // are checked against the employee's REAL unavailability for this
+        // duty, not its narrow displayed window. This is what actually
+        // decides eligibility/exclusion — the clustering fix alone only
+        // orders processing; this is what closes the double-booking
+        // regardless of which requirement in a cluster is resolved first.
+        const results = scoreCandidates(requirement.role, conflictWindows[idx], dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow);
         const recommended = results.filter((r) => r.status === "recommended");
 
         if (
