@@ -138,11 +138,60 @@ export function isTransitTeam(assignment: string): boolean {
  * deliberately no way to flip that off via configuration, per the
  * explicit instruction that Transit's full-shift commitment is a hard
  * rule, never a policy choice.
+ *
+ * UPDATE (RAM Handling / product owner, 2026-09-22 — see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md): the
+ * "return remaining shift time to RAM T1 capacity" mechanism is NOT
+ * optional/policy-gated after all for a foreign-company team — it is the
+ * default correct behavior for EVERY configured foreign company, with
+ * Transit remaining the one confirmed hard exception (already enforced
+ * above, unconditionally). This table stays empty by design and is no
+ * longer what decides a foreign company's redeployment eligibility (see
+ * isRedeploymentAllowed below) — it remains available ONLY for a future,
+ * individually-confirmed EXCEPTION that overrides the new foreign-company
+ * default (e.g. if a specific carrier's contract is later confirmed to
+ * work like Transit); setting `TEAM_REDEPLOYMENT_POLICY[company] = false`
+ * would do that for one company without touching this function. Nothing
+ * in this codebase currently sets such an override; none is confirmed.
+ * This does NOT change Mesure/Profiling — they are not foreign companies
+ * (CONFIGURED_COMPANIES, company-config.ts) and are therefore still
+ * governed by the table exactly as before (default false, still
+ * unconfirmed either way — see the known-limitations doc). Leaders/Duty
+ * Officers/Caisse-BCB (FIXED_PLANNING_TEAMS) and any other still-static
+ * team are likewise unaffected: they're never foreign companies either,
+ * so this new default never reaches them.
  */
 const TEAM_REDEPLOYMENT_POLICY: Record<string, boolean> = {};
 
 export function isRedeploymentAllowed(assignment: string): boolean {
   if (isTransitTeam(assignment)) return false; // hard, non-configurable exception — see doc comment above
+  return TEAM_REDEPLOYMENT_POLICY[assignment] === true;
+}
+
+/**
+ * SEPARATE, NARROWER policy dimension (split out 2026-09-22 from
+ * isRedeploymentAllowed above, which used to also govern this): whether a
+ * team's generated shift should PREFER the LONGEST compatible catalog
+ * code among tied candidates (see foreign-shift-planning.ts's
+ * `preferExtended` doc comment) — i.e. deliberately extend a shift beyond
+ * the minimum needed to cover the team's own protected/demand window, to
+ * manufacture MORE slack time for redeployment than the minimal covering
+ * shift would naturally leave. This is a genuinely different, still
+ * entirely UNCONFIRMED optimization for every team, foreign company
+ * included — confirmed only that a foreign-company ACE is redeployable
+ * during whatever real slack their (minimally-sized) shift already
+ * leaves after their protected window (see isRedeploymentAllowed above,
+ * now default-true for foreign companies), never that ATLAS should
+ * intentionally lengthen their shift to create more of it. Deliberately
+ * NOT tied to isRedeploymentAllowed's new foreign-company default: doing
+ * so previously caused real rest-feasibility shortfalls in production-
+ * shaped scenarios (a longer shift one day can leave insufficient rest
+ * before the next day's real commitment), an unconfirmed and unintended
+ * side effect, not a business rule. Stays governed by
+ * TEAM_REDEPLOYMENT_POLICY alone (empty today, so always false for every
+ * team) until a real per-team extension policy is confirmed.
+ */
+export function isShiftExtensionPreferred(assignment: string): boolean {
   return TEAM_REDEPLOYMENT_POLICY[assignment] === true;
 }
 

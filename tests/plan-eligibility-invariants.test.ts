@@ -137,10 +137,23 @@ describe("weekly plan eligibility invariants (generated demo plan)", () => {
     // wide because demand-driven generation can legitimately swing day to
     // day with the real flight schedule (see the delivered report), not a
     // fixed 2-day-per-week stagger any more.
+    //
+    // Widened 4x -> 5x (2026-09-22, foreign-company normal-roster top-up
+    // fix -- see docs/known-limitations/roster-planning-vs-duty-allocation.md):
+    // that fix genuinely REDUCES the minimum-OFF day's count (more
+    // foreign-company employees now get a real RAM-compatible working day
+    // on days their own company has no flight, exactly the intended
+    // effect), which mechanically widens max/min OFF-day ratio against an
+    // unrelated, pre-existing high-OFF outlier day driven by a fixed/
+    // static team's own configured rotation (unaffected by this fix). This
+    // is a real, expected, and desirable side effect of correcting the
+    // OFF-heavy pattern the known-limitations doc originally flagged --
+    // not a weekend-off hardcoding regression, which the check above this
+    // one already guards independently.
     const offCounts = DAYS_WITH_DATA.map((d) => byDay.get(d)!.off);
     const maxOff = Math.max(...offCounts);
     const minOff = Math.min(...offCounts);
-    expect(maxOff).toBeLessThan(minOff * 4);
+    expect(maxOff).toBeLessThan(minOff * 5);
   });
 
   it("Assignment plan_id matches the bundle's own plan_id (no cross-revision drift)", () => {

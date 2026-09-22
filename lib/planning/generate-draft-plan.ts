@@ -378,7 +378,12 @@ export function generateDraftWeeklyPlan(
     flights,
     CONFIGURED_COMPANIES,
     config.minimum_rest_hours,
-    priorWeekBoundaryContext
+    priorWeekBoundaryContext,
+    // Normal RAM roster top-up (see specialized-team-generation.ts's own
+    // doc comment) — foreign-company employees now get the same
+    // "5 WORK + 2 OFF" normal roster target as the flexible pool,
+    // constrained (not replaced) by their company's real flight days.
+    config
   );
 
   // Every population whose day is decided by generation this run, merged

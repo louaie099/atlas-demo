@@ -112,7 +112,14 @@ function minutesToTime(mins: number): string {
 // the longest available shift, since there is no real demand driving how
 // long this day should be; the employee's own obligation is the only
 // thing being satisfied here.
-function shortestFirstCatalogCodes(): { code: string; entreeMin: number; sortieMin: number }[] {
+//
+// Exported (2026-09-22, foreign-company roster top-up — see
+// docs/known-limitations/roster-planning-vs-duty-allocation.md): the SAME
+// "shortest legal catalog code" rule this stage already uses for the
+// flexible pool is reused, unmodified, for foreign-company employees'
+// non-flight-day top-up in specialized-team-generation.ts, rather than
+// maintaining a second copy.
+export function shortestFirstCatalogCodes(): { code: string; entreeMin: number; sortieMin: number }[] {
   return Object.entries(SHIFT_CODES)
     .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
     .filter((c) => c.sortieMin > c.entreeMin)
@@ -192,6 +199,138 @@ export function chooseTopUpReservedOffDays(daysOrder: string[], freeDays: Readon
 }
 
 /**
+ * SHARED PER-EMPLOYEE DAY-COUNT/HOURS TOP-UP CORE (factored out 2026-09-22
+ * — see docs/known-limitations/roster-planning-vs-duty-allocation.md's
+ * "foreign-company employees get a normal RAM weekly roster" fix). This is
+ * the exact algorithm `generateObligationToppedUpShifts` already used for
+ * the flexible General T1 pool (soft consecutive-OFF preference via
+ * `chooseTopUpReservedOffDays`, forward rest lookahead against the next
+ * already-fixed day, and the Sunday->Monday cyclic wrap safety check),
+ * extracted so a SECOND caller (specialized-team-generation.ts's foreign-
+ * company roster top-up) can reuse it byte-for-byte instead of maintaining
+ * an independently-drifting copy of "prefer consecutive OFF days." Pure
+ * per EMPLOYEE: the caller supplies that one employee's already-scheduled
+ * days (from whatever source — demand-driven shifts for the flexible pool,
+ * real company-flight-day shifts for a foreign-company employee) via
+ * `getExistingShift`, and gets back only the ADDITIONAL days this stage
+ * decided to add, as a day -> shiftCode map. Never mutates anything the
+ * caller passed in.
+ */
+export function computeEmployeeDayCountTopUp(
+  employeeId: string,
+  daysOrder: string[],
+  initialScheduledDays: ReadonlySet<string>,
+  initialScheduledHours: number,
+  getExistingShift: (day: string) => { shiftCode: string } | undefined,
+  priorWeekBoundaryContext: PriorDayShiftMap,
+  minimumRestHours: number,
+  targetWorkingDaysThisWindow: number,
+  offDaysTarget: number,
+  targetHoursThisWindow: number | null,
+  catalogCodes: { code: string; entreeMin: number; sortieMin: number }[]
+): Map<string, string> {
+  const additional = new Map<string, string>(); // day -> shiftCode, this employee only
+
+  const scheduledDays = new Set<string>(initialScheduledDays);
+  let shortfallHours = targetHoursThisWindow === null ? 0 : Math.max(0, targetHoursThisWindow - initialScheduledHours);
+  const daysAlreadyMetTarget = scheduledDays.size >= targetWorkingDaysThisWindow;
+  if (shortfallHours <= 0 && daysAlreadyMetTarget) return additional; // both objectives already satisfied by the input alone
+
+  // Soft preference (Part 2): among this employee's currently-free days,
+  // compute ONCE which ones are the best available consecutive-OFF block
+  // to try to preserve — this set never changes as days get filled below.
+  const freeDays = new Set(daysOrder.filter((d) => !scheduledDays.has(d)));
+  const reservedOffDays = chooseTopUpReservedOffDays(daysOrder, freeDays, offDaysTarget);
+
+  function resolvePriorShift(i: number): { shift_start: string; shift_end: string } | null {
+    if (i === 0) return priorWeekBoundaryContext.get(employeeId) ?? null;
+    const day = daysOrder[i - 1];
+    const existing = getExistingShift(day);
+    if (existing) return getShiftTimesAs(existing.shiftCode);
+    const addedCode = additional.get(day);
+    if (addedCode) return getShiftTimesAs(addedCode);
+    return null; // preceding day is a genuine OFF day
+  }
+
+  function attemptDay(i: number, allowReserved: boolean): boolean {
+    const day = daysOrder[i];
+    if (!freeDays.has(day)) return false; // already scheduled, or topped up earlier this walk
+
+    if (scheduledDays.size >= targetWorkingDaysThisWindow) return false;
+    if (reservedOffDays.has(day) && !allowReserved) return false; // leave OFF for now — preferred consecutive block
+
+    // FORWARD lookahead against tomorrow's already-fixed shift, exactly
+    // as generateObligationToppedUpShifts always did — without this a
+    // top-up shift added here could leave the following day's already-
+    // fixed shift under-rested.
+    const priorShift = resolvePriorShift(i);
+    const nextDay = daysOrder[i + 1];
+    const nextFixed = nextDay ? getExistingShift(nextDay) : undefined;
+    const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode) : null;
+
+    const legal = catalogCodes.find((c) => {
+      if (priorShift) {
+        const entreeTime = minutesToTime(c.entreeMin);
+        if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
+      }
+      if (nextFixedShift) {
+        const entreeTime = minutesToTime(c.entreeMin);
+        const sortieTime = minutesToTime(c.sortieMin);
+        if (restHoursBetween(entreeTime, sortieTime, nextFixedShift.shift_start) < minimumRestHours) return false;
+      }
+      return true;
+    });
+
+    if (!legal) return false; // no legally-rested shift available today — leave the honest gap, try the next candidate day
+
+    additional.set(day, legal.code);
+    scheduledDays.add(day);
+    freeDays.delete(day);
+    shortfallHours = Math.max(0, shortfallHours - getShiftDurationHours(legal.code));
+    return true;
+  }
+
+  // Pass 1: every free day NOT in the preferred reserved block.
+  for (let i = 0; i < daysOrder.length; i++) {
+    if (!freeDays.has(daysOrder[i])) continue;
+    attemptDay(i, false);
+  }
+  // Pass 2: if a real shortfall remains, fall back to the reserved days too.
+  if (shortfallHours > 0 || scheduledDays.size < targetWorkingDaysThisWindow) {
+    for (let i = 0; i < daysOrder.length; i++) {
+      if (!freeDays.has(daysOrder[i])) continue;
+      attemptDay(i, true);
+    }
+  }
+
+  // CYCLIC WRAP SAFETY CHECK (Sunday -> following Monday) — see the
+  // original doc comment on this same check (module history): a top-up
+  // shift THIS function adds on either end of the window could still
+  // create an illegal wraparound rest gap nothing else here tests. Fixed
+  // by dropping whichever end THIS function added (never a real
+  // already-scheduled day) rather than leaving it for a softer warning.
+  if (daysOrder.length === 7) {
+    const firstDay = daysOrder[0];
+    const lastDay = daysOrder[daysOrder.length - 1];
+    const firstCode = getExistingShift(firstDay)?.shiftCode ?? additional.get(firstDay);
+    const lastCode = getExistingShift(lastDay)?.shiftCode ?? additional.get(lastDay);
+    if (firstCode && lastCode) {
+      const firstTimes = getShiftTimesAs(firstCode);
+      const lastTimes = getShiftTimesAs(lastCode);
+      const wrapRest = restHoursBetween(lastTimes.shift_start, lastTimes.shift_end, firstTimes.shift_start);
+      if (wrapRest < minimumRestHours) {
+        const lastIsTopUp = additional.has(lastDay) && !getExistingShift(lastDay);
+        const firstIsTopUp = additional.has(firstDay) && !getExistingShift(firstDay);
+        if (lastIsTopUp) additional.delete(lastDay);
+        else if (firstIsTopUp) additional.delete(firstDay);
+      }
+    }
+  }
+
+  return additional;
+}
+
+/**
  * The continuous-roster-generation stage itself. Returns, per day, the
  * ADDITIONAL flexible-pool shift assignments needed to (1) reach the
  * confirmed "5 WORK + 2 OFF" normal roster target, ALWAYS (see this
@@ -237,149 +376,24 @@ export function generateObligationToppedUpShifts(
       scheduledHours += getShiftDurationHours(g.shiftCode);
     }
 
-    let shortfallHours = targetHoursThisWindow === null ? 0 : Math.max(0, targetHoursThisWindow - scheduledHours);
-    const daysAlreadyMetTarget = scheduledDays.size >= targetWorkingDaysThisWindow;
-    if (shortfallHours <= 0 && daysAlreadyMetTarget) continue; // both objectives already satisfied by demand alone
+    const getExistingShift = (day: string) => (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employee.id);
 
-    // Soft preference (Part 2): among this employee's currently-free
-    // days, compute ONCE which ones are the best available consecutive-
-    // OFF block to try to preserve — this set never changes as days get
-    // filled below (recomputing it mid-walk would let an early fill
-    // destabilize which block is "best" and defeat the whole point of
-    // preferring one stable, consolidated block).
-    const freeDays = new Set(daysOrder.filter((d) => !scheduledDays.has(d)));
-    const reservedOffDays = chooseTopUpReservedOffDays(daysOrder, freeDays, config.normal_weekly_off_days);
+    const additions = computeEmployeeDayCountTopUp(
+      employee.id,
+      daysOrder,
+      scheduledDays,
+      scheduledHours,
+      getExistingShift,
+      priorWeekBoundaryContext,
+      minimumRestHours,
+      targetWorkingDaysThisWindow,
+      config.normal_weekly_off_days,
+      targetHoursThisWindow,
+      catalogCodes
+    );
 
-    function attemptDay(i: number, allowReserved: boolean): boolean {
-      const day = daysOrder[i];
-      if (!freeDays.has(day)) return false; // already scheduled (demand-driven or topped up earlier this walk)
-      // The single ceiling governing BOTH objectives: objective 1 (the
-      // "5 WORK + 2 OFF" day-count target) wants exactly this many days,
-      // and objective 2 (hours) is never allowed past it either — so
-      // there is nothing more to add, for either objective, once it's
-      // reached, regardless of whether shortfallHours has also hit 0.
-      // Below the ceiling, objective 1 alone is enough reason to keep
-      // adding days even once shortfallHours is already 0.
-      if (scheduledDays.size >= targetWorkingDaysThisWindow) return false;
-
-      if (reservedOffDays.has(day) && !allowReserved) return false; // leave OFF for now — preferred consecutive block
-
-      // FORWARD lookahead against tomorrow's REAL demand-driven shift, if
-      // one already exists (the same forward-half-of-the-rest-check
-      // reasoning as shift-generation.ts's own nextDayBaselineShift):
-      // without this, a top-up shift added here could leave the
-      // immediately following day's already-fixed demand-driven shift
-      // under-rested. Left unguarded, the universal whole-week safety net
-      // (enforceRestInvariantAcrossWeek) would still catch the resulting
-      // violation -- but since it walks strictly forward, it would drop
-      // the LATER (real, demand-justified) shift rather than this
-      // synthetic top-up one, silently trading away genuine coverage for
-      // a top-up. Checking it here means this stage only ever adds a day
-      // when doing so is compatible with what's already real, never at
-      // the expense of it.
-      const priorShift = resolvePriorShift(i);
-      const nextDay = daysOrder[i + 1];
-      const nextFixed = nextDay ? (demandDrivenShiftsByDay[nextDay] ?? []).find((x) => x.employeeId === employee.id) : undefined;
-      const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode) : null;
-
-      const legal = catalogCodes.find((c) => {
-        if (priorShift) {
-          const entreeTime = minutesToTime(c.entreeMin);
-          if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
-        }
-        if (nextFixedShift) {
-          const entreeTime = minutesToTime(c.entreeMin);
-          const sortieTime = minutesToTime(c.sortieMin);
-          if (restHoursBetween(entreeTime, sortieTime, nextFixedShift.shift_start) < minimumRestHours) return false;
-        }
-        return true;
-      });
-
-      if (!legal) return false; // no legally-rested shift available today — leave the honest gap, try the next candidate day
-
-      additional[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode: legal.code, coversRoles: [] });
-      scheduledDays.add(day);
-      freeDays.delete(day);
-      shortfallHours = Math.max(0, shortfallHours - getShiftDurationHours(legal.code));
-      return true;
-    }
-
-    // Each employee's effective prior shift immediately BEFORE day index
-    // i — the immediately preceding day's real demand-driven shift or
-    // already-added top-up shift, or null if that preceding day is a
-    // genuine OFF day (which always resets rest fully, exactly like the
-    // rest of this pipeline's day-by-day walks), or the seeded prior-week
-    // boundary shift for the window's own first day.
-    function resolvePriorShift(i: number): { shift_start: string; shift_end: string } | null {
-      if (i === 0) return priorWeekBoundaryContext.get(employee.id) ?? null;
-      const day = daysOrder[i - 1];
-      const demandShift = (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employee.id);
-      if (demandShift) return getShiftTimesAs(demandShift.shiftCode);
-      const addedShift = additional[day].find((x) => x.employeeId === employee.id);
-      if (addedShift) return getShiftTimesAs(addedShift.shiftCode);
-      return null; // preceding day is a genuine OFF day
-    }
-
-    // Pass 1: every free day NOT in the preferred reserved block —
-    // consolidating the remaining OFF days into that block wherever
-    // legality allows.
-    for (let i = 0; i < daysOrder.length; i++) {
-      if (!freeDays.has(daysOrder[i])) continue; // already scheduled (demand-driven)
-      attemptDay(i, false);
-    }
-    // Pass 2: if the normal-target / obligation shortfall still isn't
-    // met, fall back to the reserved (preferred-OFF) days too — a real
-    // shortfall against either objective is never left unresolved just
-    // to protect the soft consecutive-OFF preference.
-    if (shortfallHours > 0 || scheduledDays.size < targetWorkingDaysThisWindow) {
-      for (let i = 0; i < daysOrder.length; i++) {
-        if (!freeDays.has(daysOrder[i])) continue;
-        attemptDay(i, true);
-      }
-    }
-
-    // CYCLIC WRAP SAFETY CHECK (Sunday -> following Monday, matching
-    // enforceRestInvariantAcrossWeek's own wraparound convention): the
-    // sequential day-by-day walk above only ever checks a day against its
-    // immediate calendar neighbor WITHIN this window (plus the seeded
-    // prior-WEEK boundary for day 0) — it never checks the window's own
-    // LAST day against its own FIRST day, since that pair isn't adjacent
-    // in the walk's index order. A top-up shift THIS stage adds on either
-    // end could still create an illegal wraparound rest gap that nothing
-    // else in this function ever tested. Unlike checkRestBetweenDays'
-    // softer cross_week_continuity_uncertain treatment (an unconfirmed
-    // HYPOTHESIS about how next week repeats this week's pattern), a
-    // violation caused by TWO DAYS THIS SAME STAGE ITSELF JUST ADDED is
-    // not a hypothesis — it is a shift this stage is directly responsible
-    // for, so it is corrected here, hard, by dropping whichever end this
-    // stage added (never a real demand-driven day, which this stage must
-    // never touch) rather than left for a softer warning to merely
-    // describe. If neither end is a top-up addition (both real,
-    // demand-driven), any wraparound issue there is pre-existing and
-    // outside this stage's responsibility — left exactly as-is, same as
-    // before this stage existed.
-    if (daysOrder.length === 7) {
-      const firstDay = daysOrder[0];
-      const lastDay = daysOrder[daysOrder.length - 1];
-      const firstShift = (demandDrivenShiftsByDay[firstDay] ?? []).find((x) => x.employeeId === employee.id) ?? additional[firstDay].find((x) => x.employeeId === employee.id);
-      const lastShift = (demandDrivenShiftsByDay[lastDay] ?? []).find((x) => x.employeeId === employee.id) ?? additional[lastDay].find((x) => x.employeeId === employee.id);
-      if (firstShift && lastShift) {
-        const firstTimes = getShiftTimesAs(firstShift.shiftCode);
-        const lastTimes = getShiftTimesAs(lastShift.shiftCode);
-        const wrapRest = restHoursBetween(lastTimes.shift_start, lastTimes.shift_end, firstTimes.shift_start);
-        if (wrapRest < minimumRestHours) {
-          const lastIsTopUp = additional[lastDay].some((x) => x.employeeId === employee.id);
-          const firstIsTopUp = additional[firstDay].some((x) => x.employeeId === employee.id);
-          if (lastIsTopUp) {
-            additional[lastDay] = additional[lastDay].filter((x) => x.employeeId !== employee.id);
-          } else if (firstIsTopUp) {
-            additional[firstDay] = additional[firstDay].filter((x) => x.employeeId !== employee.id);
-          }
-          // Neither top-up — a pre-existing demand-driven wraparound
-          // finding, unrelated to and unresolved by this stage, exactly
-          // as before this stage existed.
-        }
-      }
+    for (const [day, shiftCode] of additions) {
+      additional[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] });
     }
   }
 

@@ -1,10 +1,11 @@
-import { Employee, Flight } from "../types";
+import { Employee, Flight, Config } from "../types";
 import { DailyDemand, demandClustersForRole } from "./demand-aggregation";
 import { selectCompatibleShiftCodes, planForeignCompanyDay } from "../foreign-shift-planning";
 import { getCompanyRequiredAgents, getCompanyTeamRoleConfig, TeamRoleConfig } from "../company-config";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
-import { isRedeploymentAllowed } from "../teams";
+import { isShiftExtensionPreferred } from "../teams";
+import { computeEmployeeDayCountTopUp, shortestFirstCatalogCodes } from "./roster-generation";
 
 /**
  * FAIRNESS FIX (2026-09-21): `assignPoolToWindow`/`assignPoolToWindowWithRoles`
@@ -107,7 +108,7 @@ function assignPoolToWindow(
   headcount: number,
   priorDayShift: PriorDayShiftMap,
   minimumRestHours: number,
-  // See teams.ts's isRedeploymentAllowed / foreign-shift-planning.ts's
+  // See teams.ts's isShiftExtensionPreferred / foreign-shift-planning.ts's
   // preferExtended doc comments. Default false — every existing caller
   // unaffected, identical shift selection as before.
   preferExtended = false
@@ -208,7 +209,7 @@ export function generateProfilingMesureShifts(
 
   for (const team of ["Profiling", "Mesure"]) {
     const pool = employees.filter((e) => e.active && e.assignment === team);
-    const preferExtended = isRedeploymentAllowed(team);
+    const preferExtended = isShiftExtensionPreferred(team);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
     // See sortByLeastUsedFirst's doc comment: spreads work across the
     // whole team instead of always favoring the same first N in `pool`.
@@ -269,10 +270,27 @@ export function generateProfilingMesureShifts(
  * used elsewhere for this exact purpose (getCompanyRequiredAgents,
  * company-config.ts — the same number the Rotation Feasibility Engine
  * already treats as this company's real weekly demand), not a new one
- * invented here. A day with no company flight at all leaves the whole
- * group OFF — no fabricated baseline shift on a day nothing requires one;
- * per the confirmed instruction, their unused availability is not yet
- * redirected to general RAM demand in this milestone.
+ * invented here.
+ *
+ * NORMAL RAM ROSTER TOP-UP (2026-09-22 — see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md): a day
+ * with no company flight at all, or where an employee wasn't one of the
+ * N selected for that day's real flight, no longer leaves that employee
+ * with no roster entry at all (which reads as OFF downstream). Foreign-
+ * company ACEs remain RAM Handling employees and are entitled to the SAME
+ * "5 WORK + 2 OFF, independent of demand" normal roster target the
+ * flexible General T1 pool already gets — see
+ * roster-generation.ts's `computeEmployeeDayCountTopUp`, reused here
+ * UNCHANGED rather than reimplemented, so the two populations' soft
+ * consecutive-OFF preference never drifts apart. A day this top-up adds is
+ * a real, honest RAM-compatible working day (their own base/default shift
+ * template via the shortest-legal-catalog-code rule, exactly as the
+ * flexible pool's own top-up picks) — never a fabricated company duty.
+ * The employee stays a distinct population throughout (never folded into
+ * `isFlexibleGeneralPool` — see workforce-pools.ts's own doc comment on
+ * why not): on a real flight day they're still anchored to the protected-
+ * window-covering shift above; this top-up only ever fills a day company
+ * demand left completely untouched.
  */
 export function generateForeignCompanyShifts(
   daysOrder: string[],
@@ -280,7 +298,14 @@ export function generateForeignCompanyShifts(
   flights: Flight[],
   configuredCompanies: string[],
   minimumRestHours: number,
-  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
+  // Optional: when provided, the normal-RAM-roster top-up (see this
+  // function's doc comment) runs on top of the flight-driven result
+  // above. Defaults to undefined so every existing caller/test that only
+  // cares about the flight-driven roster keeps working byte-for-byte
+  // unchanged (the top-up is a strict, additive no-op without a config to
+  // read `normal_weekly_off_days` from).
+  config?: Pick<Config, "normal_weekly_off_days">
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
@@ -290,7 +315,7 @@ export function generateForeignCompanyShifts(
     if (pool.length === 0) continue;
     const headcount = getCompanyRequiredAgents(company);
     const roleConfig = getCompanyTeamRoleConfig(company);
-    const preferExtended = isRedeploymentAllowed(company);
+    const preferExtended = isShiftExtensionPreferred(company);
     let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
     // See sortByLeastUsedFirst's doc comment: spreads work across the
     // whole company team instead of always favoring the same first N in
@@ -319,8 +344,11 @@ export function generateForeignCompanyShifts(
       }
       // No flight today (plan === null), or no confirmed headcount for
       // this company (shouldn't happen for a CONFIGURED company, but
-      // never invent one if it did) -- the whole group is genuinely OFF,
-      // never given a fabricated baseline shift.
+      // never invent one if it did) -- the group's real flight-driven
+      // outcome is genuinely empty here; the normal-RAM-roster top-up
+      // below (when `config` is provided) is what turns that into an
+      // honest working day for whoever still needs one this week, rather
+      // than a fabricated company duty.
 
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
@@ -334,6 +362,45 @@ export function generateForeignCompanyShifts(
         nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode) : null);
       }
       priorDayShift = nextPriorDayShift;
+    }
+
+    // NORMAL RAM ROSTER TOP-UP — see this function's doc comment. Runs
+    // once per company, per employee, over the whole window, exactly the
+    // same shape as roster-generation.ts's own flexible-pool loop: reach
+    // "5 WORK + 2 OFF" (`daysOrder.length - config.normal_weekly_off_days`
+    // worked days), never chasing a still-unconfirmed hours target
+    // (`targetHoursThisWindow` is always null here — objective 2 stays
+    // gated exactly as it does for the flexible pool), with the same
+    // consecutive-OFF soft preference and forward rest lookahead against
+    // whatever real company-flight-day shift already exists.
+    if (config) {
+      const targetWorkingDaysThisWindow = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
+      const catalogCodes = shortestFirstCatalogCodes();
+      for (const employee of pool) {
+        const scheduledDays = new Set<string>(
+          daysOrder.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === employee.id))
+        );
+        const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
+
+        const additions = computeEmployeeDayCountTopUp(
+          employee.id,
+          daysOrder,
+          scheduledDays,
+          0, // hours objective never chased here — see doc comment
+          getExistingShift,
+          priorWeekBoundaryContext,
+          minimumRestHours,
+          targetWorkingDaysThisWindow,
+          config.normal_weekly_off_days,
+          null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
+          catalogCodes
+        );
+
+        for (const [day, shiftCode] of additions) {
+          if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
+          generatedShiftsByDay[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] });
+        }
+      }
     }
   }
 
