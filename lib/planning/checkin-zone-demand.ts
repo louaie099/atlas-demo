@@ -58,9 +58,30 @@ export interface ZoneCheckinDemandPolicy {
   >;
 }
 
+/**
+ * CONFIRMED by the product owner (2026-09-23 architecture audit): T1
+ * Check-in opens exactly 4 hours before a flight's scheduled departure.
+ * This replaces the earlier, unconfirmed 180-minute prototype value —
+ * named here (never inlined) so the one real, confirmed fact in this
+ * module's timing model is never confused with the coefficients below,
+ * which remain prototype/unconfirmed.
+ */
+export const CHECKIN_OPEN_BEFORE_DEPARTURE_MINUTES = 240;
+
+/**
+ * UNCONFIRMED / PROTOTYPE: the real Check-in CLOSING point relative to
+ * departure has not been confirmed by RAM management (see the product
+ * owner's 2026-09-23 brief, point 2). Kept as its own explicitly-named
+ * constant — never hardcoded inline — so it can be corrected the moment a
+ * real number is confirmed without hunting through call sites. Weekly
+ * Planning uses planned departure times only; delay-shifted Check-in
+ * closing is an explicitly deferred future concern.
+ */
+export const CHECKIN_CLOSE_BEFORE_DEPARTURE_MINUTES = 45;
+
 export const DEFAULT_ZONE_CHECKIN_DEMAND_POLICY: ZoneCheckinDemandPolicy = {
-  open_minutes_before_departure: 180,
-  close_minutes_before_departure: 45,
+  open_minutes_before_departure: CHECKIN_OPEN_BEFORE_DEPARTURE_MINUTES,
+  close_minutes_before_departure: CHECKIN_CLOSE_BEFORE_DEPARTURE_MINUTES,
   zone_coefficients: {
     t1_main_checkin: {
       base_agents: 2,
