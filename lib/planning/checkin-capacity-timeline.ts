@@ -49,17 +49,46 @@ import { CheckinDemandPolicy } from "./checkin-demand";
  *    exact same real-interval source duty-generation itself uses — never
  *    recomputed or approximated here).
  *
- * A free employee at a given instant is attributed to whichever ordinary
- * zone has the highest required headcount at that same instant (the same
- * "plausible, demand-informed default location" heuristic the old
- * pickDefaultZone used) — but this attribution is now evaluated ONCE PER
- * ATOMIC PERIOD, never once per whole shift, so a partial-interval overlap
- * can never be counted as full-window coverage. This is what makes the
+ * The free-employee pool at a given instant is SPLIT across every ordinary
+ * zone with unmet demand at that same instant (see attributeFreeEmployees-
+ * ForInstant below), greedily filling whichever zone has the largest
+ * remaining gap (required minus already-attributed) one employee at a
+ * time, and only parking surplus on the single highest-demand zone once
+ * every zone's requirement is fully covered (or every zone is at zero
+ * demand). This REPLACES an earlier, narrower heuristic (2026-09-23
+ * refactor) that attributed the ENTIRE free pool to whichever single zone
+ * had the highest required headcount, using the same static per-instant
+ * requiredByZone snapshot for every employee in the loop — so whenever two
+ * ordinary zones had simultaneous real demand (e.g. Main + Domestic, or
+ * Main + Italy/Spain at the same instant), 100% of the free pool landed on
+ * the busiest zone and every other zone showed Available 0 even though the
+ * pool, split sensibly, would have covered all of them. This is the exact
+ * live-production bug traced on 2026-09-23: T1 Domestic and T1 Italy/Spain
+ * showing a persistent Required 2 / Available 0 / Gap 2 in windows that DID
+ * overlap active shifts, while T1 Main showed a comfortable surplus at the
+ * same instant — every free employee was being attributed to Main alone.
+ *
+ * This attribution (now split-aware) is still evaluated ONCE PER ATOMIC
+ * PERIOD, never once per whole shift, so a partial-interval overlap can
+ * never be counted as full-window coverage. This is what makes the
  * FK-matching bug structurally impossible to recur: there is no separate
  * persisted row to mis-link in the first place. Adjacent atomic periods
  * with identical (required, available) values are merged only for DISPLAY
  * (mergeAtomicPeriodsForZone below) — the underlying per-instant
  * computation is always atomic-correct first.
+ *
+ * HONEST LIMITATION of the split-aware attribution itself: this is a
+ * greedy, per-instant, max-remaining-gap fill — NOT a true joint optimizer
+ * across all zones and all atomic periods simultaneously. It always
+ * produces the max-min-fair split for a single instant (no zone is left at
+ * a bigger gap than another while a different zone already has surplus),
+ * but it cannot "save" capacity from one atomic period for a harder one a
+ * few minutes later, nor trade an employee's zone assignment across
+ * periods to reduce churn in EmployeeZoneAvailabilitySegment (see that
+ * function below). An extremely tight multi-zone conflict that shifts
+ * shape every few minutes could still show more zone-attribution changes
+ * than a hypothetical whole-shift optimizer would choose — the Required/
+ * Available/Gap numbers are always correct at each instant regardless.
  *
  * KNOWN, DELIBERATE LIMITATIONS (unchanged from the modules this reuses,
  * not introduced here):
@@ -156,8 +185,8 @@ function isFreeAtInstant(availability: EmployeeAvailabilityInput, tMinutes: numb
   return true;
 }
 
-/** Same heuristic as the old pickDefaultZone: the ordinary zone with the highest required headcount at this instant, defaulting to t1_main_checkin when every ordinary zone is at zero demand (still a real, valid place to operationally position idle capacity). Takes the already-computed per-instant requiredByZone map, never recomputes it. */
-function pickZoneForInstant(requiredByZone: Partial<Record<CheckinZoneId, number>>): CheckinZoneId {
+/** Fallback zone for surplus capacity once every ordinary zone's demand is fully covered (or every zone is at zero demand): the single highest-required zone, same tie-break as the old single-zone heuristic this replaces. */
+function highestDemandZone(requiredByZone: Partial<Record<CheckinZoneId, number>>): CheckinZoneId {
   let best: CheckinZoneId = "t1_main_checkin";
   let bestRequired = -1;
   for (const zone of ORDINARY_CHECKIN_ZONES) {
@@ -168,6 +197,63 @@ function pickZoneForInstant(requiredByZone: Partial<Record<CheckinZoneId, number
     }
   }
   return best;
+}
+
+/**
+ * Splits the free-employee pool at one instant across every ordinary zone
+ * with unmet demand, instead of concentrating it entirely into the single
+ * highest-demand zone (see the module doc comment for the live bug this
+ * fixes). Greedy max-remaining-gap fill: each free employee, in order, is
+ * attributed to whichever zone currently has the LARGEST unmet need
+ * (required minus already-attributed-so-far in this same instant) — so
+ * simultaneous demand in two or more zones is genuinely split between them,
+ * and a zone whose requirement is already fully covered by attribution
+ * receives no more of the pool while another zone still has a gap. Once
+ * every zone's requirement is fully covered (or every zone is at zero
+ * demand), remaining surplus employees are parked on the single
+ * highest-demand zone, same as the previous behavior for that case.
+ *
+ * This is a per-instant, max-min-fair greedy split, not a true joint
+ * optimizer across zones and time (see the module doc comment's HONEST
+ * LIMITATION note) — it never fabricates coverage a genuinely undersized
+ * pool cannot provide, it only stops wasting pool capacity on a single
+ * zone that is already fully covered while a sibling zone starves.
+ */
+function attributeFreeEmployeesForInstant(
+  requiredByZone: Partial<Record<CheckinZoneId, number>>,
+  freeEmployeeIds: string[]
+): {
+  availableByZone: Partial<Record<CheckinZoneId, number>>;
+  availableEmployeeIdsByZone: Partial<Record<CheckinZoneId, string[]>>;
+} {
+  const availableByZone: Partial<Record<CheckinZoneId, number>> = {};
+  const availableEmployeeIdsByZone: Partial<Record<CheckinZoneId, string[]>> = {};
+  const fallbackZone = highestDemandZone(requiredByZone);
+
+  for (const employeeId of freeEmployeeIds) {
+    let target: CheckinZoneId | null = null;
+    let bestUnmet = 0;
+    for (const zone of ORDINARY_CHECKIN_ZONES) {
+      const required = requiredByZone[zone] ?? 0;
+      const alreadyAttributed = availableByZone[zone] ?? 0;
+      const unmet = required - alreadyAttributed;
+      if (unmet > bestUnmet) {
+        bestUnmet = unmet;
+        target = zone;
+      }
+    }
+    // No zone has any unmet demand left at this point in the allocation
+    // (every zone's requirement is already fully covered by employees
+    // attributed earlier in this same instant, or every zone is at zero
+    // demand): surplus capacity is parked on the single highest-demand
+    // zone, exactly like the previous single-zone heuristic did.
+    if (!target) target = fallbackZone;
+
+    availableByZone[target] = (availableByZone[target] ?? 0) + 1;
+    availableEmployeeIdsByZone[target] = [...(availableEmployeeIdsByZone[target] ?? []), employeeId];
+  }
+
+  return { availableByZone, availableEmployeeIdsByZone };
 }
 
 /**
@@ -232,14 +318,10 @@ export function buildDailyCapacityTimeline(
       contributingFlightIdsByZone[zone] = flightIds;
     }
 
-    const availableByZone: Partial<Record<CheckinZoneId, number>> = {};
-    const availableEmployeeIdsByZone: Partial<Record<CheckinZoneId, string[]>> = {};
-    for (const availability of eligibleEmployees) {
-      if (!isFreeAtInstant(availability, start)) continue;
-      const zone = pickZoneForInstant(requiredByZone);
-      availableByZone[zone] = (availableByZone[zone] ?? 0) + 1;
-      availableEmployeeIdsByZone[zone] = [...(availableEmployeeIdsByZone[zone] ?? []), availability.employeeId];
-    }
+    const freeEmployeeIds = eligibleEmployees
+      .filter((availability) => isFreeAtInstant(availability, start))
+      .map((availability) => availability.employeeId);
+    const { availableByZone, availableEmployeeIdsByZone } = attributeFreeEmployeesForInstant(requiredByZone, freeEmployeeIds);
 
     periods.push({
       start: minutesToTime(start),
