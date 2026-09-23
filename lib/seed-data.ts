@@ -1,7 +1,7 @@
 import { Employee, Flight, Config, WeeklyShiftEntry } from "./types";
 import { generateEmployees, generateFixedCycleEmployees } from "./employee-generator";
 import { generateWeeklyFlights } from "./flight-generator";
-import { getShiftTimesAs, buildUniformWeeklySchedule, restHoursForDailyRepeatingShift } from "./shift-templates";
+import { getShiftTimesAs, buildUniformWeeklySchedule, restHoursForDailyRepeatingShift, LEGACY_BASELINE_DATE } from "./shift-templates";
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays } from "./roster-generation";
@@ -117,8 +117,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Boarding", "Business Class"],
     assignment: "General T1 Pool",
     shift_code: "AP01",
-    ...getShiftTimesAs("AP01"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01"),
+    ...getShiftTimesAs("AP01", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01", LEGACY_BASELINE_DATE),
     weekly_hours: 24,
     is_duty_officer: false,
     off_days: scriptedOffDays(0),
@@ -131,8 +131,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Boarding", "Profiling"],
     assignment: "General T1 Pool",
     shift_code: "AP02",
-    ...getShiftTimesAs("AP02"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP02"),
+    ...getShiftTimesAs("AP02", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP02", LEGACY_BASELINE_DATE),
     weekly_hours: 26,
     is_duty_officer: false,
     off_days: scriptedOffDays(1),
@@ -145,8 +145,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Boarding"],
     assignment: "General T1 Pool",
     shift_code: "NR02",
-    ...getShiftTimesAs("NR02"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("NR02"),
+    ...getShiftTimesAs("NR02", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("NR02", LEGACY_BASELINE_DATE),
     weekly_hours: 22,
     is_duty_officer: false,
     off_days: scriptedOffDays(2),
@@ -191,8 +191,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Care Point", "Boarding"],
     assignment: "General T1 Pool",
     shift_code: "AP01",
-    ...getShiftTimesAs("AP01"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01"),
+    ...getShiftTimesAs("AP01", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("AP01", LEGACY_BASELINE_DATE),
     weekly_hours: 20,
     is_duty_officer: false,
     off_days: scriptedOffDays(3),
@@ -206,8 +206,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     assignment: "Duty Officers",
     // JR01 — matches "Leaders/Duty Officers use fixed JR/NT-type planning."
     shift_code: "JR01",
-    ...getShiftTimesAs("JR01"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("JR01"),
+    ...getShiftTimesAs("JR01", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("JR01", LEGACY_BASELINE_DATE),
     weekly_hours: 30,
     is_duty_officer: true,
     off_days: scriptedOffDays(4),
@@ -220,8 +220,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Check-in"],
     assignment: "General T1 Pool",
     shift_code: "MT01",
-    ...getShiftTimesAs("MT01"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01"),
+    ...getShiftTimesAs("MT01", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01", LEGACY_BASELINE_DATE),
     weekly_hours: 30,
     is_duty_officer: false,
     off_days: scriptedOffDays(5),
@@ -234,8 +234,8 @@ export const SCRIPTED_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Check-in"],
     assignment: "General T1 Pool",
     shift_code: "MT02",
-    ...getShiftTimesAs("MT02"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT02"),
+    ...getShiftTimesAs("MT02", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT02", LEGACY_BASELINE_DATE),
     weekly_hours: 18,
     is_duty_officer: false,
     off_days: scriptedOffDays(6),
@@ -289,8 +289,8 @@ export const ROTATING_SHIFT_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
     skills: ["Gate"],
     assignment: "General T1 Pool",
     shift_code: "MT01", // matches Wednesday's entry in the pattern below
-    ...getShiftTimesAs("MT01"),
-    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01"),
+    ...getShiftTimesAs("MT01", LEGACY_BASELINE_DATE),
+    rest_before_shift_hours: restHoursForDailyRepeatingShift("MT01", LEGACY_BASELINE_DATE),
     weekly_hours: 24,
     is_duty_officer: false,
     // off_days now truthfully matches ROTATING_SHIFT_PATTERN_A above:
@@ -433,8 +433,8 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
     if (restAwarePlan) {
       if (restAwarePlan.shiftCode) {
         weekly_shifts.push({ ...entry, shift_code: restAwarePlan.shiftCode, status: "working" });
-        prevShiftStart = getShiftTimesAs(restAwarePlan.shiftCode).shift_start;
-        prevShiftEnd = getShiftTimesAs(restAwarePlan.shiftCode).shift_end;
+        prevShiftStart = getShiftTimesAs(restAwarePlan.shiftCode, LEGACY_BASELINE_DATE).shift_start;
+        prevShiftEnd = getShiftTimesAs(restAwarePlan.shiftCode, LEGACY_BASELINE_DATE).shift_end;
       } else {
         // A real company flight exists today, but no catalog shift both
         // covers the protected window and leaves this employee rested
@@ -452,8 +452,8 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
         const coverageOnlyPlan = planForeignCompanyDay(employee.assignment, entry.day_of_week, FLIGHTS);
         if (coverageOnlyPlan?.shiftCode) {
           weekly_shifts.push({ ...entry, shift_code: coverageOnlyPlan.shiftCode, status: "working" });
-          prevShiftStart = getShiftTimesAs(coverageOnlyPlan.shiftCode).shift_start;
-          prevShiftEnd = getShiftTimesAs(coverageOnlyPlan.shiftCode).shift_end;
+          prevShiftStart = getShiftTimesAs(coverageOnlyPlan.shiftCode, LEGACY_BASELINE_DATE).shift_start;
+          prevShiftEnd = getShiftTimesAs(coverageOnlyPlan.shiftCode, LEGACY_BASELINE_DATE).shift_end;
         } else {
           // No catalog shift covers the protected window at all, rest
           // aside — a genuine coverage gap (no shift exists, not "no
@@ -474,8 +474,8 @@ function applyForeignCompanyRoster(employee: Employee): Employee {
     // shortfall is left to surface as a rest_violation Plan Warning via
     // checkRestBetweenDays, exactly like every other employee's schedule.
     weekly_shifts.push(entry);
-    prevShiftStart = entry.shift_code ? getShiftTimesAs(entry.shift_code).shift_start : null;
-    prevShiftEnd = entry.shift_code ? getShiftTimesAs(entry.shift_code).shift_end : null;
+    prevShiftStart = entry.shift_code ? getShiftTimesAs(entry.shift_code, LEGACY_BASELINE_DATE).shift_start : null;
+    prevShiftEnd = entry.shift_code ? getShiftTimesAs(entry.shift_code, LEGACY_BASELINE_DATE).shift_end : null;
   }
 
   return { ...employee, weekly_shifts };

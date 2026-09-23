@@ -17,6 +17,7 @@ import { buildRosterViewsFromItems, CoverageItem } from "./weekly-plan-view";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { getShiftTimesAs } from "../shift-templates";
+import { flightDateFor } from "../flight-date";
 import { PlanIssue } from "./validation";
 import { CheckinZoneId, CHECKIN_ZONES, ORDINARY_CHECKIN_ZONES } from "../checkin-zones";
 import {
@@ -117,6 +118,7 @@ function zoneWindowsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: 
  */
 function buildZoneCoverageViews(
   daysOrder: string[],
+  weekStart: string,
   zoneRequirements: ZoneCheckinRequirement[],
   zoneAssignments: ZoneCheckinAssignment[],
   employees: Employee[],
@@ -154,7 +156,16 @@ function buildZoneCoverageViews(
     };
 
     // ORDINARY zones — derived Required/Available timeline.
-    const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(day, employees, rosterEntries, assignments, requirements, flights, checkinPolicy);
+    const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(
+      day,
+      employees,
+      rosterEntries,
+      assignments,
+      requirements,
+      flights,
+      checkinPolicy,
+      flightDateFor(weekStart, day)
+    );
     const rowsByZone = buildZoneCoverageRowsForDay(day, flights, eligibleAvailability, zonePolicy);
 
     for (const zone of ORDINARY_CHECKIN_ZONES) {
@@ -255,6 +266,7 @@ export function buildPersistedWeeklyPlanView(
     requirements,
     flights,
     daysOrder,
+    plan.week_start,
     plan.issues,
     rosterEntries,
     plan.config_snapshot.checkin_demand_policy,
@@ -264,6 +276,7 @@ export function buildPersistedWeeklyPlanView(
   );
   const zoneCoverage = buildZoneCoverageViews(
     daysOrder,
+    plan.week_start,
     zoneRequirements,
     zoneAssignments,
     employees,
@@ -284,6 +297,7 @@ function buildPersistedAgentScheduleEntries(
   requirements: StaffingRequirement[],
   flights: Flight[],
   daysOrder: string[],
+  weekStart: string,
   planIssues: PlanIssue[],
   rosterEntries: WeeklyPlanRosterEntry[],
   checkinPolicy: import("./checkin-demand").CheckinDemandPolicy,
@@ -317,7 +331,16 @@ function buildPersistedAgentScheduleEntries(
   // rows entirely.
   const derivedPeriodsByDay = new Map<string, ReturnType<typeof buildDailyCapacityTimeline>>();
   for (const day of daysOrder) {
-    const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(day, employees, rosterEntries, assignments, requirements, flights, checkinPolicy);
+    const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(
+      day,
+      employees,
+      rosterEntries,
+      assignments,
+      requirements,
+      flights,
+      checkinPolicy,
+      flightDateFor(weekStart, day)
+    );
     derivedPeriodsByDay.set(day, buildDailyCapacityTimeline(day, flights, eligibleAvailability, zonePolicy));
   }
 
@@ -359,7 +382,7 @@ function buildPersistedAgentScheduleEntries(
         const rosterEntry = rosterByEmployeeDay.get(`${employee.id}|${day}`);
         const isOff = !rosterEntry || rosterEntry.status === "off";
         const shiftCode = isOff ? null : rosterEntry!.shift_code;
-        const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode) : null;
+        const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode, flightDateFor(weekStart, day)) : null;
 
         const dayDuties: AgentScheduleDuty[] = [];
         for (const a of employeeAssignments) {

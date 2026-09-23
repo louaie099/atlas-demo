@@ -8,6 +8,7 @@ import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanR
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
 import { getShiftDurationHours } from "../shift-templates";
+import { flightDateFor } from "../flight-date";
 import { CONFIGURED_COMPANIES } from "../company-config";
 import { CheckinZoneId, CHECKIN_ZONE_IDS } from "../checkin-zones";
 import { aggregateAllZonesDailyDemand, zoneDemandClusters, peakAggregateT1DemandMinuteForDay, aggregateT1DemandProfileForDay } from "./zone-demand-aggregation";
@@ -103,6 +104,7 @@ export interface DraftWeeklyPlan {
 
 function runShiftGenerationPass(
   daysOrder: string[],
+  weekStart: string,
   employees: Employee[],
   demandByDay: Record<string, DailyDemand>,
   config: Config,
@@ -121,11 +123,13 @@ function runShiftGenerationPass(
 
   for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
     const day = daysOrder[dayIndex];
+    const date = flightDateFor(weekStart, day);
     const nextDay = daysOrder[(dayIndex + 1) % daysOrder.length];
     const nextDayBaselineShift = getNextDayBaseline(dayIndex, nextDay);
 
     const generatedShifts = generateFlexiblePoolShifts(
       day,
+      date,
       demandByDay[day],
       employees,
       priorDayShift,
@@ -138,13 +142,13 @@ function runShiftGenerationPass(
     generatedShiftsByDay[day] = generatedShifts;
 
     for (const assignment of generatedShifts) {
-      const hours = getShiftDurationHours(assignment.shiftCode);
+      const hours = getShiftDurationHours(assignment.shiftCode, date);
       hoursSoFarThisWeek.set(assignment.employeeId, (hoursSoFarThisWeek.get(assignment.employeeId) ?? 0) + hours);
     }
 
     const nextPriorDayShift: PriorDayShiftMap = new Map();
     for (const employee of employees) {
-      nextPriorDayShift.set(employee.id, effectiveShiftForDay(employee, day, generatedShifts));
+      nextPriorDayShift.set(employee.id, effectiveShiftForDay(employee, day, generatedShifts, date));
     }
     priorDayShift = nextPriorDayShift;
   }
@@ -186,6 +190,7 @@ function runShiftGenerationPass(
  */
 function runTwoPassShiftGeneration(
   daysOrder: string[],
+  weekStart: string,
   employees: Employee[],
   demandByDay: Record<string, DailyDemand>,
   config: Config,
@@ -198,6 +203,7 @@ function runTwoPassShiftGeneration(
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const staticBaselineOnly = (nextDay: string): PriorDayShiftMap => {
     const map: PriorDayShiftMap = new Map();
+    const nextDate = flightDateFor(weekStart, nextDay);
     for (const employee of employees) {
       // Non-flexible employees: their real static commitment (unchanged
       // across passes). Flexible employees: no discovery-pass lookahead
@@ -205,13 +211,14 @@ function runTwoPassShiftGeneration(
       // generatedShifts array — see its doc comment) — pass 1 simply
       // runs without a forward check for this population, exactly as
       // pass 2 will correct.
-      map.set(employee.id, effectiveShiftForDay(employee, nextDay, []));
+      map.set(employee.id, effectiveShiftForDay(employee, nextDay, [], nextDate));
     }
     return map;
   };
 
   const pass1 = runShiftGenerationPass(
     daysOrder,
+    weekStart,
     employees,
     demandByDay,
     config,
@@ -222,19 +229,21 @@ function runTwoPassShiftGeneration(
 
   const pass2 = runShiftGenerationPass(
     daysOrder,
+    weekStart,
     employees,
     demandByDay,
     config,
     priorWeekBoundaryContext,
     (dayIndex, nextDay) => {
       const map: PriorDayShiftMap = new Map();
+      const nextDate = flightDateFor(weekStart, nextDay);
       const nextDayIndex = (dayIndex + 1) % daysOrder.length;
       const nextDayPass1Shifts = pass1.generatedShiftsByDay[daysOrder[nextDayIndex]] ?? [];
       for (const employee of employees) {
         if (isFlexibleGeneralPool(employee)) {
-          map.set(employee.id, effectiveShiftForDay(employee, nextDay, nextDayPass1Shifts));
+          map.set(employee.id, effectiveShiftForDay(employee, nextDay, nextDayPass1Shifts, nextDate));
         } else {
-          map.set(employee.id, effectiveShiftForDay(employee, nextDay, []));
+          map.set(employee.id, effectiveShiftForDay(employee, nextDay, [], nextDate));
         }
       }
       return map;
@@ -313,6 +322,13 @@ export function generateDraftWeeklyPlan(
   config: Config,
   daysOrder: string[],
   weekLabel: string,
+  // The real Monday date this daysOrder window starts on ("YYYY-MM-DD").
+  // Required — threaded to every shift-template lookup in this pipeline
+  // (see lib/shift-templates.ts) so the shift regime effective on each
+  // REAL calendar day (never the whole displayed week as one unit) is
+  // resolved correctly, including for a window that straddles
+  // 2026-09-20.
+  weekStart: string,
   // Optional cross-plan continuity seed: each employee's REAL effective
   // shift on the calendar day immediately before this window's first day
   // (e.g. the immediately preceding WeeklyPlan's actual Sunday roster —
@@ -357,6 +373,7 @@ export function generateDraftWeeklyPlan(
 
   const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(
     daysOrder,
+    weekStart,
     employees,
     demandByDay,
     config,
@@ -377,6 +394,7 @@ export function generateDraftWeeklyPlan(
     daysOrder,
     rawGeneratedShiftsByDay,
     config.minimum_rest_hours,
+    weekStart,
     priorWeekBoundaryContext
   );
 
@@ -401,6 +419,7 @@ export function generateDraftWeeklyPlan(
     config,
     priorWeekBoundaryContext,
     config.minimum_rest_hours,
+    weekStart,
     t1PeakDemandMinuteByDay
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
@@ -424,6 +443,7 @@ export function generateDraftWeeklyPlan(
     employees,
     demandByDay,
     config.minimum_rest_hours,
+    weekStart,
     priorWeekBoundaryContext
   );
   const { generatedShiftsByDay: foreignShiftsByDay, conflicts: foreignDemandConflicts } = generateForeignCompanyShifts(
@@ -432,6 +452,7 @@ export function generateDraftWeeklyPlan(
     flights,
     CONFIGURED_COMPANIES,
     config.minimum_rest_hours,
+    weekStart,
     priorWeekBoundaryContext,
     // Normal RAM roster top-up (see specialized-team-generation.ts's own
     // doc comment) — foreign-company employees now get the same
@@ -482,6 +503,7 @@ export function generateDraftWeeklyPlan(
     daysOrder,
     combinedShiftsByDay,
     config.minimum_rest_hours,
+    weekStart,
     priorWeekBoundaryContext,
     generationDrivenEmployeeIds
   );
@@ -552,8 +574,9 @@ export function generateDraftWeeklyPlan(
   // is 0 (the default) -- this map is only ever consulted then.
   const hoursScheduledThisWindow = new Map<string, number>();
   for (const day of daysOrder) {
+    const date = flightDateFor(weekStart, day);
     for (const g of finalGeneratedShiftsByDay[day] ?? []) {
-      hoursScheduledThisWindow.set(g.employeeId, (hoursScheduledThisWindow.get(g.employeeId) ?? 0) + getShiftDurationHours(g.shiftCode));
+      hoursScheduledThisWindow.set(g.employeeId, (hoursScheduledThisWindow.get(g.employeeId) ?? 0) + getShiftDurationHours(g.shiftCode, date));
     }
   }
 
@@ -569,6 +592,7 @@ export function generateDraftWeeklyPlan(
       finalGeneratedShiftsByDay[day] ?? [],
       existingAssignments,
       config,
+      flightDateFor(weekStart, day),
       restHoursByEmployeeDay,
       hoursScheduledThisWindow
     );
@@ -675,7 +699,7 @@ export function generateDraftWeeklyPlan(
     description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
   }));
 
-  const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config);
+  const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config, weekStart);
   const configurationIssues = [
     ...collectConfigurationIssues(requirements),
     // Average-hours feasibility: returns [] until a reference period is
@@ -687,8 +711,8 @@ export function generateDraftWeeklyPlan(
     // weekly_shifts baseline is no longer what's actually planned for
     // them (see specialized-team-generation.ts), so auditing it would
     // report a stale, no-longer-relevant finding.
-    ...auditAverageWeeklyHoursFeasibility(employeesWithPlannedRoster, isGenerationDrivenPopulation, config),
-    ...auditStaticShiftRestFeasibility(employees, isGenerationDrivenPopulation, config),
+    ...auditAverageWeeklyHoursFeasibility(employeesWithPlannedRoster, isGenerationDrivenPopulation, config, weekStart),
+    ...auditStaticShiftRestFeasibility(employees, isGenerationDrivenPopulation, config, weekStart),
     ...specializedRestConflictIssues,
     ...demandConflictIssues,
   ];

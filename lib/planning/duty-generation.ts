@@ -51,16 +51,23 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 export function effectiveShiftForDay(
   employee: Employee,
   dayOfWeek: string,
-  generatedShifts: GeneratedShiftAssignment[]
+  generatedShifts: GeneratedShiftAssignment[],
+  // The REAL calendar date ("YYYY-MM-DD") this dayOfWeek label refers to —
+  // required so the correct effective-dated shift regime (see
+  // lib/shift-templates.ts) is resolved for THIS specific day, never a
+  // stale global catalog. Every real caller has this (a WeeklyPlan/draft
+  // is always generated/read against a real weekStart) — see
+  // lib/flight-date.ts's flightDateFor for how callers derive it.
+  date: string
 ): { shift_start: string; shift_end: string } | null {
   if (isGenerationDrivenPopulation(employee)) {
     const generated = generatedShifts.find((g) => g.employeeId === employee.id && g.dayOfWeek === dayOfWeek);
-    return generated ? getShiftTimesAs(generated.shiftCode) : null;
+    return generated ? getShiftTimesAs(generated.shiftCode, date) : null;
   }
 
   const existing = employee.weekly_shifts.find((s) => s.day_of_week === dayOfWeek);
   if (existing?.status === "off") return null;
-  if (existing?.shift_code) return getShiftTimesAs(existing.shift_code);
+  if (existing?.shift_code) return getShiftTimesAs(existing.shift_code, date);
   return null; // not rostered this day — never a candidate for a duty that day
 }
 
@@ -143,7 +150,10 @@ export function resolvePlanRosterEntry(
 export function buildDayEffectivePoolFromRosterEntries(
   employees: Employee[],
   rosterEntries: WeeklyPlanRosterEntry[],
-  dayOfWeek: string
+  dayOfWeek: string,
+  // The real calendar date this dayOfWeek label refers to — see
+  // effectiveShiftForDay's doc comment on the same parameter.
+  date: string
 ): Employee[] {
   const byEmployee = new Map<string, WeeklyPlanRosterEntry>();
   for (const entry of rosterEntries) {
@@ -154,7 +164,7 @@ export function buildDayEffectivePoolFromRosterEntries(
     .map((e) => {
       const entry = byEmployee.get(e.id);
       if (!entry || entry.status === "off" || !entry.shift_code) return null;
-      const times = getShiftTimesAs(entry.shift_code);
+      const times = getShiftTimesAs(entry.shift_code, date);
       return { ...e, shift_start: times.shift_start, shift_end: times.shift_end } as Employee;
     })
     .filter((e): e is Employee => e !== null);
@@ -231,6 +241,10 @@ export function generateDutiesForDay(
   generatedShifts: GeneratedShiftAssignment[],
   existingAssignments: Assignment[],
   config: Config,
+  // The real calendar date this dayOfWeek label refers to — see
+  // effectiveShiftForDay's doc comment on the same parameter. Required:
+  // every real caller generates/reads against a real weekStart.
+  date: string,
   // The single authoritative "actual rest before today's real shift"
   // source (see enforceRestInvariantAcrossWeek's own doc comment) --
   // when omitted, falls back to each employee's static persisted
@@ -273,7 +287,7 @@ export function generateDutiesForDay(
   // stale snapshot of a different one.
   const dayEffectivePool = allEmployees
     .map((e) => {
-      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts);
+      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts, date);
       if (!effective) return null;
       const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
       return {

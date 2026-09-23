@@ -3,9 +3,10 @@ import { DailyDemand, demandClustersForRole } from "./demand-aggregation";
 import { selectCompatibleShiftCodes, planForeignCompanyDay } from "../foreign-shift-planning";
 import { getCompanyRequiredAgents, getCompanyTeamRoleConfig, TeamRoleConfig } from "../company-config";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
-import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
+import { getShiftTimesAs, getShiftDurationHours, LEGACY_BASELINE_DATE } from "../shift-templates";
+import { flightDateFor } from "../flight-date";
 import { isShiftExtensionPreferred } from "../teams";
-import { computeEmployeeDayCountTopUp, shortestFirstCatalogCodes } from "./roster-generation";
+import { computeEmployeeDayCountTopUp } from "./roster-generation";
 
 /**
  * FAIRNESS FIX (2026-09-21): `assignPoolToWindow`/`assignPoolToWindowWithRoles`
@@ -111,7 +112,10 @@ function assignPoolToWindow(
   // See teams.ts's isShiftExtensionPreferred / foreign-shift-planning.ts's
   // preferExtended doc comments. Default false — every existing caller
   // unaffected, identical shift selection as before.
-  preferExtended = false
+  preferExtended = false,
+  // The real calendar date this window is being planned for — resolves
+  // the shift regime effective on that day (see lib/shift-templates.ts).
+  date: string = LEGACY_BASELINE_DATE
 ): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
   const assigned: { employeeId: string; shiftCode: string }[] = [];
   for (const employee of pool) {
@@ -130,7 +134,8 @@ function assignPoolToWindow(
       prior?.shift_end ?? null,
       minimumRestHours,
       true,
-      preferExtended
+      preferExtended,
+      date
     );
     if (candidates.length > 0) {
       assigned.push({ employeeId: employee.id, shiftCode: candidates[0].code });
@@ -173,14 +178,15 @@ function assignPoolToWindowWithRoles(
   roleConfig: TeamRoleConfig | null,
   priorDayShift: PriorDayShiftMap,
   minimumRestHours: number,
-  preferExtended = false
+  preferExtended = false,
+  date: string = LEGACY_BASELINE_DATE
 ): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
   if (!roleConfig) {
-    return assignPoolToWindow(pool, window, headcount, priorDayShift, minimumRestHours, preferExtended);
+    return assignPoolToWindow(pool, window, headcount, priorDayShift, minimumRestHours, preferExtended, date);
   }
   const { aces, leaders } = partitionPoolByRole(pool, roleConfig);
-  const aceResult = assignPoolToWindow(aces, window, roleConfig.aceCount, priorDayShift, minimumRestHours, preferExtended);
-  const leaderResult = assignPoolToWindow(leaders, window, roleConfig.leaderCount, priorDayShift, minimumRestHours, preferExtended);
+  const aceResult = assignPoolToWindow(aces, window, roleConfig.aceCount, priorDayShift, minimumRestHours, preferExtended, date);
+  const leaderResult = assignPoolToWindow(leaders, window, roleConfig.leaderCount, priorDayShift, minimumRestHours, preferExtended, date);
   return {
     assigned: [...aceResult.assigned, ...leaderResult.assigned],
     shortfall: aceResult.shortfall + leaderResult.shortfall,
@@ -202,6 +208,10 @@ export function generateProfilingMesureShifts(
   employees: Employee[],
   demandByDay: Record<string, DailyDemand>,
   minimumRestHours: number,
+  // The real Monday date this daysOrder window starts on — resolves the
+  // shift regime effective on each real calendar day (see
+  // lib/shift-templates.ts).
+  weekStart: string,
   priorWeekBoundaryContext: PriorDayShiftMap = new Map()
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
@@ -216,12 +226,13 @@ export function generateProfilingMesureShifts(
     const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
 
     for (const day of daysOrder) {
+      const date = flightDateFor(weekStart, day);
       const clusters = demandClustersForRole(demandByDay[day], team);
       const dayAssignments: { employeeId: string; shiftCode: string }[] = [];
       let remainingPool = sortByLeastUsedFirst(pool, usageHours);
 
       for (const cluster of clusters) {
-        const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended);
+        const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended, date);
         dayAssignments.push(...assigned);
         const assignedIds = new Set(assigned.map((a) => a.employeeId));
         remainingPool = remainingPool.filter((e) => !assignedIds.has(e.id));
@@ -239,13 +250,13 @@ export function generateProfilingMesureShifts(
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
         generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [team] });
-        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode));
+        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode, date));
       }
 
       const nextPriorDayShift: PriorDayShiftMap = new Map();
       for (const employee of pool) {
         const a = dayAssignments.find((x) => x.employeeId === employee.id);
-        nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode) : null);
+        nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode, date) : null);
       }
       priorDayShift = nextPriorDayShift;
     }
@@ -298,6 +309,10 @@ export function generateForeignCompanyShifts(
   flights: Flight[],
   configuredCompanies: string[],
   minimumRestHours: number,
+  // The real Monday date this daysOrder window starts on — resolves the
+  // shift regime effective on each real calendar day (see
+  // lib/shift-templates.ts).
+  weekStart: string,
   priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
   // Optional: when provided, the normal-RAM-roster top-up (see this
   // function's doc comment) runs on top of the flight-driven result
@@ -324,7 +339,8 @@ export function generateForeignCompanyShifts(
     const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
 
     for (const day of daysOrder) {
-      const plan = planForeignCompanyDay(company, day, flights);
+      const date = flightDateFor(weekStart, day);
+      const plan = planForeignCompanyDay(company, day, flights, undefined, undefined, undefined, date);
       let dayAssignments: { employeeId: string; shiftCode: string }[] = [];
 
       if (plan && headcount !== undefined) {
@@ -335,7 +351,8 @@ export function generateForeignCompanyShifts(
           roleConfig,
           priorDayShift,
           minimumRestHours,
-          preferExtended
+          preferExtended,
+          date
         );
         dayAssignments = assigned;
         if (shortfall > 0) {
@@ -353,13 +370,13 @@ export function generateForeignCompanyShifts(
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
         generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [company] });
-        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode));
+        usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode, date));
       }
 
       const nextPriorDayShift: PriorDayShiftMap = new Map();
       for (const employee of pool) {
         const a = dayAssignments.find((x) => x.employeeId === employee.id);
-        nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode) : null);
+        nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode, date) : null);
       }
       priorDayShift = nextPriorDayShift;
     }
@@ -375,7 +392,6 @@ export function generateForeignCompanyShifts(
     // whatever real company-flight-day shift already exists.
     if (config) {
       const targetWorkingDaysThisWindow = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
-      const catalogCodes = shortestFirstCatalogCodes();
       for (const employee of pool) {
         const scheduledDays = new Set<string>(
           daysOrder.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === employee.id))
@@ -385,6 +401,7 @@ export function generateForeignCompanyShifts(
         const additions = computeEmployeeDayCountTopUp(
           employee.id,
           daysOrder,
+          weekStart,
           scheduledDays,
           0, // hours objective never chased here — see doc comment
           getExistingShift,
@@ -392,8 +409,7 @@ export function generateForeignCompanyShifts(
           minimumRestHours,
           targetWorkingDaysThisWindow,
           config.normal_weekly_off_days,
-          null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
-          catalogCodes
+          null // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
         );
 
         for (const [day, shiftCode] of additions) {

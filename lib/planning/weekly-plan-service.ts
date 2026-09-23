@@ -213,8 +213,8 @@ export interface BuildDraftPlanBundleInput {
 export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPlanBundle {
   const { planId, weekStart, weekLabel, revision, flights, employees, config, daysOrder } = input;
   const priorWeekBoundaryContext =
-    input.priorWeekBoundaryContext ?? deriveFallbackBoundaryContext(employees, daysOrder);
-  const draft = generateDraftWeeklyPlan(flights, employees, [], config, daysOrder, weekLabel, priorWeekBoundaryContext);
+    input.priorWeekBoundaryContext ?? deriveFallbackBoundaryContext(employees, daysOrder, weekStart);
+  const draft = generateDraftWeeklyPlan(flights, employees, [], config, daysOrder, weekLabel, weekStart, priorWeekBoundaryContext);
 
   const plan: WeeklyPlan = {
     id: planId,
@@ -611,7 +611,7 @@ async function lookupPriorWeekBoundaryContext(
 
   const priorRosterEntries = await fetchAllRosterEntriesForPlan(supabase, priorWeekId);
   const priorLastDay = daysOrder[daysOrder.length - 1];
-  return deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay);
+  return deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay, previousWeekStart(weekStart));
 }
 
 /**

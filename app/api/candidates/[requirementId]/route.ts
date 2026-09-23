@@ -167,10 +167,14 @@ export async function GET(
   // max consecutive off days must never be overridable via manual
   // assignment either).
   const rosterRows = plan ? await fetchAllRosterEntriesForPlan(supabase, plan.id) : ([] as WeeklyPlanRosterEntry[]);
+  // The real calendar date this flight occurs on — resolves the correct
+  // effective-dated shift regime (see lib/shift-templates.ts) for the
+  // rostered shift boundaries below, rather than one global catalog.
   const candidatePool = buildDayEffectivePoolFromRosterEntries(
     notYetAssigned,
     rosterRows,
-    targetFlight.day_of_week
+    targetFlight.day_of_week,
+    targetFlight.flight_date
   );
 
   const window: TimeWindow = getRequirementWindow(requirement, targetFlight);

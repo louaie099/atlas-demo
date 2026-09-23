@@ -1,5 +1,5 @@
 import { Employee, Flight, StaffingRequirement } from "./types";
-import { SHIFT_CODES } from "./shift-templates";
+import { shiftCatalogForDate, LEGACY_BASELINE_DATE } from "./shift-templates";
 import { computeForeignCompanyProtectedWindow } from "./foreign-company-window";
 import { restHoursBetween } from "./roster-generation";
 
@@ -76,10 +76,18 @@ export function selectCompatibleShiftCode(
   adjacentShiftEnd?: string | null,
   minimumRestHours?: number,
   allowLateStart = false,
-  preferExtended = false
+  preferExtended = false,
+  // The real calendar date being planned for — resolves which shift
+  // regime's entrée/sortie catalog is used (see lib/shift-templates.ts).
+  // Defaults to LEGACY_BASELINE_DATE (the pre-2026-09-20 regime) so every
+  // existing test/caller that has no real plan date in scope keeps
+  // resolving the exact same OLD-regime codes it always did — a REAL
+  // planning caller (specialized-team-generation.ts) always passes its
+  // own real date explicitly instead of relying on this default.
+  date: string = LEGACY_BASELINE_DATE
 ): string | null {
   return (
-    selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours, allowLateStart, preferExtended)[0]
+    selectCompatibleShiftCodes(windowStart, windowEnd, adjacentShiftStart, adjacentShiftEnd, minimumRestHours, allowLateStart, preferExtended, date)[0]
       ?.code ?? null
   );
 }
@@ -124,12 +132,15 @@ export function selectCompatibleShiftCodes(
   // pretending to be available." Never changes which codes are
   // ELIGIBLE (the filter above, and the optional rest filter below, are
   // both unaffected) — only which eligible code is preferred first.
-  preferExtended = false
+  preferExtended = false,
+  // See selectCompatibleShiftCode's own doc comment on this parameter —
+  // same default/rationale.
+  date: string = LEGACY_BASELINE_DATE
 ): { code: string; entree: string; sortie: string }[] {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
 
-  let candidates = Object.entries(SHIFT_CODES)
+  let candidates = Object.entries(shiftCatalogForDate(date))
     .map(([code, { entree, sortie }]) => ({
       code,
       entreeMin: timeToMinutes(entree),
@@ -204,7 +215,11 @@ export function planForeignCompanyDay(
   flights: Flight[],
   adjacentShiftStart?: string | null,
   adjacentShiftEnd?: string | null,
-  minimumRestHours?: number
+  minimumRestHours?: number,
+  // The real calendar date being planned for — see
+  // selectCompatibleShiftCode's own doc comment on the same parameter/
+  // default.
+  date: string = LEGACY_BASELINE_DATE
 ): ForeignDayPlan | null {
   const dayFlights = findCompanyFlightsOnDay(company, dayOfWeek, flights);
   if (dayFlights.length === 0) return null;
@@ -223,7 +238,10 @@ export function planForeignCompanyDay(
     combinedWindow.end,
     adjacentShiftStart,
     adjacentShiftEnd,
-    minimumRestHours
+    minimumRestHours,
+    false,
+    false,
+    date
   );
 
   return { flights: dayFlights, windows, combinedWindow, shiftCode };

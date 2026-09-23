@@ -16,6 +16,7 @@ import { PlanRosterEntryDraft } from "./generate-draft-plan";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { getShiftTimesAs } from "../shift-templates";
+import { flightDateFor } from "../flight-date";
 import { PlanIssue } from "./validation";
 
 /**
@@ -181,6 +182,7 @@ function buildAgentScheduleEntries(
   flights: Flight[],
   allDuties: GeneratedDuty[],
   daysOrder: string[],
+  weekStart: string,
   planIssues: PlanIssue[],
   rosterEntries: PlanRosterEntryDraft[],
   checkinPolicy: import("./checkin-demand").CheckinDemandPolicy
@@ -276,7 +278,7 @@ function buildAgentScheduleEntries(
         const rosterEntry = rosterByKey.get(`${employee.id}|${day}`);
         const shiftCode = rosterEntry?.shift_code ?? null;
         const isOff = !rosterEntry || rosterEntry.status === "off";
-        const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode) : null;
+        const shiftTimes = shiftCode ? getShiftTimesAs(shiftCode, flightDateFor(weekStart, day)) : null;
 
         const dayDuties: AgentScheduleDuty[] = [];
 
@@ -342,9 +344,19 @@ export function buildWeeklyPlanView(
   requirements: StaffingRequirement[],
   config: Config,
   daysOrder: string[],
-  weekLabel: string
+  weekLabel: string,
+  // The real Monday date this daysOrder window starts on — threaded to
+  // generateDraftWeeklyPlan and this view's own shift-time resolution so
+  // the correct effective-dated regime (see lib/shift-templates.ts) is
+  // used. Defaults to LEGACY_BASELINE_DATE (the pre-2026-09-20 regime) so
+  // every existing caller (this module's own live/pre-persistence path is
+  // no longer used by the real app — see weekly-plan-service.ts's
+  // persisted path — but is still exercised by tests) keeps resolving the
+  // OLD regime it always implicitly assumed, unless a real weekStart is
+  // passed.
+  weekStart: string = "2020-01-06" // a Monday, well before the 2026-09-20 boundary
 ): WeeklyPlanView {
-  const draftPlan = generateDraftWeeklyPlan(flights, employees, assignments, config, daysOrder, weekLabel);
+  const draftPlan = generateDraftWeeklyPlan(flights, employees, assignments, config, daysOrder, weekLabel, weekStart);
   const allDuties = Object.values(draftPlan.dutiesByDay).flat();
 
   const roster = buildRosterViews(requirements, flights, employees, assignments, allDuties);
@@ -355,6 +367,7 @@ export function buildWeeklyPlanView(
     flights,
     allDuties,
     daysOrder,
+    weekStart,
     draftPlan.issues,
     draftPlan.rosterEntries,
     config.checkin_demand_policy

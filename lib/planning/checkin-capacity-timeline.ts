@@ -458,9 +458,14 @@ export function buildEligibleEmployeeAvailabilityForDay(
   assignments: Assignment[],
   requirements: StaffingRequirement[],
   flights: Flight[],
-  checkinPolicy?: CheckinDemandPolicy
+  checkinPolicy: CheckinDemandPolicy | undefined,
+  // The real calendar date this dayOfWeek label refers to — resolves
+  // which shift regime's entrée/sortie each rostered employee's shift
+  // boundary uses (see lib/shift-templates.ts). Required: every real
+  // caller reads against a real weekStart.
+  date: string
 ): EmployeeAvailabilityInput[] {
-  const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(employees, rosterEntries, dayOfWeek);
+  const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(employees, rosterEntries, dayOfWeek, date);
   const eligiblePool = dayEffectivePool.filter(isEligibleForDefaultCheckinPlacement) as (Employee & {
     shift_start: string;
     shift_end: string;

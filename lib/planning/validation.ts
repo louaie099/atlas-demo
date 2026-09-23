@@ -1,5 +1,6 @@
 import { Employee, StaffingRequirement, Config } from "../types";
 import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
+import { flightDateFor, shiftWeek } from "../flight-date";
 import { restHoursBetween } from "../roster-generation";
 import { evaluateAverageWorkingHours } from "./average-hours";
 import { usesFixedCycleRotation } from "../teams";
@@ -113,7 +114,7 @@ export function collectConfigurationIssues(requirements: StaffingRequirement[]):
  * explicitly too, exactly like lib/planning/consecutive-off.ts's own
  * cyclic (week-wrapping) consecutive-OFF check.
  */
-export function checkRestBetweenDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue[] {
+export function checkRestBetweenDays(employee: Employee, daysOrder: string[], config: Config, weekStart: string): PlanIssue[] {
   const issues: PlanIssue[] = [];
 
   function checkPair(todayLabel: string, tomorrowLabel: string, tomorrowIssueDay: string, issueType: PlanIssueType): void {
@@ -122,8 +123,21 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
     if (today?.status !== "working" || !today.shift_code) return;
     if (tomorrow?.status !== "working" || !tomorrow.shift_code) return;
 
-    const todayShift = getShiftTimesAs(today.shift_code);
-    const tomorrowShift = getShiftTimesAs(tomorrow.shift_code);
+    // The cyclic wrap pair (this week's last day -> the FOLLOWING week's
+    // first day) needs the following week's real date, not this week's —
+    // detected by tomorrowLabel appearing earlier in daysOrder than
+    // todayLabel (the wrap case, handled below), otherwise both days share
+    // this same weekStart's week.
+    const todayIndex = daysOrder.indexOf(todayLabel);
+    const tomorrowIndex = daysOrder.indexOf(tomorrowLabel);
+    const isWrap = tomorrowIndex !== -1 && tomorrowIndex < todayIndex;
+    const todayDate = flightDateFor(weekStart, todayLabel);
+    const tomorrowDate = isWrap
+      ? flightDateFor(shiftWeek(weekStart, 1), tomorrowLabel)
+      : flightDateFor(weekStart, tomorrowLabel);
+
+    const todayShift = getShiftTimesAs(today.shift_code, todayDate);
+    const tomorrowShift = getShiftTimesAs(tomorrow.shift_code, tomorrowDate);
 
     // restHoursBetween needs the PREVIOUS shift's own start too, not just
     // its end -- an overnight previous shift (e.g. AP03 17:45-02:00) ends
@@ -191,11 +205,11 @@ export function checkRestBetweenDays(employee: Employee, daysOrder: string[], co
  * always computed — a per-displayed-week sum — just no longer treated
  * elsewhere as a compliance verdict on its own.
  */
-export function computeScheduledWeeklyHours(employee: Employee): number {
+export function computeScheduledWeeklyHours(employee: Employee, weekStart: string): number {
   let totalHours = 0;
   for (const entry of employee.weekly_shifts) {
     if (entry.status !== "working" || !entry.shift_code) continue;
-    totalHours += getShiftDurationHours(entry.shift_code);
+    totalHours += getShiftDurationHours(entry.shift_code, flightDateFor(weekStart, entry.day_of_week));
   }
   return Math.round(totalHours * 10) / 10;
 }
@@ -220,8 +234,8 @@ export function computeScheduledWeeklyHours(employee: Employee): number {
  * against the wrong reference period. See auditAverageWeeklyHoursFeasibility
  * below for the equivalent configuration-level (non-per-week) treatment.
  */
-export function checkAverageWeeklyHours(employee: Employee, config: Config): PlanIssue | null {
-  const scheduled = computeScheduledWeeklyHours(employee);
+export function checkAverageWeeklyHours(employee: Employee, config: Config, weekStart: string): PlanIssue | null {
+  const scheduled = computeScheduledWeeklyHours(employee, weekStart);
   const daysCoveredThisWeek = employee.weekly_shifts.length;
   const result = evaluateAverageWorkingHours(scheduled, daysCoveredThisWeek, config);
   if (result.status !== "violation") return null;
@@ -253,14 +267,15 @@ export function checkAverageWeeklyHours(employee: Employee, config: Config): Pla
 export function auditAverageWeeklyHoursFeasibility(
   employees: Employee[],
   isFlexible: (e: Employee) => boolean,
-  config: Config
+  config: Config,
+  weekStart: string
 ): ConfigurationIssue[] {
   if (config.working_hours_reference_period_days === null) return [];
 
   const issues: ConfigurationIssue[] = [];
   for (const employee of employees) {
     if (isFlexible(employee)) continue; // day-by-day generation already enforces this for these, at selection time
-    const scheduled = computeScheduledWeeklyHours(employee);
+    const scheduled = computeScheduledWeeklyHours(employee, weekStart);
     const result = evaluateAverageWorkingHours(scheduled, employee.weekly_shifts.length, config);
     if (result.status === "violation") {
       issues.push({
@@ -297,13 +312,14 @@ export function auditAverageWeeklyHoursFeasibility(
 export function auditStaticShiftRestFeasibility(
   employees: Employee[],
   isFlexible: (e: Employee) => boolean,
-  config: Config
+  config: Config,
+  weekStart: string
 ): ConfigurationIssue[] {
   const issues: ConfigurationIssue[] = [];
   for (const employee of employees) {
     if (isFlexible(employee)) continue; // day-by-day generation already enforces this rule for these, at selection time
     const daysOrder = employee.weekly_shifts.map((s) => s.day_of_week);
-    const restIssues = checkRestBetweenDays(employee, daysOrder, config);
+    const restIssues = checkRestBetweenDays(employee, daysOrder, config, weekStart);
     if (restIssues.length > 0) {
       const worst = restIssues.reduce((min, i) => {
         const m = i.description.match(/only ([\d.]+)h rest/);
@@ -389,7 +405,8 @@ export function validateWeeklyPlan(
   unfilledByDay: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[],
   employees: Employee[],
   daysOrder: string[],
-  config: Config
+  config: Config,
+  weekStart: string
 ): PlanIssue[] {
   const issues: PlanIssue[] = [];
 
@@ -409,8 +426,8 @@ export function validateWeeklyPlan(
   }
 
   for (const employee of employees) {
-    issues.push(...checkRestBetweenDays(employee, daysOrder, config));
-    const hoursIssue = checkAverageWeeklyHours(employee, config);
+    issues.push(...checkRestBetweenDays(employee, daysOrder, config, weekStart));
+    const hoursIssue = checkAverageWeeklyHours(employee, config, weekStart);
     if (hoursIssue) issues.push(hoursIssue);
     const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);

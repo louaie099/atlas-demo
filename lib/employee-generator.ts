@@ -1,5 +1,5 @@
 import { Employee } from "./types";
-import { getShiftTimesAs, restHoursForDailyRepeatingShift } from "./shift-templates";
+import { getShiftTimesAs, restHoursForDailyRepeatingShift, LEGACY_BASELINE_DATE } from "./shift-templates";
 import { buildStaggeredOffDays } from "./roster-generation";
 import { companyOperatingDays } from "./flight-generator";
 import { getCompanyRequiredAgents, getCompanyTeamRoleConfig } from "./company-config";
@@ -25,7 +25,20 @@ const LABOR_RULES = resolveDefaultLaborRules();
 // shift's own catalog duration via restHoursForDailyRepeatingShift
 // (lib/shift-templates.ts) — see that function's doc comment. Never an
 // independently hand-picked placeholder.
-const restBeforeShiftFor = restHoursForDailyRepeatingShift;
+//
+// STATIC BASELINE, NOT A REAL PLAN DATE (2026-09-23 effective-dated regime
+// rewrite): this generator builds each Employee's baseline shift_start/
+// shift_end/rest_before_shift_hours fields ONCE, with no real calendar
+// plan date in scope — these are a durable/legacy default, never
+// authoritative for what an actual WeeklyPlan displays on a specific real
+// date (see duty-generation.ts's effectiveShiftForDay/resolvePlanRosterEntry
+// and checkin-capacity-timeline.ts, which both resolve a real per-date
+// regime independently at generation/read time and never consult these
+// baseline fields for a generation-driven employee). LEGACY_BASELINE_DATE
+// keeps these baseline numbers exactly what they always were (the OLD,
+// pre-2026-09-20 regime) rather than silently picking a regime for data
+// that was never date-scoped.
+const restBeforeShiftFor = (code: string) => restHoursForDailyRepeatingShift(code, LEGACY_BASELINE_DATE);
 
 // Synthetic name pools — clearly generated, not real personnel. Combined
 // deterministically by index (never Math.random()) so the dataset is
@@ -258,7 +271,7 @@ export function generateFixedCycleEmployees(startIndex = 0): FixedCycleEmployeeS
       // field isn't null. The REAL day-to-day code is in weekly_shifts.
       const referenceStep = spec.cycle.steps.find((s) => "code" in s) as { code: string } | undefined;
       const referenceCode = referenceStep?.code ?? null;
-      const { shift_start, shift_end } = referenceCode ? getShiftTimesAs(referenceCode) : { shift_start: null, shift_end: null };
+      const { shift_start, shift_end } = referenceCode ? getShiftTimesAs(referenceCode, LEGACY_BASELINE_DATE) : { shift_start: null, shift_end: null };
 
       results.push({
         employee: {
@@ -427,7 +440,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
 
     for (let n = 0; n < spec.count; n++) {
       const name = nameForIndex(i);
-      const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code);
+      const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code, LEGACY_BASELINE_DATE);
       const off_days = buildStaggeredOffDays(n, LABOR_RULES.normalWeeklyOffDays, candidatePool);
       employees.push({
         id: idForName(name, i),
@@ -462,7 +475,7 @@ export function generateEmployees(startIndex = 0): Omit<Employee, "weekly_shifts
 
     for (let n = 0; n < spec.count; n++) {
       const name = nameForIndex(i);
-      const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code);
+      const { shift_start, shift_end } = getShiftTimesAs(spec.shift_code, LEGACY_BASELINE_DATE);
       employees.push({
         id: idForName(name, i),
         name,

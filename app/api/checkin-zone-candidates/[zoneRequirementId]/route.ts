@@ -5,6 +5,7 @@ import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CURRENT_WEEK_START } from "@/lib/seed-data";
 import { planIdForWeek, fetchAllRosterEntriesForPlan } from "@/lib/planning/weekly-plan-service";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
+import { flightDateFor } from "@/lib/flight-date";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, ZoneCheckinAssignment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -64,7 +65,13 @@ export async function GET(_req: Request, { params }: { params: { zoneRequirement
   const notYetAssigned = (employees as Employee[]).filter((e) => !alreadyAssignedIds.has(e.id));
 
   const rosterRows = plan ? await fetchAllRosterEntriesForPlan(supabase, plan.id) : ([] as WeeklyPlanRosterEntry[]);
-  const candidatePool = buildDayEffectivePoolFromRosterEntries(notYetAssigned, rosterRows, requirement.day_of_week);
+  // The real calendar date this zone requirement's day_of_week refers to
+  // within THIS plan's own week — resolves the correct effective-dated
+  // shift regime (see lib/shift-templates.ts). `plan` is guaranteed
+  // non-null here (the effectiveConfig check above already returned 409
+  // otherwise).
+  const requirementDate = flightDateFor(plan!.week_start, requirement.day_of_week);
+  const candidatePool = buildDayEffectivePoolFromRosterEntries(notYetAssigned, rosterRows, requirement.day_of_week, requirementDate);
 
   const window: TimeWindow = { start: requirement.window_start, end: requirement.window_end };
 

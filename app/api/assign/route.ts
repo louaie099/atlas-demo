@@ -124,7 +124,8 @@ export async function POST(req: Request) {
   const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(
     [employee as Employee],
     (rosterRows ?? []) as WeeklyPlanRosterEntry[],
-    targetFlight.day_of_week
+    targetFlight.day_of_week,
+    targetFlight.flight_date
   );
 
   if (dayEffectivePool.length === 0) {

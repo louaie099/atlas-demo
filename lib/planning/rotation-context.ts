@@ -2,6 +2,7 @@ import { Employee, WeeklyPlanRosterEntry } from "../types";
 import { PriorDayShiftMap } from "./shift-generation";
 import { effectiveShiftForDay } from "./duty-generation";
 import { getShiftTimesAs } from "../shift-templates";
+import { flightDateFor, shiftWeek } from "../flight-date";
 
 /**
  * Cross-week continuity primitives (Task D). The core idea this file
@@ -56,9 +57,18 @@ export function previousWeekStart(weekStart: string): string {
 export function deriveTransitionContextFromPriorPlan(
   employees: Employee[],
   priorPlanRosterEntries: WeeklyPlanRosterEntry[],
-  priorPlanLastDay: string
+  priorPlanLastDay: string,
+  // The real Monday date of the PRIOR plan's own week (i.e.
+  // previousWeekStart(thisWeek's weekStart)) — resolves the shift regime
+  // effective on that prior plan's real last day (see
+  // lib/shift-templates.ts). Required so a boundary seed straddling
+  // 2026-09-20 (a prior week entirely before it, feeding a new week on or
+  // after it) resolves the PRIOR shift under the regime that was actually
+  // effective then, never the new week's regime.
+  priorWeekStart: string
 ): PriorDayShiftMap {
   const map: PriorDayShiftMap = new Map();
+  const priorPlanLastDate = flightDateFor(priorWeekStart, priorPlanLastDay);
   for (const employee of employees) {
     const entry = priorPlanRosterEntries.find(
       (r) => r.employee_id === employee.id && r.day_of_week === priorPlanLastDay
@@ -67,7 +77,7 @@ export function deriveTransitionContextFromPriorPlan(
       map.set(employee.id, null);
       continue;
     }
-    map.set(employee.id, getShiftTimesAs(entry.shift_code));
+    map.set(employee.id, getShiftTimesAs(entry.shift_code, priorPlanLastDate));
   }
   return map;
 }
@@ -91,11 +101,17 @@ export function deriveTransitionContextFromPriorPlan(
  * assumed to continue until Stage 6 (or a fixed cycle) actually generates
  * something that overrides it.
  */
-export function deriveFallbackBoundaryContext(employees: Employee[], daysOrder: string[]): PriorDayShiftMap {
+export function deriveFallbackBoundaryContext(employees: Employee[], daysOrder: string[], weekStart: string): PriorDayShiftMap {
   const lastDay = daysOrder[daysOrder.length - 1];
+  // The stand-in "day before this window" date: this window's own last
+  // day, one week earlier — matches this function's own doc comment
+  // (an employee's own baseline is assumed to continue from their most
+  // recent pattern) and resolves the regime effective on THAT date, not
+  // the upcoming window's.
+  const standInDate = flightDateFor(shiftWeek(weekStart, -1), lastDay);
   const map: PriorDayShiftMap = new Map();
   for (const employee of employees) {
-    map.set(employee.id, effectiveShiftForDay(employee, lastDay, []));
+    map.set(employee.id, effectiveShiftForDay(employee, lastDay, [], standInDate));
   }
   return map;
 }

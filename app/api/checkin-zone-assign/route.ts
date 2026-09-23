@@ -5,6 +5,7 @@ import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CURRENT_WEEK_START } from "@/lib/seed-data";
 import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
+import { flightDateFor } from "@/lib/flight-date";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, ZoneCheckinAssignment } from "@/lib/types";
 
 const PLANNER_NAME = "Mohammed Alaoui";
@@ -72,10 +73,12 @@ export async function POST(req: Request) {
     .select("*")
     .eq("plan_id", plan.id)
     .eq("employee_id", employeeId);
+  const requirementDate = flightDateFor(plan.week_start, requirement.day_of_week);
   const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(
     [employee as Employee],
     (rosterRows ?? []) as WeeklyPlanRosterEntry[],
-    requirement.day_of_week
+    requirement.day_of_week,
+    requirementDate
   );
   if (dayEffectivePool.length === 0) {
     return NextResponse.json(

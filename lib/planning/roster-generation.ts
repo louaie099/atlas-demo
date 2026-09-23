@@ -1,8 +1,9 @@
 import { Employee, Config } from "../types";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { isFlexibleGeneralPool } from "./workforce-pools";
-import { SHIFT_CODES, getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
+import { getShiftTimesAs, getShiftDurationHours, shiftCatalogForDate } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
+import { flightDateFor } from "../flight-date";
 
 /**
  * STAGE: CONTINUOUS ROSTER GENERATION — sits BEFORE shift assignment
@@ -119,8 +120,8 @@ function minutesToTime(mins: number): string {
 // flexible pool is reused, unmodified, for foreign-company employees'
 // non-flight-day top-up in specialized-team-generation.ts, rather than
 // maintaining a second copy.
-export function shortestFirstCatalogCodes(): { code: string; entreeMin: number; sortieMin: number }[] {
-  return Object.entries(SHIFT_CODES)
+export function shortestFirstCatalogCodes(date: string): { code: string; entreeMin: number; sortieMin: number }[] {
+  return Object.entries(shiftCatalogForDate(date))
     .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
     .filter((c) => c.sortieMin > c.entreeMin)
     .sort((a, b) => a.sortieMin - a.entreeMin - (b.sortieMin - b.entreeMin));
@@ -225,6 +226,12 @@ function shiftWindowCoversMinute(entreeMin: number, sortieMin: number, minute: n
 export function computeEmployeeDayCountTopUp(
   employeeId: string,
   daysOrder: string[],
+  // The real Monday date this daysOrder window starts on — required so
+  // every catalog lookup/shift-time resolution below (catalogCodesForDay,
+  // resolvePriorShift, the wrap safety check) uses the shift regime
+  // actually effective on that SPECIFIC real calendar day, never one
+  // global catalog for days that may straddle 2026-09-20.
+  weekStart: string,
   initialScheduledDays: ReadonlySet<string>,
   initialScheduledHours: number,
   getExistingShift: (day: string) => { shiftCode: string } | undefined,
@@ -233,7 +240,6 @@ export function computeEmployeeDayCountTopUp(
   targetWorkingDaysThisWindow: number,
   offDaysTarget: number,
   targetHoursThisWindow: number | null,
-  catalogCodes: { code: string; entreeMin: number; sortieMin: number }[],
   // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9) — OPTIONAL,
   // and a HEURISTIC BIAS ONLY, never an override of a hard labor-rule
   // constraint: this day's aggregate T1 demand peak instant (minute of day,
@@ -265,10 +271,11 @@ export function computeEmployeeDayCountTopUp(
   function resolvePriorShift(i: number): { shift_start: string; shift_end: string } | null {
     if (i === 0) return priorWeekBoundaryContext.get(employeeId) ?? null;
     const day = daysOrder[i - 1];
+    const priorDate = flightDateFor(weekStart, day);
     const existing = getExistingShift(day);
-    if (existing) return getShiftTimesAs(existing.shiftCode);
+    if (existing) return getShiftTimesAs(existing.shiftCode, priorDate);
     const addedCode = additional.get(day);
-    if (addedCode) return getShiftTimesAs(addedCode);
+    if (addedCode) return getShiftTimesAs(addedCode, priorDate);
     return null; // preceding day is a genuine OFF day
   }
 
@@ -279,6 +286,7 @@ export function computeEmployeeDayCountTopUp(
     if (scheduledDays.size >= targetWorkingDaysThisWindow) return false;
     if (reservedOffDays.has(day) && !allowReserved) return false; // leave OFF for now — preferred consecutive block
 
+    const date = flightDateFor(weekStart, day);
     // FORWARD lookahead against tomorrow's already-fixed shift, exactly
     // as generateObligationToppedUpShifts always did — without this a
     // top-up shift added here could leave the following day's already-
@@ -286,9 +294,13 @@ export function computeEmployeeDayCountTopUp(
     const priorShift = resolvePriorShift(i);
     const nextDay = daysOrder[i + 1];
     const nextFixed = nextDay ? getExistingShift(nextDay) : undefined;
-    const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode) : null;
+    const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode, flightDateFor(weekStart, nextDay)) : null;
 
-    const legalCandidates = catalogCodes.filter((c) => {
+    // The catalog effective on THIS day's real date — resolved fresh per
+    // day, never a single window-wide catalog, so a week straddling
+    // 2026-09-20 picks the correct regime on each side of the boundary.
+    const catalogCodesForDay = shortestFirstCatalogCodes(date);
+    const legalCandidates = catalogCodesForDay.filter((c) => {
       if (priorShift) {
         const entreeTime = minutesToTime(c.entreeMin);
         if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
@@ -318,7 +330,7 @@ export function computeEmployeeDayCountTopUp(
     additional.set(day, legal.code);
     scheduledDays.add(day);
     freeDays.delete(day);
-    shortfallHours = Math.max(0, shortfallHours - getShiftDurationHours(legal.code));
+    shortfallHours = Math.max(0, shortfallHours - getShiftDurationHours(legal.code, date));
     return true;
   }
 
@@ -347,8 +359,8 @@ export function computeEmployeeDayCountTopUp(
     const firstCode = getExistingShift(firstDay)?.shiftCode ?? additional.get(firstDay);
     const lastCode = getExistingShift(lastDay)?.shiftCode ?? additional.get(lastDay);
     if (firstCode && lastCode) {
-      const firstTimes = getShiftTimesAs(firstCode);
-      const lastTimes = getShiftTimesAs(lastCode);
+      const firstTimes = getShiftTimesAs(firstCode, flightDateFor(weekStart, firstDay));
+      const lastTimes = getShiftTimesAs(lastCode, flightDateFor(weekStart, lastDay));
       const wrapRest = restHoursBetween(lastTimes.shift_start, lastTimes.shift_end, firstTimes.shift_start);
       if (wrapRest < minimumRestHours) {
         const lastIsTopUp = additional.has(lastDay) && !getExistingShift(lastDay);
@@ -381,6 +393,11 @@ export function generateObligationToppedUpShifts(
   config: Config,
   priorWeekBoundaryContext: PriorDayShiftMap,
   minimumRestHours: number,
+  // The real Monday date this daysOrder window starts on — threaded down
+  // to computeEmployeeDayCountTopUp so every catalog/shift-time lookup
+  // resolves the regime effective on each real calendar day (see
+  // lib/shift-templates.ts).
+  weekStart: string,
   // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9) — see
   // computeEmployeeDayCountTopUp's own doc comment on the parameter of the
   // same name. Optional; omitted (the default) reproduces the exact prior
@@ -397,7 +414,6 @@ export function generateObligationToppedUpShifts(
   const targetHoursThisWindow = proratedObligationHoursForWindow(config, daysOrder.length);
 
   const flexiblePool = employees.filter(isFlexibleGeneralPool);
-  const catalogCodes = shortestFirstCatalogCodes();
   // Never schedule below the confirmed OFF-day entitlement for this
   // displayed window, for EITHER objective — the same ceiling governs
   // both, so an hours top-up can never push an employee past the
@@ -412,7 +428,7 @@ export function generateObligationToppedUpShifts(
     let scheduledHours = 0;
     for (const day of scheduledDays) {
       const g = (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employee.id)!;
-      scheduledHours += getShiftDurationHours(g.shiftCode);
+      scheduledHours += getShiftDurationHours(g.shiftCode, flightDateFor(weekStart, day));
     }
 
     const getExistingShift = (day: string) => (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employee.id);
@@ -420,6 +436,7 @@ export function generateObligationToppedUpShifts(
     const additions = computeEmployeeDayCountTopUp(
       employee.id,
       daysOrder,
+      weekStart,
       scheduledDays,
       scheduledHours,
       getExistingShift,
@@ -428,7 +445,6 @@ export function generateObligationToppedUpShifts(
       targetWorkingDaysThisWindow,
       config.normal_weekly_off_days,
       targetHoursThisWindow,
-      catalogCodes,
       t1PeakDemandMinuteByDay
     );
 

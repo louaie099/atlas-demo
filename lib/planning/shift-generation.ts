@@ -1,6 +1,7 @@
 import { Employee } from "../types";
 import { DailyDemand } from "./demand-aggregation";
-import { SHIFT_CODES, getShiftTimesAs } from "../shift-templates";
+import { getShiftTimesAs, shiftCatalogForDate } from "../shift-templates";
+import { flightDateFor } from "../flight-date";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { restHoursBetween } from "../roster-generation";
 import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
@@ -194,6 +195,11 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
+  // The real calendar date this dayOfWeek label refers to — resolves
+  // which RAM shift regime (pre/post 2026-09-20) applies to every
+  // candidate code considered for THIS day (see lib/shift-templates.ts).
+  // Required: every real caller generates against a real weekStart.
+  date: string,
   demand: DailyDemand,
   allEmployees: Employee[],
   priorDayShift: PriorDayShiftMap = new Map(),
@@ -272,7 +278,7 @@ export function generateFlexiblePoolShifts(
 
   // Every catalog shift code, precomputed once (non-overnight only — see
   // doc comment above).
-  const allCodes = Object.entries(SHIFT_CODES)
+  const allCodes = Object.entries(shiftCatalogForDate(date))
     .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
     .filter((c) => c.sortieMin > c.entreeMin);
 
@@ -566,6 +572,12 @@ export function enforceRestInvariantAcrossWeek(
   daysOrder: string[],
   generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
   minimumRestHours: number,
+  // The real Monday date ("YYYY-MM-DD") this daysOrder window starts on —
+  // required so every getShiftTimesAs call below resolves the shift
+  // regime effective on that SPECIFIC real day (see flightDateFor), never
+  // one global catalog for the whole week (a window straddling
+  // 2026-09-20 must resolve per real calendar day).
+  weekStart: string,
   priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
   // Employee IDs whose day-by-day placement is DEMAND-DRIVEN (General T1,
   // Profiling, Mesure, foreign companies) rather than a confirmed,
@@ -606,8 +618,9 @@ export function enforceRestInvariantAcrossWeek(
     const dayShifts = generatedShiftsByDay[day] ?? [];
     const keep: GeneratedShiftAssignment[] = [];
 
+    const date = flightDateFor(weekStart, day);
     for (const assignment of dayShifts) {
-      const times = getShiftTimesAs(assignment.shiftCode);
+      const times = getShiftTimesAs(assignment.shiftCode, date);
       const prior = lastRealShift.get(assignment.employeeId);
       const rest = prior
         ? restHoursBetweenAcrossGap(prior.shift_start, prior.shift_end, times.shift_start, dayIndex - prior.dayIndex)
@@ -624,7 +637,7 @@ export function enforceRestInvariantAcrossWeek(
 
     repaired[day] = keep;
     for (const assignment of keep) {
-      lastRealShift.set(assignment.employeeId, { ...getShiftTimesAs(assignment.shiftCode), dayIndex });
+      lastRealShift.set(assignment.employeeId, { ...getShiftTimesAs(assignment.shiftCode, date), dayIndex });
     }
   }
 
@@ -645,6 +658,8 @@ export function enforceRestInvariantAcrossWeek(
   if (daysOrder.length === 7) {
     const firstDay = daysOrder[0];
     const lastDay = daysOrder[daysOrder.length - 1];
+    const firstDayDate = flightDateFor(weekStart, firstDay);
+    const lastDayDate = flightDateFor(weekStart, lastDay);
     const stillKeptOnFirstDay = repaired[firstDay] ?? [];
     const keptOnLastDay = repaired[lastDay] ?? [];
     const survivors: GeneratedShiftAssignment[] = [];
@@ -655,8 +670,8 @@ export function enforceRestInvariantAcrossWeek(
         survivors.push(assignment);
         continue;
       }
-      const lastDayTimes = getShiftTimesAs(lastDayAssignment.shiftCode);
-      const firstDayTimes = getShiftTimesAs(assignment.shiftCode);
+      const lastDayTimes = getShiftTimesAs(lastDayAssignment.shiftCode, lastDayDate);
+      const firstDayTimes = getShiftTimesAs(assignment.shiftCode, firstDayDate);
       const rest = restHoursBetweenAcrossGap(lastDayTimes.shift_start, lastDayTimes.shift_end, firstDayTimes.shift_start, 1);
       if (rest < minimumRestHours) {
         if (generationDrivenEmployeeIds.has(assignment.employeeId)) {
