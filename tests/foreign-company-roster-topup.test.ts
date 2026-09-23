@@ -4,6 +4,8 @@ import { CONFIGURED_COMPANIES, getCompanyRequiredAgents } from "../lib/company-c
 import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight } from "../lib/types";
 
+const TEST_WEEK_START = "2026-09-21";
+
 /**
  * Regression coverage for Fix 1 (2026-09-22 audit -- see
  * docs/known-limitations/roster-planning-vs-duty-allocation.md):
@@ -57,7 +59,7 @@ describe("Fix 1 -- foreign-company employees get a normal RAM roster, not OFF, o
     const flights = [makeQatarFlight({ id: "qr-wed", day_of_week: "Wednesday" })];
 
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(
-      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, new Map(), CONFIG
+      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, TEST_WEEK_START, new Map(), CONFIG
     );
     expect(conflicts).toEqual([]);
 
@@ -72,7 +74,7 @@ describe("Fix 1 -- foreign-company employees get a normal RAM roster, not OFF, o
   it("without a config argument, the top-up is a strict no-op (backward compatibility -- every existing caller/test unaffected)", () => {
     const pool = [makeEmployee({ id: "qa-0", assignment: "Qatar Airways", foreign_company_authorizations: ["Qatar Airways"] })];
     const flights = [makeQatarFlight({ id: "qr-wed", day_of_week: "Wednesday" })];
-    const { generatedShiftsByDay } = generateForeignCompanyShifts(DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours);
+    const { generatedShiftsByDay } = generateForeignCompanyShifts(DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, TEST_WEEK_START);
     const scheduledDays = DAYS.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === "qa-0"));
     expect(scheduledDays).toEqual(["Wednesday"]); // only the real flight day -- no top-up without config
   });
@@ -86,7 +88,7 @@ describe("Fix 1 -- full week lands each foreign-company employee at (or honestly
     const flights = DAYS.map((day, i) => makeQatarFlight({ id: `qr-${i}`, day_of_week: day }));
 
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(
-      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, new Map(), CONFIG
+      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, TEST_WEEK_START, new Map(), CONFIG
     );
     expect(conflicts).toEqual([]);
 
@@ -106,7 +108,7 @@ describe("Fix 1 -- full week lands each foreign-company employee at (or honestly
     const flights = DAYS.map((day, i) => makeQatarFlight({ id: `qr-${i}`, day_of_week: day }));
 
     const { generatedShiftsByDay } = generateForeignCompanyShifts(
-      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, new Map(), CONFIG
+      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, TEST_WEEK_START, new Map(), CONFIG
     );
     const workedDays = DAYS.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === "qa-extra"));
     expect(workedDays.length).toBe(DAYS.length - CONFIG.normal_weekly_off_days); // exactly 5 -- the confirmed target
@@ -122,7 +124,7 @@ describe("Fix 1 -- full week lands each foreign-company employee at (or honestly
       );
       const flights = [makeQatarFlight({ id: `${company}-flight`, airline: company, day_of_week: "Wednesday" })];
       const { generatedShiftsByDay } = generateForeignCompanyShifts(
-        DAYS, pool, flights, [company], CONFIG.minimum_rest_hours, new Map(), CONFIG
+        DAYS, pool, flights, [company], CONFIG.minimum_rest_hours, TEST_WEEK_START, new Map(), CONFIG
       );
       // The always-unneeded extra member (never selected on the one flight
       // day) must still land on a real worked day somewhere this week.
@@ -140,7 +142,7 @@ describe("Fix 1 -- real flight-day coverage is unchanged (regression)", () => {
     );
     const flights = [makeQatarFlight({ id: "qr-wed", day_of_week: "Wednesday", scheduled_departure: "09:00" })];
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(
-      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, new Map(), CONFIG
+      DAYS, pool, flights, ["Qatar Airways"], CONFIG.minimum_rest_hours, TEST_WEEK_START, new Map(), CONFIG
     );
     expect(conflicts).toEqual([]);
     const wed = generatedShiftsByDay["Wednesday"] ?? [];

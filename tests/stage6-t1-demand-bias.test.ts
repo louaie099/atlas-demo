@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { computeEmployeeDayCountTopUp, shortestFirstCatalogCodes } from "../lib/planning/roster-generation";
+import { computeEmployeeDayCountTopUp } from "../lib/planning/roster-generation";
+
+// Pre-boundary Monday (before the 2026-09-20 GMT+1 -> GMT regime change) --
+// these tests assert on OLD-regime catalog codes/durations (e.g. NR01's
+// 8h45), so a consistent OLD-regime week is used throughout.
+const TEST_WEEK_START = "2026-01-05";
 
 /**
  * Stage-6 T1-demand heuristic bias (2026-09-23, product owner's point 9):
@@ -14,12 +19,12 @@ import { computeEmployeeDayCountTopUp, shortestFirstCatalogCodes } from "../lib/
  */
 describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", () => {
   const daysOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-  const catalogCodes = shortestFirstCatalogCodes();
 
   it("without a peak-demand hint, picks the shortest-first legal code exactly as before (NR01, unchanged default behavior)", () => {
     const additions = computeEmployeeDayCountTopUp(
       "e1",
       daysOrder,
+      TEST_WEEK_START,
       new Set(), // no scheduled days at all
       0,
       () => undefined, // no existing shift any day
@@ -27,8 +32,7 @@ describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", ()
       15,
       1, // target 1 working day
       2,
-      null,
-      catalogCodes
+      null
       // t1PeakDemandMinuteByDay omitted
     );
     expect(additions.size).toBe(1);
@@ -43,6 +47,7 @@ describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", ()
     const additions = computeEmployeeDayCountTopUp(
       "e1",
       daysOrder,
+      TEST_WEEK_START,
       new Set(),
       0,
       () => undefined,
@@ -51,7 +56,6 @@ describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", ()
       1,
       2,
       null,
-      catalogCodes,
       t1PeakDemandMinuteByDay
     );
     expect(additions.size).toBe(1);
@@ -70,6 +74,7 @@ describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", ()
     const additions = computeEmployeeDayCountTopUp(
       "e1",
       ["Monday", "Tuesday"],
+      TEST_WEEK_START,
       new Set(["Monday"]),
       12.5,
       (day) => (day === "Monday" ? { shiftCode: "JR01" } : undefined),
@@ -78,7 +83,6 @@ describe("computeEmployeeDayCountTopUp — Stage-6 T1 demand heuristic bias", ()
       2,
       0,
       null,
-      catalogCodes,
       t1PeakDemandMinuteByDay
     );
     const tuesdayCode = additions.get("Tuesday");

@@ -5,6 +5,9 @@ import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay } from "../lib/p
 import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement } from "../lib/types";
 
+const TEST_DATE = "2026-09-03";
+const TEST_WEEK_START = "2026-09-01";
+
 /**
  * Regression coverage for the "two definitions of rest" bug: Stage 9
  * (scoring.ts's scoreCandidates, via generateDutiesForDay) used to gate
@@ -99,7 +102,7 @@ describe("generateDutiesForDay — actual rest overrides the stale static field"
     const generatedShifts: GeneratedShiftAssignment[] = [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "NR01", coversRoles: ["Boarding"] }];
     const actualRest: ActualRestHoursByEmployeeDay = new Map([["e1|Wednesday", 15]]); // the REAL rest before this real shift
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, actualRest);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, TEST_DATE, actualRest);
     expect(unfilled).toHaveLength(0);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("e1");
@@ -117,7 +120,7 @@ describe("generateDutiesForDay — actual rest overrides the stale static field"
     const generatedShifts: GeneratedShiftAssignment[] = [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "NR01", coversRoles: ["Boarding"] }];
     const actualRest: ActualRestHoursByEmployeeDay = new Map([["e1|Wednesday", 10]]); // the REAL rest is actually insufficient
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, actualRest);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, TEST_DATE, actualRest);
     expect(duties).toHaveLength(0);
     expect(unfilled).toHaveLength(1);
     expect(unfilled[0].stillNeeded).toBe(1);
@@ -136,7 +139,7 @@ describe("generateDutiesForDay — actual rest overrides the stale static field"
     const generatedShifts: GeneratedShiftAssignment[] = [{ employeeId: "p1", dayOfWeek: "Wednesday", shiftCode: "NR01", coversRoles: ["Profiling"] }];
     const actualRest: ActualRestHoursByEmployeeDay = new Map([["p1|Wednesday", 15]]);
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, actualRest);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, TEST_DATE, actualRest);
     expect(unfilled).toHaveLength(0);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("p1");
@@ -148,7 +151,7 @@ describe("generateDutiesForDay — actual rest overrides the stale static field"
     const employee = makeEmployee({ id: "e1", skills: ["Boarding"], rest_before_shift_hours: 20, weekly_hours: 20 });
     const generatedShifts: GeneratedShiftAssignment[] = [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "NR01", coversRoles: ["Boarding"] }];
 
-    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShifts, [], CONFIG, TEST_DATE);
     expect(duties).toHaveLength(1); // no actualRestHoursByDay argument at all -- static field (20h) still governs
   });
 });
@@ -193,7 +196,7 @@ describe("generateDraftWeeklyPlan — whole-pipeline invariants hold after the a
     { id: `r-profiling-${f.day_of_week}`, flight_id: f.id, role: "Profiling", baseline_requirement: 1, additional_requirement: 0, total_requirement: 1, source: "fixed_rule" as const, reasoning: "", needs_configuration: false },
   ]);
 
-  const plan = generateDraftWeeklyPlan(flights, employees, [], CONFIG, daysOrder, "Test Week");
+  const plan = generateDraftWeeklyPlan(flights, employees, [], CONFIG, daysOrder, "Test Week", TEST_WEEK_START);
   const allDuties = Object.entries(plan.dutiesByDay).flatMap(([dayOfWeek, duties]) => duties.map((d) => ({ ...d, dayOfWeek })));
 
   it("produces zero overlapping duties for any employee across the whole generated week", () => {

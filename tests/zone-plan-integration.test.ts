@@ -26,7 +26,7 @@ import { computeWeeklyStaffingRequirements } from "../lib/planning/weekly-requir
  * and never zero everywhere real capacity clearly exists.
  */
 describe("T1 Check-in zone model — live pipeline integration", () => {
-  const draft = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL);
+  const draft = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL, CURRENT_WEEK_START);
 
   it("produces zone demand requirements for the real seeded week without touching any per-flight Check-in row", () => {
     const requirements = computeWeeklyStaffingRequirements(FLIGHTS, CONFIG);

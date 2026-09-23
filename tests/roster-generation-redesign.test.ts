@@ -22,6 +22,10 @@ function makeEmployee(overrides: Partial<Employee>): Employee {
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+// Pre-boundary Monday (before the 2026-09-20 GMT+1 -> GMT regime change) --
+// these unit tests only care about day-count/hours bookkeeping, not shift
+// times, so any consistent OLD-regime week works.
+const TEST_WEEK_START = "2026-01-05";
 
 describe("continuous roster generation — backward compatibility while obligation is unconfigured", () => {
   it("proratedObligationHoursForWindow returns null (never a guessed number) while working_hours_obligation_hours is null", () => {
@@ -42,7 +46,7 @@ describe("continuous roster generation — backward compatibility while obligati
     for (const day of DAYS.filter((d) => d !== "Saturday" && d !== "Sunday")) {
       demandDrivenShiftsByDay[day] = [{ employeeId: "e1", dayOfWeek: day, shiftCode: "MT02", coversRoles: [] }];
     }
-    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours);
+    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours, TEST_WEEK_START);
     for (const day of DAYS) {
       expect(additional[day]).toEqual([]);
     }
@@ -50,7 +54,7 @@ describe("continuous roster generation — backward compatibility while obligati
 
   it("generateObligationToppedUpShifts is a NO-OP for anything outside the flexible General T1 pool (fixed-cycle/foreign/Profiling-Mesure), regardless of demand-driven shortfall — the narrowed but still-real backward-compatibility contract", () => {
     const employee = makeEmployee({ id: "e1", assignment: "Transit" });
-    const additional = generateObligationToppedUpShifts(DAYS, [employee], {}, CONFIG, new Map(), CONFIG.minimum_rest_hours);
+    const additional = generateObligationToppedUpShifts(DAYS, [employee], {}, CONFIG, new Map(), CONFIG.minimum_rest_hours, TEST_WEEK_START);
     for (const day of DAYS) {
       expect(additional[day]).toEqual([]);
     }
@@ -62,7 +66,7 @@ describe("continuous roster generation — backward compatibility while obligati
     const demandDrivenShiftsByDay: Record<string, ReturnType<typeof generateObligationToppedUpShifts>[string]> = {};
     for (const day of DAYS) demandDrivenShiftsByDay[day] = [];
 
-    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours);
+    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours, TEST_WEEK_START);
 
     let totalDaysAdded = 0;
     for (const day of DAYS) totalDaysAdded += additional[day].length;
@@ -71,14 +75,14 @@ describe("continuous roster generation — backward compatibility while obligati
   });
 
   it("the full pipeline (generateDraftWeeklyPlan) is deterministic across repeated runs with the same inputs, and produces a non-empty roster, with the always-on 5-WORK+2-OFF top-up now genuinely part of the pipeline", () => {
-    const planBefore = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL);
-    const planAfter = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL);
+    const planBefore = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL, TEST_WEEK_START);
+    const planAfter = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL, TEST_WEEK_START);
     expect(planAfter.rosterEntries).toEqual(planBefore.rosterEntries);
     expect(planAfter.rosterEntries.length).toBeGreaterThan(0);
   });
 
   it("non-flexible populations (fixed-cycle, foreign-company, Profiling/Mesure) are completely unaffected by the always-on top-up — their generated roster is identical whether or not generateObligationToppedUpShifts runs at all", () => {
-    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL);
+    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_ORDER, WEEK_LABEL, TEST_WEEK_START);
     const nonFlexible = EMPLOYEES.filter((e) => !isFlexibleGeneralPool(e));
     for (const employee of nonFlexible) {
       const entries = plan.rosterEntries.filter((r) => r.employee_id === employee.id);
@@ -105,7 +109,8 @@ describe("continuous roster generation — schedules toward the obligation once 
       demandDrivenShiftsByDay,
       configuredForTest,
       new Map(),
-      configuredForTest.minimum_rest_hours
+      configuredForTest.minimum_rest_hours,
+      TEST_WEEK_START
     );
 
     let totalDaysAdded = 0;
@@ -134,7 +139,8 @@ describe("continuous roster generation — schedules toward the obligation once 
       demandDrivenShiftsByDay,
       configuredForTest,
       new Map(),
-      configuredForTest.minimum_rest_hours
+      configuredForTest.minimum_rest_hours,
+      TEST_WEEK_START
     );
     // Only 1 demand-driven day exists -- objective 1 (5 worked days)
     // still needs more, even though objective 2's hours target (5h) was
@@ -163,7 +169,8 @@ describe("continuous roster generation — schedules toward the obligation once 
       demandDrivenShiftsByDay,
       configuredForTest,
       new Map(),
-      configuredForTest.minimum_rest_hours
+      configuredForTest.minimum_rest_hours,
+      TEST_WEEK_START
     );
     for (const day of DAYS) expect(additional[day]).toEqual([]);
   });
@@ -183,7 +190,7 @@ describe("continuous roster generation — soft preference for consecutive OFF d
     const demandDrivenShiftsByDay: Record<string, ReturnType<typeof generateObligationToppedUpShifts>[string]> = {};
     for (const day of DAYS) demandDrivenShiftsByDay[day] = [];
 
-    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours);
+    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours, TEST_WEEK_START);
     const workedDays = new Set(DAYS.filter((d) => additional[d].some((g) => g.employeeId === "e1")));
     const offDays = DAYS.filter((d) => !workedDays.has(d));
     expect(offDays.length).toBe(CONFIG.normal_weekly_off_days);
@@ -201,7 +208,7 @@ describe("continuous roster generation — soft preference for consecutive OFF d
     // be the best Fri/Sat/Sun-adjacent OFF block candidate.
     demandDrivenShiftsByDay["Saturday"] = [{ employeeId: "e1", dayOfWeek: "Saturday", shiftCode: "MT02", coversRoles: [] }];
 
-    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours);
+    const additional = generateObligationToppedUpShifts(DAYS, [employee], demandDrivenShiftsByDay, CONFIG, new Map(), CONFIG.minimum_rest_hours, TEST_WEEK_START);
     const workedDays = new Set(["Saturday", ...DAYS.filter((d) => additional[d].some((g) => g.employeeId === "e1"))]);
     // Still exactly 5 worked / 2 off overall -- the day-count target is
     // never sacrificed to protect the soft consecutive-OFF preference.
@@ -243,7 +250,8 @@ describe("team composition — Gulf Air's confirmed 7 ACE + 1 Leader split", () 
       [leaderOnly],
       [flight],
       ["Gulf Air"],
-      15
+      15,
+      TEST_WEEK_START
     );
 
     // Only the Leader gets scheduled (their own leader slot), never counted
@@ -265,7 +273,8 @@ describe("team composition — Gulf Air's confirmed 7 ACE + 1 Leader split", () 
       EMPLOYEES,
       FLIGHTS,
       ["Gulf Air"],
-      CONFIG.minimum_rest_hours
+      CONFIG.minimum_rest_hours,
+      TEST_WEEK_START
     );
     const gulfConflicts = conflicts.filter((c) => c.team === "Gulf Air");
     expect(gulfConflicts).toEqual([]);

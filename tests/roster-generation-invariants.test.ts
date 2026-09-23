@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
 import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { generateDraftWeeklyPlan } from "../lib/planning/generate-draft-plan";
 import { JR_NT_OFF_OFF_CYCLE, cycleStepAt } from "../lib/fixed-cycle-rotation";
@@ -87,7 +87,7 @@ describe("roster generation — no automatic extra-OFF fallback for foreign-comp
   });
 
   it("a foreign-company coverage shortfall NEVER surfaces as a persisted rest_violation Plan Warning any more — it is either resolved by generation (another rested employee/compatible code) or reported as a real, honest BLOCKING configuration conflict", () => {
-    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "Test Week");
+    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "Test Week", CURRENT_WEEK_START);
     const restViolations = plan.issues.filter((i) => i.type === "rest_violation");
     expect(restViolations).toHaveLength(0);
   });

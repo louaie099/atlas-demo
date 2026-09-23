@@ -47,20 +47,20 @@ describe("deriveTransitionContextFromPriorPlan", () => {
     const rosterEntries: WeeklyPlanRosterEntry[] = [
       { id: "r1", plan_id: "p1", employee_id: "e1", day_of_week: "Sunday", status: "working", shift_code: "MT02" },
     ];
-    const map = deriveTransitionContextFromPriorPlan(employees, rosterEntries, "Sunday");
-    expect(map.get("e1")).toEqual(getShiftTimesAs("MT02"));
+    const map = deriveTransitionContextFromPriorPlan(employees, rosterEntries, "Sunday", previousWeekStart(CURRENT_WEEK_START));
+    expect(map.get("e1")).toEqual(getShiftTimesAs("MT02", CURRENT_WEEK_START));
   });
 
   it("maps an OFF prior-Sunday roster row to null (a real absence of rest risk, not missing data)", () => {
     const rosterEntries: WeeklyPlanRosterEntry[] = [
       { id: "r1", plan_id: "p1", employee_id: "e2", day_of_week: "Sunday", status: "off", shift_code: null },
     ];
-    const map = deriveTransitionContextFromPriorPlan(employees, rosterEntries, "Sunday");
+    const map = deriveTransitionContextFromPriorPlan(employees, rosterEntries, "Sunday", previousWeekStart(CURRENT_WEEK_START));
     expect(map.get("e2")).toBeNull();
   });
 
   it("maps a completely missing roster row (no prior plan data for this employee/day) to null as well, so the forward rest gate is skipped rather than crashing", () => {
-    const map = deriveTransitionContextFromPriorPlan(employees, [], "Sunday");
+    const map = deriveTransitionContextFromPriorPlan(employees, [], "Sunday", previousWeekStart(CURRENT_WEEK_START));
     expect(map.get("e3")).toBeNull();
     expect(map.has("e3")).toBe(true); // explicitly set, not just absent from the map
   });
@@ -87,13 +87,13 @@ describe("deriveFallbackBoundaryContext", () => {
   // reads it for them.
   it("uses a NON-flexible employee's own static baseline for daysOrder's LAST day as the boundary seed, when they work that day", () => {
     const employee = employeeWithSunday("Transit", { day_of_week: "Sunday", status: "working", shift_code: "MT02" });
-    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
-    expect(map.get("e1")).toEqual(getShiftTimesAs("MT02"));
+    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA, CURRENT_WEEK_START);
+    expect(map.get("e1")).toEqual(getShiftTimesAs("MT02", CURRENT_WEEK_START));
   });
 
   it("returns null when a NON-flexible employee's baseline has them OFF on daysOrder's last day", () => {
     const employee = employeeWithSunday("Transit", { day_of_week: "Sunday", status: "off", shift_code: null });
-    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
+    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA, CURRENT_WEEK_START);
     expect(map.get("e1")).toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe("deriveFallbackBoundaryContext", () => {
   // null, which the forward rest gate correctly skips).
   it("returns null for a FLEXIBLE (General T1) employee even when their static baseline says they work that day — that baseline is no longer authoritative for this population", () => {
     const employee = employeeWithSunday("General T1", { day_of_week: "Sunday", status: "working", shift_code: "MT02" });
-    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA);
+    const map = deriveFallbackBoundaryContext([employee], DAYS_WITH_DATA, CURRENT_WEEK_START);
     expect(map.get("e1")).toBeNull();
   });
 });
@@ -140,7 +140,8 @@ describe("cross-plan continuity — Week B continues from Week A rather than reg
     const priorWeekBoundaryContext = deriveTransitionContextFromPriorPlan(
       EMPLOYEES,
       bundleA.rosterEntries,
-      DAYS_WITH_DATA[DAYS_WITH_DATA.length - 1]
+      DAYS_WITH_DATA[DAYS_WITH_DATA.length - 1],
+      weekAStart
     );
 
     const bundleB = buildDraftPlanBundle({
@@ -195,7 +196,7 @@ describe("cross-plan continuity — Week B continues from Week A rather than reg
       if (mondayEntry.shift_code === baselineMonday) continue;
 
       checkedAtLeastOneRealTransition = true;
-      const mondayShift = getShiftTimesAs(mondayEntry.shift_code);
+      const mondayShift = getShiftTimesAs(mondayEntry.shift_code, weekBStart);
       const restHours = restHoursBetween(priorSunday.shift_start, priorSunday.shift_end, mondayShift.shift_start);
       if (restHours < CONFIG.minimum_rest_hours) {
         mondayViolations.push(
@@ -225,8 +226,8 @@ describe("cross-plan continuity — Week B continues from Week A rather than reg
       harshPriorSunday.set(employee.id, { shift_start: "13:45", shift_end: "23:45" });
     }
 
-    const withHarshContext = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, harshPriorSunday);
-    const withEmptyContext = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, new Map());
+    const withHarshContext = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, harshPriorSunday);
+    const withEmptyContext = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, new Map());
 
     const mondayShiftsWithHarshContext = withHarshContext.generatedShiftsByDay["Monday"] ?? [];
     const mondayShiftsWithEmptyContext = withEmptyContext.generatedShiftsByDay["Monday"] ?? [];
@@ -255,7 +256,7 @@ describe("cross-plan continuity — Week B continues from Week A rather than reg
     // real invariant this test is about.
     for (const assignment of mondayShiftsWithHarshContext) {
       if (!harshPriorSunday.has(assignment.employeeId)) continue;
-      const { shift_start } = getShiftTimesAs(assignment.shiftCode);
+      const { shift_start } = getShiftTimesAs(assignment.shiftCode, CURRENT_WEEK_START);
       const restHours = restHoursBetween("13:45", "23:45", shift_start);
       expect(restHours).toBeGreaterThanOrEqual(CONFIG.minimum_rest_hours);
     }

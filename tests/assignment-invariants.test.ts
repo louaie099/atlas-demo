@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, INITIAL_AT201_ASSIGNEES, INITIAL_AT201_PROFILING_ASSIGNEE } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START, INITIAL_AT201_ASSIGNEES, INITIAL_AT201_PROFILING_ASSIGNEE } from "../lib/seed-data";
 import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { computeWeeklyStaffingRequirements } from "../lib/planning/weekly-requirements";
 import { buildForeignCommitmentAssignments } from "../lib/foreign-shift-planning";
@@ -121,7 +121,7 @@ describe("whole-week scan — no over-assignment, no duplicate-employee, no over
     const foreignAssignments = buildForeignCommitmentAssignments(EMPLOYEES, FLIGHTS, requirements, DAYS_WITH_DATA, CONFIGURED_COMPANIES);
     const allAssignments = [...scriptedAssignments, ...foreignAssignments];
 
-    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, allAssignments as any, CONFIG, DAYS_WITH_DATA, "Week");
+    const plan = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, allAssignments as any, CONFIG, DAYS_WITH_DATA, "Week", CURRENT_WEEK_START);
 
     let overAssigned = 0;
     let duplicateEmployee = 0;

@@ -36,6 +36,12 @@ function makeRequirement(overrides: Partial<StaffingRequirement>): StaffingRequi
   };
 }
 
+// Matches makeFlight's default flight_date, well before the
+// 2026-09-20 GMT+1 -> GMT regime change -- these unit tests exercise
+// per-day rest/eligibility/coverage logic, not the regime resolver
+// itself (see tests/shift-regime.test.ts for that).
+const TEST_DATE = "2026-09-03";
+
 describe("generateFlexiblePoolShifts", () => {
   it("assigns exactly enough qualified employees to meet peak demand", () => {
     const flight = makeFlight({});
@@ -48,7 +54,7 @@ describe("generateFlexiblePoolShifts", () => {
       makeEmployee({ id: "e3", skills: ["Boarding"] }), // extra, shouldn't be needed
     ];
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, employees);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, employees);
     expect(result).toHaveLength(2);
   });
 
@@ -62,7 +68,7 @@ describe("generateFlexiblePoolShifts", () => {
       skills: ["Boarding"],
       weekly_shifts: [{ day_of_week: "Wednesday", shift_code: null, status: "off" }],
     });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [staticallyOffEmployee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [staticallyOffEmployee]);
     expect(result).toHaveLength(1);
     expect(result[0].employeeId).toBe("e1");
   });
@@ -73,7 +79,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
 
     const inactiveEmployee = makeEmployee({ id: "inactive-1", skills: ["Boarding"], active: false });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [inactiveEmployee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [inactiveEmployee]);
     expect(result).toHaveLength(0);
   });
 
@@ -83,7 +89,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
 
     const transitEmployee = makeEmployee({ id: "t1", skills: ["Boarding"], assignment: "Transit" });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [transitEmployee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [transitEmployee]);
     expect(result).toHaveLength(0);
   });
 
@@ -103,7 +109,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [checkinFlight, gateFlight, boardingFlight], [checkinReq, gateReq, boardingReq]);
     const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate", "Boarding"] });
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
 
     expect(result).toHaveLength(1); // one shift, not three separate assignments
     expect(result[0].shiftCode).toBe("MT02");
@@ -122,8 +128,8 @@ describe("generateFlexiblePoolShifts", () => {
     const requirements = [checkinReq, gateReq, boardingReq];
     const demand = aggregateDailyDemand("Wednesday", flights, requirements);
     const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate", "Boarding"], rest_before_shift_hours: 24, weekly_hours: 0 });
-    const generatedShifts = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, [employee], generatedShifts, [], CONFIG);
+    const generatedShifts = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, [employee], generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(unfilled).toHaveLength(0); // every requirement genuinely got covered, not just "roster looked sufficient"
     expect(duties).toHaveLength(3);
@@ -153,7 +159,7 @@ describe("generateFlexiblePoolShifts", () => {
       makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate"] }),
       makeEmployee({ id: "multi-2", skills: ["Check-in", "Gate"] }),
     ];
-    const result = generateFlexiblePoolShifts("Wednesday", demand, employees);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, employees);
 
     expect(result).toHaveLength(2); // two people, not one double-counted
     const coveredRoles = new Set(result.flatMap((r) => r.coversRoles));
@@ -168,7 +174,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [checkinFlight, gateFlight], [checkinReq, gateReq]);
 
     const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate"] });
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
 
     expect(result).toHaveLength(1); // never two assignments for one employee
     expect(result[0].coversRoles).toHaveLength(1); // never both roles credited to the same person for the same overlapping time
@@ -182,7 +188,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [boardingFlight, gateFlight], [boardingReq, gateReq]);
 
     const employee = makeEmployee({ id: "e1", skills: ["Boarding"] }); // NOT qualified for Gate
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
 
     expect(result).toHaveLength(1);
     expect(result[0].coversRoles).toEqual(["Boarding"]); // Gate's demand is left genuinely unfilled, not fabricated
@@ -201,7 +207,7 @@ describe("generateFlexiblePoolShifts", () => {
     ]);
     const employees = [makeEmployee({ id: "e1", skills: ["Boarding"] }), makeEmployee({ id: "e2", skills: ["Boarding"] })];
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, employees, priorDayShift, 15);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, employees, priorDayShift, 15);
     expect(result).toHaveLength(1);
     expect(result[0].employeeId).toBe("e2"); // never e1 -- the rest-blocked candidate
   });
@@ -219,7 +225,7 @@ describe("generateFlexiblePoolShifts", () => {
     const priorWeekSundayShift = new Map([["e1", { shift_start: "13:45", shift_end: "23:00" }]]); // last week's Sunday
     const employee = makeEmployee({ id: "e1", skills: ["Boarding"] });
 
-    const result = generateFlexiblePoolShifts("Monday", demand, [employee], priorWeekSundayShift, 15);
+    const result = generateFlexiblePoolShifts("Monday", TEST_DATE, demand, [employee], priorWeekSundayShift, 15);
     expect(result).toHaveLength(0); // the only candidate is blocked by last week's boundary shift
   });
 
@@ -229,7 +235,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
 
     const onlyOneQualified = [makeEmployee({ id: "e1", skills: ["Boarding"] })]; // only 1 exists
-    const result = generateFlexiblePoolShifts("Wednesday", demand, onlyOneQualified);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, onlyOneQualified);
     expect(result).toHaveLength(1); // never fabricates a second person
   });
 
@@ -243,8 +249,8 @@ describe("generateFlexiblePoolShifts", () => {
       makeEmployee({ id: "e3", skills: ["Boarding"] }),
     ];
 
-    const run1 = generateFlexiblePoolShifts("Wednesday", demand, employees, new Map(), 15, undefined, new Map(), new Map());
-    const run2 = generateFlexiblePoolShifts("Wednesday", demand, employees, new Map(), 15, undefined, new Map(), new Map());
+    const run1 = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, employees, new Map(), 15, undefined, new Map(), new Map());
+    const run2 = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, employees, new Map(), 15, undefined, new Map(), new Map());
 
     const sortById = (arr: typeof run1) => [...arr].sort((a, b) => a.employeeId.localeCompare(b.employeeId));
     expect(sortById(run1)).toEqual(sortById(run2));
@@ -264,7 +270,7 @@ describe("generateFlexiblePoolShifts", () => {
     // 05:45 entree) is tried.
     const priorDayShift = new Map([["e1", { shift_start: "13:45", shift_end: "23:00" }]]);
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee], priorDayShift, 15);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee], priorDayShift, 15);
     expect(result).toHaveLength(0); // genuine shortfall, never a rest-violating assignment from a fallback candidate
   });
 
@@ -276,7 +282,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
     const employee = makeEmployee({ id: "e1", skills: ["Boarding"] });
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
     expect(result).toHaveLength(0);
   });
 
@@ -292,7 +298,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Wednesday", [flight], [requirement]);
     const employee = makeEmployee({ id: "e1", skills: ["Check-in"] });
 
-    const result = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
     expect(result).toHaveLength(1);
     expect(result[0].employeeId).toBe("e1");
     // MT02 (04:30-14:45) is the closest-fit code that still runs through
@@ -315,7 +321,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Tuesday", [flight], [requirement]);
     const employee = makeEmployee({ id: "e1", skills: ["Gate"] });
 
-    const result = generateFlexiblePoolShifts("Tuesday", demand, [employee]);
+    const result = generateFlexiblePoolShifts("Tuesday", TEST_DATE, demand, [employee]);
     expect(result).toHaveLength(1);
     expect(result[0].shiftCode).toBe("AP02"); // never AP01
   });
@@ -330,7 +336,7 @@ describe("generateFlexiblePoolShifts", () => {
     // only 14h45 (illegal for AP02, which is 30min longer at the end).
     const nextDayBaselineShift = new Map([["e1", { shift_start: "14:00", shift_end: "22:00" }]]);
 
-    const result = generateFlexiblePoolShifts("Tuesday", demand, [employee], new Map(), 15, undefined, nextDayBaselineShift);
+    const result = generateFlexiblePoolShifts("Tuesday", TEST_DATE, demand, [employee], new Map(), 15, undefined, nextDayBaselineShift);
     expect(result).toHaveLength(1);
     expect(result[0].shiftCode).toBe("AP01"); // AP02 was illegal, but AP01 remains a real, legal, partially-useful option
   });
@@ -345,7 +351,7 @@ describe("generateFlexiblePoolShifts", () => {
     const demand = aggregateDailyDemand("Tuesday", [flight], [requirement]);
     const employees = [makeEmployee({ id: "e1", skills: ["Gate"] }), makeEmployee({ id: "e2", skills: ["Gate"] })];
 
-    const result = generateFlexiblePoolShifts("Tuesday", demand, employees);
+    const result = generateFlexiblePoolShifts("Tuesday", TEST_DATE, demand, employees);
     expect(result).toHaveLength(2);
     // Both must be on a code that genuinely reaches 23:00 (AP02) -- if
     // partial overlap were still credited, the solver could have settled
@@ -385,10 +391,10 @@ describe("Stage 6 + Stage 9 integration -- AT870-shaped simultaneous demand end-
     const employees = [...multiQualified, ...checkinOnly];
 
     const demand = aggregateDailyDemand("Tuesday", flights, requirements);
-    const generatedShifts = generateFlexiblePoolShifts("Tuesday", demand, employees);
+    const generatedShifts = generateFlexiblePoolShifts("Tuesday", TEST_DATE, demand, employees);
 
     // Stage 9, using the SAME generated shifts Stage 6 actually produced.
-    const { duties, unfilled } = generateDutiesForDay("Tuesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Tuesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(unfilled).toHaveLength(0);
     expect(duties.filter((d) => d.role === "Check-in")).toHaveLength(4);

@@ -3,6 +3,8 @@ import { generateDutiesForDay } from "../lib/planning/duty-generation";
 import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement } from "../lib/types";
 
+const TEST_DATE = "2026-09-24";
+
 /**
  * Regression coverage for Fix 3 (2026-09-22 audit -- see
  * docs/known-limitations/roster-planning-vs-duty-allocation.md): the
@@ -81,7 +83,8 @@ describe("Fix 3 -- the audited double-booking scenario (Boarding duty inside a r
       [employee],
       generatedShifts,
       [],
-      CONFIG
+      CONFIG,
+      TEST_DATE
     );
 
     const employeeDuties = duties.filter((d) => d.employeeId === "e1");

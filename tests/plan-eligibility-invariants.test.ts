@@ -76,7 +76,7 @@ describe("weekly plan eligibility invariants (generated demo plan)", () => {
       const req = reqsById.get(a.staffing_requirement_id)!;
       const flight = flightsById.get(req.flight_id)!;
       const roster = rosterByKey.get(`${a.employee_id}|${flight.day_of_week}`)!;
-      const shiftTimes = getShiftTimesAs(roster.shift_code!);
+      const shiftTimes = getShiftTimesAs(roster.shift_code!, flight.flight_date);
       const window = getRequirementWindow(req, flight);
 
       // The hard constraint: an assignment must fall within the employee's

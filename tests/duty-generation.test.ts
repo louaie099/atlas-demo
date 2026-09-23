@@ -3,6 +3,11 @@ import { generateDutiesForDay, buildDayEffectivePoolFromRosterEntries } from "..
 import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement, Assignment, WeeklyPlanRosterEntry } from "../lib/types";
 
+// Matches makeFlight's default flight_date below — well before the
+// 2026-09-20 regime change, so every existing assertion here keeps
+// resolving the OLD-regime shift catalog it always implicitly assumed.
+const TEST_DATE = "2026-09-03";
+
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
     id: "emp", name: "Test", skills: ["Boarding"], assignment: "General T1 Pool",
@@ -78,7 +83,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
 
   it("Stage 6 finds enough distinct capacity (8 people for 8 simultaneous positions) and Stage 9 preserves ALL of it -- zero slack, zero shortfall", () => {
     const { flights, requirements, employees, generatedShifts } = buildScenario();
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(unfilled).toHaveLength(0);
     expect(duties).toHaveLength(8);
@@ -89,7 +94,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
 
   it("the multi-qualified shared pool is used for Gate/Boarding (the scarcer roles), never leaving Check-in to steal from it and starve Gate/Boarding -- Check-in is filled entirely from the Check-in-only pool", () => {
     const { flights, requirements, employees, generatedShifts } = buildScenario();
-    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
 
     const checkinAssignees = new Set(duties.filter((d) => d.role === "Check-in").map((d) => d.employeeId));
     const gateBoardingAssignees = new Set(duties.filter((d) => d.role === "Gate" || d.role === "Boarding").map((d) => d.employeeId));
@@ -105,7 +110,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
 
   it("no employee satisfies two overlapping duties even under this tight, simultaneous scenario", () => {
     const { flights, requirements, employees, generatedShifts } = buildScenario();
-    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
 
     const byEmployee = new Map<string, { start: string; end: string }[]>();
     for (const d of duties) byEmployee.set(d.employeeId, [...(byEmployee.get(d.employeeId) ?? []), d.window]);
@@ -116,8 +121,8 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
 
   it("deterministic: identical inputs produce byte-identical duties, in the same order, across repeated runs", () => {
     const { flights, requirements, employees, generatedShifts } = buildScenario();
-    const run1 = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG);
-    const run2 = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG);
+    const run1 = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
+    const run2 = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE);
     expect(run2.duties).toEqual(run1.duties);
     expect(run2.unfilled).toEqual(run1.unfilled);
   });
@@ -128,7 +133,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
     const withExtra = [...employees, unqualified];
     const shiftsWithExtra = [...generatedShifts, { employeeId: "u1", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
 
-    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, withExtra, shiftsWithExtra, [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", requirements, flights, withExtra, shiftsWithExtra, [], CONFIG, TEST_DATE);
     expect(duties.some((d) => d.employeeId === "u1")).toBe(false);
   });
 
@@ -137,7 +142,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
     // Remove one Check-in-only employee's generated shift entirely -- they exist but are OFF today.
     const shiftsMinusOne = generatedShifts.filter((s) => s.employeeId !== "c4");
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, shiftsMinusOne, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, shiftsMinusOne, [], CONFIG, TEST_DATE);
     expect(duties.some((d) => d.employeeId === "c4")).toBe(false);
     // Honest shortfall -- never fabricated from someone who isn't rostered.
     expect(unfilled.find((u) => u.role === "Check-in")?.stillNeeded).toBe(1);
@@ -152,7 +157,7 @@ describe("generateDutiesForDay -- STAGE 6/STAGE 9 COHERENCE (AT870 structural re
     // must surface as a genuine, honest 1-short gap -- never a
     // rest-violating assignment to c1.
     const actualRest = new Map([["c1|Wednesday", 10]]);
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, actualRest);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, employees, generatedShifts, [], CONFIG, TEST_DATE, actualRest);
 
     expect(duties.some((d) => d.employeeId === "c1")).toBe(false);
     expect(unfilled.find((u) => u.role === "Check-in")?.stillNeeded).toBe(1);
@@ -175,7 +180,7 @@ describe("generateDutiesForDay -- sequential reuse still works alongside the new
     const employee = makeEmployee({ id: "multi-1", skills: ["Check-in", "Gate", "Boarding"], rest_before_shift_hours: 24, weekly_hours: 0 });
     const generatedShifts = [{ employeeId: "multi-1", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, [employee], generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", requirements, flights, [employee], generatedShifts, [], CONFIG, TEST_DATE);
     expect(unfilled).toHaveLength(0);
     expect(duties).toHaveLength(3);
     expect(duties.every((d) => d.employeeId === "multi-1")).toBe(true);
@@ -194,7 +199,7 @@ describe("generateDutiesForDay", () => {
     // generatedShift entry is what actually makes "e1" a candidate.
     const generatedShift = [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "AP01", coversRoles: ["Boarding"] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG, TEST_DATE);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("e1");
     expect(unfilled).toHaveLength(0);
@@ -219,7 +224,8 @@ describe("generateDutiesForDay", () => {
       [employee],
       generatedShift,
       [],
-      CONFIG
+      CONFIG,
+      TEST_DATE
     );
     // Assigned to exactly one of the two (the earlier by departure time), the other is left unfilled
     expect(duties).toHaveLength(1);
@@ -231,7 +237,7 @@ describe("generateDutiesForDay", () => {
     const requirement = makeRequirement({ role: "Boarding" });
     const unqualified = makeEmployee({ id: "e1", skills: ["Gate"] });
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [unqualified], [], [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [requirement], [flight], [unqualified], [], [], CONFIG, TEST_DATE);
     expect(duties).toHaveLength(0);
     expect(unfilled).toEqual([{ dayOfWeek: "Wednesday", requirementId: "r1", role: "Boarding", stillNeeded: 1 }]);
   });
@@ -247,7 +253,7 @@ describe("generateDutiesForDay", () => {
       weekly_shifts: [],
     });
 
-    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [notRostered], [], [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [notRostered], [], [], CONFIG, TEST_DATE);
     expect(duties).toHaveLength(0);
   });
 
@@ -265,7 +271,8 @@ describe("generateDutiesForDay", () => {
       [newCandidate],
       generatedShift,
       [alreadyAssigned],
-      CONFIG
+      CONFIG,
+      TEST_DATE
     );
     expect(duties).toHaveLength(1); // only 1 more needed, since 1 of 2 is already covered
     expect(unfilled).toHaveLength(0);
@@ -293,7 +300,7 @@ describe("generateDutiesForDay", () => {
       { employeeId: "flex-1", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: ["Boarding"] }, // 13:45-23:15, covers the 20:00-21:00 window. Same-day (not overnight) — NT01/N8/AP03/AP04 are overnight and trip a separate, already-documented limitation (simple minute-diff math doesn't handle midnight-crossing shifts), which is not what this test is isolating.
     ];
 
-    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG);
+    const { duties } = generateDutiesForDay("Wednesday", [requirement], [flight], [employee], generatedShift, [], CONFIG, TEST_DATE);
     expect(duties).toHaveLength(1);
     expect(duties[0].employeeId).toBe("flex-1");
   });
@@ -335,7 +342,7 @@ describe("generateDutiesForDay — foreign-company PROTECTED windows (4h30 befor
     });
     const generatedShifts = [{ employeeId: "ace-1", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, reqB], [flightA, flightB], [employee], generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, reqB], [flightA, flightB], [employee], generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(duties).toHaveLength(1);
     expect(duties[0].requirementId).toBe("req-a"); // earlier narrow window is processed first
@@ -360,7 +367,7 @@ describe("generateDutiesForDay — foreign-company PROTECTED windows (4h30 befor
     });
     const generatedShifts = [{ employeeId: "ace-2", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(duties).toHaveLength(1);
     expect(duties[0].requirementId).toBe("req-a");
@@ -383,7 +390,7 @@ describe("generateDutiesForDay — foreign-company PROTECTED windows (4h30 befor
     });
     const generatedShifts = [{ employeeId: "ace-3", dayOfWeek: "Wednesday", shiftCode: "MT02", coversRoles: [] }];
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqA, ramReq], [flightA, ramFlight], [employee], generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(unfilled).toHaveLength(0);
     expect(duties).toHaveLength(2);
@@ -405,7 +412,7 @@ describe("generateDutiesForDay — foreign-company PROTECTED windows (4h30 befor
     });
     const generatedShifts = [{ employeeId: "some-random-employee-id-42", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: [] }]; // AP02: 13:45-23:15, covers both evening windows
 
-    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqX, reqY], [flightX, flightY], [employee], generatedShifts, [], CONFIG);
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [reqX, reqY], [flightX, flightY], [employee], generatedShifts, [], CONFIG, TEST_DATE);
 
     expect(duties).toHaveLength(1);
     expect(duties[0].requirementId).toBe("req-x");
@@ -420,13 +427,13 @@ describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manua
       { id: "r1", plan_id: "plan-1", employee_id: "e1", day_of_week: "Wednesday", status: "off", shift_code: null },
     ];
 
-    const pool = buildDayEffectivePoolFromRosterEntries([offEmployee], rosterEntries, "Wednesday");
+    const pool = buildDayEffectivePoolFromRosterEntries([offEmployee], rosterEntries, "Wednesday", TEST_DATE);
     expect(pool).toHaveLength(0);
   });
 
   it("excludes an employee with no roster entry at all for this day (e.g. no plan generated yet)", () => {
     const employee = makeEmployee({ id: "e1" });
-    const pool = buildDayEffectivePoolFromRosterEntries([employee], [], "Wednesday");
+    const pool = buildDayEffectivePoolFromRosterEntries([employee], [], "Wednesday", TEST_DATE);
     expect(pool).toHaveLength(0);
   });
 
@@ -436,7 +443,7 @@ describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manua
       { id: "r1", plan_id: "plan-1", employee_id: "e1", day_of_week: "Wednesday", status: "working", shift_code: "AP01" },
     ];
 
-    const pool = buildDayEffectivePoolFromRosterEntries([employee], rosterEntries, "Wednesday");
+    const pool = buildDayEffectivePoolFromRosterEntries([employee], rosterEntries, "Wednesday", TEST_DATE);
     expect(pool).toHaveLength(1);
     // AP01's real window (13:45-22:45), not the static baseline MT01 (05:45-14:45)
     expect(pool[0].shift_start).toBe("13:45");

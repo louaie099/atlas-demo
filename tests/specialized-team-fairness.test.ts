@@ -41,6 +41,7 @@ function makeFlight(overrides: Partial<Flight>): Flight {
   };
 }
 
+const TEST_WEEK_START = "2026-09-21";
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 describe("generateForeignCompanyShifts — fairness rotation across a team larger than its headcount need", () => {
@@ -64,7 +65,8 @@ describe("generateForeignCompanyShifts — fairness rotation across a team large
       team,
       flights,
       ["Air France"],
-      15
+      15,
+      TEST_WEEK_START
     );
 
     expect(conflicts.filter((c) => c.team === "Air France")).toEqual([]);
@@ -98,7 +100,7 @@ describe("generateForeignCompanyShifts — fairness rotation across a team large
     const flightDays = ["Monday", "Thursday", "Saturday"];
     const flights = flightDays.map((day, i) => makeFlight({ id: `gf-flight-${i}`, airline: "Gulf Air", day_of_week: day }));
 
-    const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(DAYS, team, flights, ["Gulf Air"], 15);
+    const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(DAYS, team, flights, ["Gulf Air"], 15, TEST_WEEK_START);
 
     expect(conflicts.filter((c) => c.team === "Gulf Air")).toEqual([]);
     // All 7 ACE slots filled every flight day, and the leader slot never

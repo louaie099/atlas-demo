@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START, CURRENT_WEEK_LABEL } from "../lib/seed-data";
+// (CURRENT_WEEK_START above is also used for the real-plan-based invariant
+// checks in this file, in addition to the synthetic TEST_WEEK_START below.)
 import { buildDraftPlanBundle, planIdForWeek } from "../lib/planning/weekly-plan-service";
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "../lib/planning/workforce-pools";
 import { checkRestBetweenDays, auditStaticShiftRestFeasibility } from "../lib/planning/validation";
@@ -7,6 +9,13 @@ import { enforceRestInvariantAcrossWeek, GeneratedShiftAssignment, PriorDayShift
 import { Employee, WeeklyShiftEntry } from "../lib/types";
 import { getShiftTimesAs } from "../lib/shift-templates";
 import { restHoursBetween } from "../lib/roster-generation";
+import { flightDateFor } from "../lib/flight-date";
+
+// A Monday well before the 2026-09-20 GMT+1 -> GMT regime change, used for
+// the synthetic enforceRestInvariantAcrossWeek unit tests below (whose
+// hardcoded shift-time expectations, e.g. JR01 05:45-18:15, are written
+// against the OLD (PRE_2026_09_20) regime -- see lib/shift-templates.ts).
+const TEST_WEEK_START = "2026-01-05";
 
 /**
  * HARD invariants, not reporting assertions -- these must never fail
@@ -62,7 +71,7 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
 
     for (const employee of flexibleEmployees) {
       const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
-      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START);
       for (const issue of issues) {
         violators.push(`${employee.name} (${employee.id}): ${issue.description}`);
       }
@@ -90,8 +99,8 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
         if (today.status !== "working" || tomorrow.status !== "working") continue;
         if (!today.shift_code || !tomorrow.shift_code) continue;
 
-        const todayTimes = getShiftTimesAs(today.shift_code);
-        const tomorrowTimes = getShiftTimesAs(tomorrow.shift_code);
+        const todayTimes = getShiftTimesAs(today.shift_code, flightDateFor(CURRENT_WEEK_START, DAYS_WITH_DATA[i]));
+        const tomorrowTimes = getShiftTimesAs(tomorrow.shift_code, flightDateFor(CURRENT_WEEK_START, DAYS_WITH_DATA[i + 1]));
         const rest = restHoursBetween(todayTimes.shift_start, todayTimes.shift_end, tomorrowTimes.shift_start);
         if (rest < CONFIG.minimum_rest_hours) {
           violators.push(
@@ -105,7 +114,7 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
   });
 
   it("whole-demo finding: non-flexible (static/foreign-company/fixed-team) employees' OWN pre-existing rest feasibility is real, pre-existing workforce-design data unrelated to Stage 6, and is already reported (never hidden) via auditStaticShiftRestFeasibility -- proves that population isn't simply unchecked", () => {
-    const restCapacityIssues = auditStaticShiftRestFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG);
+    const restCapacityIssues = auditStaticShiftRestFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG, CURRENT_WEEK_START);
     expect(Array.isArray(restCapacityIssues)).toBe(true);
     expect(restCapacityIssues.length).toBeGreaterThan(0); // the demo dataset genuinely has some -- confirmed reported, not silently dropped
   });
@@ -114,7 +123,7 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
     const violators: string[] = [];
     for (const employee of EMPLOYEES) {
       const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
-      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG).filter((i) => i.type === "rest_violation");
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START).filter((i) => i.type === "rest_violation");
       for (const issue of issues) violators.push(`${employee.name} (${employee.assignment}): ${issue.description}`);
     }
     expect(violators, violators.join("\n")).toHaveLength(0);
@@ -123,7 +132,7 @@ describe("HARD invariant: zero 15h rest violations in the real generated/persist
   it("cross_week_continuity_uncertain fires ONLY for demand-driven populations at the Sunday -> following-Monday wraparound, never rest_violation, and never for a fixed/cyclic team", () => {
     for (const employee of EMPLOYEES) {
       const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
-      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START);
       const wraparoundIssues = issues.filter((i) => i.dayOfWeek?.includes("following week"));
       for (const issue of wraparoundIssues) {
         if (isGenerationDrivenPopulation(rebuilt)) {
@@ -158,7 +167,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
       Thursday: [{ employeeId: "e1", dayOfWeek: "Thursday", shiftCode: "JR01", coversRoles: ["Boarding"] }],
     };
 
-    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15);
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, TEST_WEEK_START);
 
     expect(repaired.Monday).toHaveLength(1); // first occurrence always kept (nothing before it to violate)
     expect(repaired.Tuesday).toHaveLength(0); // only 11.5h since Monday (1 real day apart) -- dropped
@@ -188,7 +197,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
       Wednesday: [{ employeeId: "e1", dayOfWeek: "Wednesday", shiftCode: "JR01", coversRoles: ["Boarding"] }],
     };
 
-    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15);
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, TEST_WEEK_START);
 
     expect(repaired.Monday).toHaveLength(1);
     expect(repaired.Wednesday).toHaveLength(1); // 2 real calendar days after Monday -- ample rest, never dropped
@@ -203,7 +212,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
     // Previous week's real Sunday: JR01 05:45-18:15 -- only 11.5h before this Monday's JR01 05:45 entree.
     const priorWeekBoundaryContext: PriorDayShiftMap = new Map([["e1", { shift_start: "05:45", shift_end: "18:15" }]]);
 
-    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, priorWeekBoundaryContext);
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, TEST_WEEK_START, priorWeekBoundaryContext);
 
     expect(repaired.Monday).toHaveLength(0);
     expect(dropped).toHaveLength(1);
@@ -218,7 +227,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
     // Last real shift was the PRIOR week's Sunday, ending well over 15h before Tuesday's entree.
     const priorWeekBoundaryContext: PriorDayShiftMap = new Map([["e1", { shift_start: "05:45", shift_end: "14:45" }]]);
 
-    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, priorWeekBoundaryContext);
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, TEST_WEEK_START, priorWeekBoundaryContext);
 
     expect(repaired.Tuesday).toHaveLength(1); // kept -- real rest is ample across the OFF day
     expect(dropped).toHaveLength(0);
@@ -240,6 +249,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
       days,
       generatedShiftsByDay,
       15,
+      TEST_WEEK_START,
       new Map(),
       new Set(["e1"])
     );
@@ -269,7 +279,7 @@ describe("enforceRestInvariantAcrossWeek — the safety-net mechanism itself, pr
     // No generationDrivenEmployeeIds passed at all -- every existing
     // caller/test that predates this parameter keeps the original
     // hard-drop behavior unchanged.
-    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15);
+    const { repaired, dropped } = enforceRestInvariantAcrossWeek(days, generatedShiftsByDay, 15, TEST_WEEK_START);
 
     expect(repaired.Monday).toHaveLength(0); // still dropped
     expect(dropped).toHaveLength(1);

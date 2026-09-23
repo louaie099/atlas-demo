@@ -4,6 +4,11 @@ import { evaluateAverageWorkingHours } from "../lib/planning/average-hours";
 import { CONFIG } from "../lib/seed-data";
 import { Employee, WeeklyShiftEntry } from "../lib/types";
 
+// A Monday well before the 2026-09-20 regime change, so every existing
+// assertion here keeps resolving the OLD-regime shift catalog it always
+// implicitly assumed.
+const TEST_WEEK_START = "2026-01-05";
+
 function makeEmployee(weeklyShifts: WeeklyShiftEntry[], overrides: Partial<Employee> = {}): Employee {
   return {
     id: "emp", name: "Test Employee", skills: ["Boarding"], assignment: "General T1 Pool",
@@ -21,12 +26,12 @@ describe("computeScheduledWeeklyHours", () => {
       { day_of_week: "Tuesday", shift_code: null, status: "off" },
       { day_of_week: "Wednesday", shift_code: "AP01", status: "working" }, // 13:45-22:45 = 9h
     ]);
-    expect(computeScheduledWeeklyHours(employee)).toBe(18);
+    expect(computeScheduledWeeklyHours(employee, TEST_WEEK_START)).toBe(18);
   });
 
   it("returns 0 for an employee with no working days", () => {
     const employee = makeEmployee([{ day_of_week: "Monday", shift_code: null, status: "off" }]);
-    expect(computeScheduledWeeklyHours(employee)).toBe(0);
+    expect(computeScheduledWeeklyHours(employee, TEST_WEEK_START)).toBe(0);
   });
 });
 
@@ -43,7 +48,7 @@ describe("checkRestBetweenDays", () => {
       { day_of_week: "Monday", shift_code: "AP04", status: "working" }, // 13:45-02:00 (overnight)
       { day_of_week: "Tuesday", shift_code: "MT02", status: "working" }, // 04:30-14:45
     ]);
-    const issues = checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG);
+    const issues = checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG, TEST_WEEK_START);
     expect(issues).toHaveLength(1);
     expect(issues[0].type).toBe("rest_violation");
     expect(issues[0].description).toContain("2.5h rest");
@@ -65,7 +70,7 @@ describe("checkRestBetweenDays", () => {
       { day_of_week: "Monday", shift_code: "MT01", status: "working" }, // 05:45-14:45
       { day_of_week: "Tuesday", shift_code: "AP01", status: "working" }, // 13:45-22:45
     ]);
-    expect(checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG)).toHaveLength(0);
+    expect(checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG, TEST_WEEK_START)).toHaveLength(0);
   });
 
   it("does not flag rest between a working day and an OFF day", () => {
@@ -73,7 +78,7 @@ describe("checkRestBetweenDays", () => {
       { day_of_week: "Monday", shift_code: "AP02", status: "working" },
       { day_of_week: "Tuesday", shift_code: null, status: "off" },
     ]);
-    expect(checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG)).toHaveLength(0);
+    expect(checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG, TEST_WEEK_START)).toHaveLength(0);
   });
 
   it("flags a genuinely tight back-to-back case (non-overnight previous shift)", () => {
@@ -84,7 +89,7 @@ describe("checkRestBetweenDays", () => {
       { day_of_week: "Monday", shift_code: "AP02", status: "working" },
       { day_of_week: "Tuesday", shift_code: "MT02", status: "working" },
     ]);
-    const issues = checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG);
+    const issues = checkRestBetweenDays(employee, ["Monday", "Tuesday"], CONFIG, TEST_WEEK_START);
     expect(issues).toHaveLength(1);
     expect(issues[0].type).toBe("rest_violation");
   });
@@ -113,7 +118,7 @@ describe("checkRestBetweenDays", () => {
       ...employee.weekly_shifts,
     ]);
     withMonday.weekly_shifts[0] = { day_of_week: "Monday", shift_code: "MT02", status: "working" };
-    const issues = checkRestBetweenDays(withMonday, daysOrder, CONFIG);
+    const issues = checkRestBetweenDays(withMonday, daysOrder, CONFIG, TEST_WEEK_START);
     // CHANGED (deliberately, not a regression): this employee's default
     // assignment is "General T1 Pool" -- a demand-driven population whose
     // next week isn't planned yet, so "this week repeats" is an
@@ -141,7 +146,7 @@ describe("checkRestBetweenDays", () => {
       { assignment: "Transit" }
     );
     employee.weekly_shifts[0] = { day_of_week: "Monday", shift_code: "MT02", status: "working" };
-    const issues = checkRestBetweenDays(employee, daysOrder, CONFIG);
+    const issues = checkRestBetweenDays(employee, daysOrder, CONFIG, TEST_WEEK_START);
     expect(issues.some((i) => i.type === "rest_violation" && i.dayOfWeek?.includes("Monday"))).toBe(true);
     expect(issues.some((i) => i.type === "cross_week_continuity_uncertain")).toBe(false);
   });
@@ -165,9 +170,9 @@ describe("checkAverageWeeklyHours / evaluateAverageWorkingHours — 42h is a con
       status: "working" as const,
     }));
     const employee = makeEmployee(days);
-    expect(computeScheduledWeeklyHours(employee)).toBeCloseTo(51.25, 1);
+    expect(computeScheduledWeeklyHours(employee, TEST_WEEK_START)).toBeCloseTo(51.25, 1);
     // No PlanIssue is raised solely from this one displayed week's total.
-    expect(checkAverageWeeklyHours(employee, CONFIG)).toBeNull();
+    expect(checkAverageWeeklyHours(employee, CONFIG, TEST_WEEK_START)).toBeNull();
   });
 
   it("checkAverageWeeklyHours never emits a weekly_hours_violation while the reference period is unconfigured, no matter how high the displayed week's total is", () => {
@@ -177,7 +182,7 @@ describe("checkAverageWeeklyHours / evaluateAverageWorkingHours — 42h is a con
       status: "working" as const,
     }));
     const employee = makeEmployee(days);
-    expect(checkAverageWeeklyHours(employee, CONFIG)).toBeNull();
+    expect(checkAverageWeeklyHours(employee, CONFIG, TEST_WEEK_START)).toBeNull();
   });
 
   it("evaluateAverageWorkingHours returns an explicit not_evaluable/reference_period_unconfigured state, never a silent pass or fail, while the period is unconfigured", () => {
@@ -202,7 +207,7 @@ describe("checkAverageWeeklyHours / evaluateAverageWorkingHours — 42h is a con
         { id: `static-${i}`, assignment: "Caisse/BCB" }
       )
     );
-    const issues = auditAverageWeeklyHoursFeasibility(employees, () => false, CONFIG);
+    const issues = auditAverageWeeklyHoursFeasibility(employees, () => false, CONFIG, TEST_WEEK_START);
     expect(issues).toEqual([]);
   });
 });
@@ -210,7 +215,7 @@ describe("checkAverageWeeklyHours / evaluateAverageWorkingHours — 42h is a con
 describe("validateWeeklyPlan", () => {
   it("surfaces unfilled_duty issues — but NEVER a needs_configuration issue; that's collectConfigurationIssues's job, entirely separate", () => {
     const unfilled = [{ dayOfWeek: "Wednesday", requirementId: "r2", role: "Check-in", stillNeeded: 2 }];
-    const issues = validateWeeklyPlan(unfilled, [], ["Wednesday"], CONFIG);
+    const issues = validateWeeklyPlan(unfilled, [], ["Wednesday"], CONFIG, TEST_WEEK_START);
     expect(issues.some((i) => i.type === "unfilled_duty")).toBe(true);
     // "needs_configuration" isn't even a valid PlanIssueType any more —
     // this asserts the array contains ONLY the type we gave it.

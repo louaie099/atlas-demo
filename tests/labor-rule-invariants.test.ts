@@ -116,7 +116,7 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     // averages over is not yet configured -- see
     // lib/planning/average-hours.ts).
     for (const employee of realStage6TouchedWeeks) {
-      const hours = computeScheduledWeeklyHours(employee);
+      const hours = computeScheduledWeeklyHours(employee, CURRENT_WEEK_START);
       expect(hours).toBeGreaterThanOrEqual(0);
     }
   });
@@ -158,7 +158,7 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     for (const employee of stage6Touched) {
       const rebuilt = rebuildEmployeeFromRoster(employee, rosterByKey);
       const touched = stage6TouchedDays(employee);
-      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(rebuilt, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START);
       for (const issue of issues) {
         const tomorrowDay = (issue.dayOfWeek ?? "").replace(" (following week)", "");
         const tomorrowIndex = DAYS_WITH_DATA.indexOf(tomorrowDay);
@@ -210,8 +210,8 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     let restViolationCount = 0;
     let highDisplayedWeekCount = 0;
     for (const employee of realFlexibleWeeks) {
-      if (checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG).length > 0) restViolationCount++;
-      if (computeScheduledWeeklyHours(employee) > CONFIG.maximum_average_weekly_working_hours) highDisplayedWeekCount++;
+      if (checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START).length > 0) restViolationCount++;
+      if (computeScheduledWeeklyHours(employee, CURRENT_WEEK_START) > CONFIG.maximum_average_weekly_working_hours) highDisplayedWeekCount++;
     }
     // Reporting assertion, not a strict gate -- the real counts (see the
     // delivered report) depend on the demo dataset's shift-code mix. This
@@ -236,19 +236,19 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     // that's a legitimate operational outcome, not a bug. When it DOES
     // happen, though, it must be genuinely rest-compliant.
     for (const employee of withOvernight) {
-      const issues = checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START);
       expect(issues, `${employee.name}: ${issues.map((i) => i.description).join("; ")}`).toHaveLength(0);
     }
   });
 
   it("whole-demo capacity finding: auditAverageWeeklyHoursFeasibility reports ZERO STATIC (non-flexible) employees as exceeding the confirmed 42h average -- because the reference period it averages over is not yet confirmed, ATLAS must not emit a ConfigurationIssue solely from a displayed-week total, however high (this replaces the old '77 employees structurally exceed 42h' finding, which was a false calendar-week interpretation -- see the delivered report)", () => {
-    const capacityIssues = auditAverageWeeklyHoursFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG);
+    const capacityIssues = auditAverageWeeklyHoursFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG, CURRENT_WEEK_START);
     expect(Array.isArray(capacityIssues)).toBe(true);
     expect(capacityIssues).toHaveLength(0);
   });
 
   it("whole-demo capacity finding: reports how many STATIC (non-flexible) employees' fixed weekly pattern structurally falls short of the confirmed 15h rest floor -- the shift CODE itself is the problem, not something day-by-day generation choice could ever fix", () => {
-    const restCapacityIssues = auditStaticShiftRestFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG);
+    const restCapacityIssues = auditStaticShiftRestFeasibility(EMPLOYEES, isFlexibleGeneralPool, CONFIG, CURRENT_WEEK_START);
     expect(Array.isArray(restCapacityIssues)).toBe(true);
     for (const issue of restCapacityIssues) {
       expect(issue.requirementId).toMatch(/^rest-capacity-/);
@@ -261,7 +261,7 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     expect(fixedCycleEmployees.length).toBeGreaterThan(0);
     const violators: string[] = [];
     for (const employee of fixedCycleEmployees) {
-      const issues = checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG);
+      const issues = checkRestBetweenDays(employee, DAYS_WITH_DATA, CONFIG, CURRENT_WEEK_START);
       for (const issue of issues) violators.push(`${employee.name}: ${issue.description}`);
     }
     // See the delivered report: the cycle's only working-to-working
@@ -283,7 +283,8 @@ describe("whole-plan labor-rule invariants (generated demo plan)", () => {
     const fixedCycleCapacityIssues = auditAverageWeeklyHoursFeasibility(
       fixedCycleEmployees,
       isFlexibleGeneralPool,
-      CONFIG
+      CONFIG,
+      CURRENT_WEEK_START
     );
     expect(fixedCycleCapacityIssues).toHaveLength(0);
   });

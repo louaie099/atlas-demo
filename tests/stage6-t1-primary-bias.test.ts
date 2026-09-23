@@ -99,6 +99,10 @@ function makeT1Profile(startTime: string, endTime: string, required: number): nu
   return Array.from({ length: BUCKETS_PER_DAY }, (_, i) => (i >= startIdx && i < endIdx ? required : 0));
 }
 
+// Matches makeFlight's default flight_date, well before the
+// 2026-09-20 GMT+1 -> GMT regime change.
+const TEST_DATE = "2026-09-03";
+
 describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (primary pass)", () => {
   it("pulls an otherwise-idle, Check-in-eligible employee onto an early shift code (MT02) purely to cover a real early-morning T1 aggregate demand peak, when nothing else needed them that day", () => {
     // No real per-flight (Gate/Boarding/Profiling/Mesure) demand at all.
@@ -110,7 +114,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
     // WITHOUT the bias (omitted t1DemandByBucket): zero real demand means
     // zero score for every candidate -- nobody gets rostered, exactly the
     // pre-fix behavior (T1 aggregate demand invisible to this function).
-    const before = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const before = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
     expect(before).toHaveLength(0);
 
     // WITH the bias: the same employee is now pulled onto MT02 (04:30
@@ -118,6 +122,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
     // demand peak) purely to sit across the early T1 window.
     const after = generateFlexiblePoolShifts(
       "Wednesday",
+      TEST_DATE,
       demand,
       [employee],
       new Map(),
@@ -146,7 +151,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
     // WITHOUT the bias: several legal codes cover the Gate window equally
     // (score 1) -- shortest-duration tie-break picks NR01 (08:00-16:45),
     // which does NOT reach back into the early T1 window at all.
-    const before = generateFlexiblePoolShifts("Wednesday", demand, [employee]);
+    const before = generateFlexiblePoolShifts("Wednesday", TEST_DATE, demand, [employee]);
     expect(before).toHaveLength(1);
     expect(before[0].shiftCode).toBe("NR01");
 
@@ -156,6 +161,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
     // outranks NR01's otherwise-equal hard coverage.
     const after = generateFlexiblePoolShifts(
       "Wednesday",
+      TEST_DATE,
       demand,
       [employee],
       new Map(),
@@ -187,6 +193,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
 
     const after = generateFlexiblePoolShifts(
       "Wednesday",
+      TEST_DATE,
       demand,
       [employee],
       priorDayShift,
@@ -223,6 +230,7 @@ describe("generateFlexiblePoolShifts — Stage-6 T1 aggregate demand bias (prima
 
     const result = generateFlexiblePoolShifts(
       "Wednesday",
+      TEST_DATE,
       demand,
       [gateEmployee, checkinOnlyEmployee],
       new Map(),
