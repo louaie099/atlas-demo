@@ -481,7 +481,17 @@ export interface AgentScheduleDuty {
 export interface AgentZoneDuty {
   zone: import("./checkin-zones").CheckinZoneId;
   window: { start: string; end: string };
-  status: "confirmed" | "assigned"; // same provenance convention as AgentScheduleDuty.status
+  // "confirmed" = a real human Find Agent commitment (checkin_zone_assignments,
+  // source: "human_modified"). "available" = DERIVED default T1 coverage —
+  // this employee has no specific duty during this window while rostered
+  // WORK, and this is the ordinary zone the demand-informed heuristic
+  // attributes them to at that time (see
+  // lib/planning/checkin-capacity-timeline.ts) — never itself a persisted
+  // duty/commitment, hence a distinct status from "confirmed"/"assigned".
+  // "assigned" is kept in the union only for backward-compatible display of
+  // any pre-2026-09-23 persisted row; fresh generation never produces one
+  // (see weekly-plan-service.ts's buildDraftPlanBundle doc comment).
+  status: "confirmed" | "assigned" | "available";
 }
 
 export interface AgentDayEntry {
