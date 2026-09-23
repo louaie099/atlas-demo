@@ -180,3 +180,198 @@ function toMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
 }
+
+/**
+ * Regression coverage for the 2026-09-23 live-production bug: a single
+ * ordinary zone (whichever has the highest required headcount at an
+ * instant) was capturing 100% of the free-employee pool, leaving every
+ * other zone with simultaneous real demand at Available 0 — even when the
+ * combined pool was large enough to cover every zone's demand if split
+ * sensibly. See checkin-capacity-timeline.ts's module doc comment for the
+ * full diagnosis (attributeFreeEmployeesForInstant replaces the old
+ * single-zone pickZoneForInstant heuristic).
+ */
+describe("buildDailyCapacityTimeline — capacity SPLITS across zones with simultaneous demand (2026-09-23 multi-zone attribution fix)", () => {
+  it("a sufficient shared pool is split across Main + Domestic instead of concentrated entirely into Main", () => {
+    // Main flight (UK/USA, +1 override): required = max(1, 2+1) = 3.
+    // Domestic flight (domestic, +0 override): required = max(1, 2+0) = 2.
+    // Both open 04:30-07:45 (08:30 departure). 5 identical employees free
+    // the whole window — exactly enough to cover BOTH zones (3 + 2 = 5) if
+    // split correctly, but the old heuristic put all 5 on Main (the higher
+    // of the two) and left Domestic at Available 0 / Gap 2.
+    const mainFlight = makeFlight({ id: "fmain", destination: "LHR", destination_category: "UK/USA", scheduled_departure: "08:30" });
+    const domesticFlight = makeFlight({
+      id: "fdom",
+      destination: "RAK",
+      destination_category: "domestic",
+      scheduled_departure: "08:30",
+    });
+    const employees: EmployeeAvailabilityInput[] = Array.from({ length: 5 }, (_, i) => ({
+      employeeId: `e${i}`,
+      shift: { start: "04:30", end: "07:45" },
+      busyWindows: [],
+    }));
+
+    const periods = buildDailyCapacityTimeline("Wednesday", [mainFlight, domesticFlight], employees);
+    const overlap = periods.find((p) => p.start === "04:30")!;
+
+    expect(overlap.requiredByZone.t1_main_checkin).toBe(3);
+    expect(overlap.requiredByZone.t1_domestic).toBe(2);
+
+    // BEFORE the fix this would be { t1_main_checkin: 5, t1_domestic: 0 }.
+    expect(overlap.availableByZone.t1_main_checkin).toBe(3);
+    expect(overlap.availableByZone.t1_domestic).toBe(2);
+
+    const rows = buildZoneCoverageRowsForDay("Wednesday", [mainFlight, domesticFlight], employees);
+    const mainRow = rows.t1_main_checkin.find((r) => r.start === "04:30")!;
+    const domRow = rows.t1_domestic.find((r) => r.start === "04:30")!;
+    expect(mainRow.gap).toBe(0);
+    expect(mainRow.surplus).toBe(0);
+    expect(domRow.gap).toBe(0); // recovered coverage: enough people existed, they were just misattributed
+    expect(domRow.surplus).toBe(0);
+  });
+
+  it("an insufficient shared pool still shows a REAL, honest gap on both zones — never fabricated coverage", () => {
+    // Same Main (required 3) + Domestic (required 2) demand as above, but
+    // only 3 free employees total — genuinely not enough to cover both
+    // zones' combined demand of 5. The fix must distribute the shortfall
+    // (max-min fair), never claim full coverage for either zone.
+    const mainFlight = makeFlight({ id: "fmain", destination: "LHR", destination_category: "UK/USA", scheduled_departure: "08:30" });
+    const domesticFlight = makeFlight({
+      id: "fdom",
+      destination: "RAK",
+      destination_category: "domestic",
+      scheduled_departure: "08:30",
+    });
+    const employees: EmployeeAvailabilityInput[] = Array.from({ length: 3 }, (_, i) => ({
+      employeeId: `e${i}`,
+      shift: { start: "04:30", end: "07:45" },
+      busyWindows: [],
+    }));
+
+    const periods = buildDailyCapacityTimeline("Wednesday", [mainFlight, domesticFlight], employees);
+    const overlap = periods.find((p) => p.start === "04:30")!;
+
+    const mainAvailable = overlap.availableByZone.t1_main_checkin ?? 0;
+    const domAvailable = overlap.availableByZone.t1_domestic ?? 0;
+
+    // The pool of 3 is fully accounted for (no one invented, no one lost).
+    expect(mainAvailable + domAvailable).toBe(3);
+    // Neither zone is starved to 0 while the other has surplus: this is the
+    // max-min-fair split (main=2/gap1, domestic=1/gap1), never the old
+    // all-on-Main behavior (main=3/gap0, domestic=0/gap2).
+    expect(mainAvailable).toBe(2);
+    expect(domAvailable).toBe(1);
+
+    const rows = buildZoneCoverageRowsForDay("Wednesday", [mainFlight, domesticFlight], employees);
+    const mainRow = rows.t1_main_checkin.find((r) => r.start === "04:30")!;
+    const domRow = rows.t1_domestic.find((r) => r.start === "04:30")!;
+    // A genuine, unavoidable shortage: total demand (5) exceeds the total
+    // pool (3), so SOME gap must remain somewhere — the fix redistributes
+    // it fairly, it does not and must not make it disappear.
+    expect(mainRow.gap + domRow.gap).toBeGreaterThan(0);
+    expect(mainRow.gap).toBe(1);
+    expect(domRow.gap).toBe(1);
+  });
+
+  it("a sufficient shared pool splits across Main + Italy/Spain the same way", () => {
+    const mainFlight = makeFlight({ id: "fmain", destination: "LHR", destination_category: "UK/USA", scheduled_departure: "08:30" });
+    const italySpainFlight = makeFlight({
+      id: "fit",
+      destination: "MAD",
+      destination_category: "Europe/Schengen",
+      scheduled_departure: "08:30",
+    });
+    // Italy/Spain required = max(1, 2+0) = 2; Main required = 3.
+    const employees: EmployeeAvailabilityInput[] = Array.from({ length: 5 }, (_, i) => ({
+      employeeId: `e${i}`,
+      shift: { start: "04:30", end: "07:45" },
+      busyWindows: [],
+    }));
+
+    const rows = buildZoneCoverageRowsForDay("Wednesday", [mainFlight, italySpainFlight], employees);
+    const mainRow = rows.t1_main_checkin.find((r) => r.start === "04:30")!;
+    const italyRow = rows.t1_italy_spain.find((r) => r.start === "04:30")!;
+
+    expect(mainRow.available).toBe(3);
+    expect(mainRow.gap).toBe(0);
+    expect(italyRow.available).toBe(2); // BEFORE the fix: 0
+    expect(italyRow.gap).toBe(0);
+  });
+
+  it("a zone whose demand is already fully covered receives no more of the pool, even with employees left over", () => {
+    // Domestic needs only 2; Main needs 3; 6 employees free — 1 more than
+    // total demand (5). The extra employee is surplus and must land on the
+    // still-highest-demand zone (Main), never inflate Domestic beyond its
+    // own required headcount while Main also has room.
+    const mainFlight = makeFlight({ id: "fmain", destination: "LHR", destination_category: "UK/USA", scheduled_departure: "08:30" });
+    const domesticFlight = makeFlight({
+      id: "fdom",
+      destination: "RAK",
+      destination_category: "domestic",
+      scheduled_departure: "08:30",
+    });
+    const employees: EmployeeAvailabilityInput[] = Array.from({ length: 6 }, (_, i) => ({
+      employeeId: `e${i}`,
+      shift: { start: "04:30", end: "07:45" },
+      busyWindows: [],
+    }));
+
+    const rows = buildZoneCoverageRowsForDay("Wednesday", [mainFlight, domesticFlight], employees);
+    const mainRow = rows.t1_main_checkin.find((r) => r.start === "04:30")!;
+    const domRow = rows.t1_domestic.find((r) => r.start === "04:30")!;
+
+    expect(domRow.available).toBe(2);
+    expect(domRow.surplus).toBe(0);
+    expect(mainRow.available).toBe(4);
+    expect(mainRow.surplus).toBe(1);
+  });
+
+  it("REGRESSION: a window entirely before the earliest catalog shift start is still a real, unavoidable structural gap — never hidden by the fix", () => {
+    // 03:15-04:30-style case: Check-in demand exists but no employee's
+    // shift has started yet at all. No amount of better cross-zone
+    // attribution can recover coverage that literally does not exist yet —
+    // this must keep showing Required > 0 / Available 0 / Gap > 0 after
+    // the fix, exactly as before it.
+    const domesticFlight = makeFlight({
+      id: "fdom",
+      destination: "RAK",
+      destination_category: "domestic",
+      scheduled_departure: "08:30", // opens 04:30
+    });
+    const employees: EmployeeAvailabilityInput[] = Array.from({ length: 10 }, (_, i) => ({
+      employeeId: `e${i}`,
+      shift: { start: "04:30", end: "14:00" }, // earliest catalog shift start is 04:30
+      busyWindows: [],
+    }));
+
+    const periods = buildDailyCapacityTimeline("Wednesday", [domesticFlight], employees);
+    // No boundary is added before 04:30 by this flight (open exactly at
+    // 04:30), so assert directly on the pre-open instant.
+    const beforeAnyShift = periods.find((p) => p.start === "04:00" || (toMinutes(p.start) < toMinutes("04:30") && toMinutes(p.end) <= toMinutes("04:30")));
+    if (beforeAnyShift) {
+      expect(beforeAnyShift.availableByZone.t1_domestic ?? 0).toBe(0);
+    }
+
+    const rows = buildZoneCoverageRowsForDay("Wednesday", [domesticFlight], employees);
+    const domRow = rows.t1_domestic.find((r) => r.start === "04:30")!;
+    // At the exact instant demand opens and shifts start simultaneously,
+    // coverage is fine (10 employees free at 04:30 far exceeds required 2).
+    expect(domRow.gap).toBe(0);
+
+    // Now the genuinely-unavoidable case: shift starts strictly AFTER
+    // demand opens (03:15 flight window vs 04:30 earliest shift start).
+    const earlyDomesticFlight = makeFlight({
+      id: "fdom-early",
+      destination: "RAK",
+      destination_category: "domestic",
+      scheduled_departure: "07:15", // opens 03:15, well before any shift starts
+    });
+    const rows2 = buildZoneCoverageRowsForDay("Wednesday", [earlyDomesticFlight], employees);
+    const preShiftRow = rows2.t1_domestic.find((r) => r.start === "03:15");
+    expect(preShiftRow).toBeDefined();
+    expect(preShiftRow!.required).toBeGreaterThan(0);
+    expect(preShiftRow!.available).toBe(0);
+    expect(preShiftRow!.gap).toBeGreaterThan(0); // real, unavoidable — must NOT be hidden by the fix
+  });
+});
