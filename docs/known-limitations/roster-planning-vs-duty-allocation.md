@@ -949,3 +949,211 @@ always correct at each instant regardless.
    above). The weekly-HOURS obligation top-up remains fully scaffolded
    but inert (`working_hours_obligation_hours` stays `null`) until
    management confirms the real number/shape — nothing here guesses it.
+
+## 2026-09-23 addendum: RAM Handling's GMT+1 → GMT operational time reference change (effective-dated shift regime)
+
+RAM Handling switches its operational time reference from GMT+1 to GMT on
+**Sunday 2026-09-20**. Per the product owner, this is confirmed to be a
+real flight-program and employee-shift-time change, not a display/timezone
+relabeling — RAM's own change sheet gives new entrée/sortie clock times
+for several shift codes effective on that date. The flight schedule itself
+(`Flight.scheduled_departure` etc.) stays authoritative and untouched by
+this work — only **employee shift template resolution** (the
+entrée/sortie a `shift_code` like `NR01` or `JR01` actually means) is now
+date-dependent.
+
+### Architecture: effective-dated resolution, not a global find-and-replace
+
+`lib/shift-templates.ts` now holds three shift-time tables instead of one:
+
+- `SHIFT_CODES_GMT_PLUS_1` — the OLD regime, active for every real
+  calendar date strictly before `REGIME_CHANGE_DATE` ("2026-09-20").
+  Unchanged from what the catalog always was.
+- `SHIFT_CODES_GMT_SPECULATIVE` (unexported, historical only) — a GUESS
+  made before RAM's real change sheet existed, never applied to any real
+  date. Kept only as the provenance record for several INHERITED fields
+  below (the best available fallback where the real document is silent),
+  and deliberately renamed away from the old generic `SHIFT_CODES_GMT`
+  name so it can never be confused with the new, actually-effective table.
+- `SHIFT_CODES_GMT_EFFECTIVE_2026_09_20` — the NEW regime, active for
+  every real calendar date on or after `REGIME_CHANGE_DATE`. Built
+  field-by-field from a row-by-row audit of RAM's real change sheet
+  against the OLD catalog (full per-code table below).
+
+`resolveShiftRegime(date: string)` does the actual resolution:
+`date >= REGIME_CHANGE_DATE ? "POST_2026_09_20" : "PRE_2026_09_20"` — a
+plain ISO-string comparison, correct because every date in this app is
+always a real "YYYY-MM-DD" string, never a timestamp. Every shift-time
+lookup (`getShiftTimes`, `getShiftTimesAs`, `getShiftDurationHours`,
+`restHoursForDailyRepeatingShift`, `shiftCatalogForDate`) now takes a
+**required** `date` parameter — deliberately not defaulted, so a caller
+can never silently guess a regime. This means:
+
+- **No global flip.** There is no code path that finds "every NR01 sortie
+  in the database" and rewrites it. A plan for a week entirely before
+  2026-09-20 keeps producing its original OLD-regime times forever,
+  because every read of it re-resolves from that week's own real dates,
+  which never change.
+- **Per-day, never per-week, resolution.** 2026-09-20 is a confirmed
+  Sunday, so a displayed Monday-Sunday week straddles the boundary
+  exactly once, on its last day. Every per-day shift-template lookup in
+  the planning pipeline resolves `date = flightDateFor(weekStart, day)`
+  fresh for that specific day — see `tests/shift-regime.test.ts`'s
+  "a real week spanning both regimes" suite, which proves Monday-Saturday
+  of the week containing 2026-09-20 resolve `PRE_2026_09_20` while that
+  week's Sunday alone resolves `POST_2026_09_20`.
+- **`SHIFT_CODES`** is kept as an export, but is now documented as
+  code-list-only (`Object.keys(SHIFT_CODES)` for UI dropdowns) — its
+  VALUES must never be read for a date-sensitive computation. Both
+  regimes share an identical 13-code key set, so this is safe.
+- **`TRANSPORT_METADATA`** (new export) preserves the change sheet's
+  personnel-transport/circuit rows (a shuttle bus's own departure/arrival,
+  not an employee's working shift) that do not describe operational
+  availability at all. Documented explicitly as burden/reporting time,
+  never to be used for eligibility, rest, or T1 capacity — reserved for a
+  possible future fatigue model. One source row (`transportEquipeAF`'s
+  sortie) carries a "2027" date that reads as a likely typo for 2026; this
+  is flagged in the code comment rather than silently corrected or
+  silently trusted.
+- **`LEGACY_BASELINE_DATE`** ("2020-01-01", new export) marks a value as
+  an intentionally-static seed/baseline number with no real plan date in
+  scope (see the employee-generator/seed-data section below) — never used
+  by any real per-date planning read.
+
+### Per-code classification (CONFIRMED / INHERITED / AMBIGUOUS)
+
+| Code | OLD (GMT+1) entrée–sortie | NEW (GMT, from 2026-09-20) entrée–sortie | Confidence |
+|------|---------------------------|-------------------------------------------|------------|
+| JR01 | 05:45–18:15 | 05:45–18:30 | entrée CONFIRMED (unchanged) / sortie CONFIRMED (changed — "Circuits Sortie Brigade Matin") |
+| JR02 | 04:30–16:45 | 03:45–16:45 | entrée INHERITED / sortie INHERITED (transport-labeled row only; suspect "2027" date) |
+| MT01 | 05:45–14:45 | 05:45–15:00 | entrée CONFIRMED (unchanged) / sortie CONFIRMED (changed, shared w/ MT02 — "Circuits Sortie Équipe Matin") |
+| MT02 | 04:30–14:45 | 03:45–15:00 | entrée INHERITED / sortie CONFIRMED (changed, shared w/ MT01) |
+| MT03 | 05:45–15:45 | 05:45–14:45 | entrée CONFIRMED (unchanged) / sortie INHERITED |
+| NR01 | 08:00–16:45 | 08:00–17:00 | entrée CONFIRMED (unchanged) / sortie CONFIRMED (changed — "Horaire Administratif") |
+| NR02 | 08:00–18:15 | 08:00–18:15 | entrée INHERITED / sortie INHERITED (not mentioned anywhere in the document) |
+| AP01 | 13:45–22:45 | 13:45–22:45 | entrée CONFIRMED (unchanged) / sortie AMBIGUOUS (document gives a value but it can't be confidently assigned between AP01/AP02 — OLD value kept rather than guessed) |
+| AP02 | 13:45–23:15 | 13:45–23:15 | entrée CONFIRMED (unchanged) / sortie AMBIGUOUS (same reason as AP01) |
+| AP03 | 17:45–02:00 | 17:45–01:15 | entrée CONFIRMED (unchanged) / sortie INHERITED |
+| AP04 | 13:45–02:00 | 13:45–01:15 | entrée CONFIRMED (unchanged) / sortie INHERITED |
+| NT01 | 17:45–06:15 | 17:45–06:30 | entrée CONFIRMED (unchanged) / sortie CONFIRMED (changed — "Circuits Sortie Équipe Nuit + Brigade Nuit") |
+| N8 | 21:00–06:15 | 21:30–06:30 | entrée CONFIRMED (changed) / sortie CONFIRMED (changed) |
+
+`FEMALE_ENTREE_POLICY` (the minimum clock-in policy, never a shift code)
+was separately audited and confirmed unchanged by the new document for
+both regimes — no update needed.
+
+### Consumers threaded with the real per-date resolution
+
+Every real code path that resolves an employee's shift-code time now
+receives an explicit, per-day real calendar date (never a default, never
+one date for a whole week) — file:line references are to the state as of
+this addendum:
+
+- `lib/planning/duty-generation.ts` — `effectiveShiftForDay` (`getShiftTimesAs` calls) and `buildDayEffectivePoolFromRosterEntries`, both given a required `date`; `generateDutiesForDay` takes a required `date` param.
+- `lib/planning/shift-generation.ts` — `generateFlexiblePoolShifts` takes a required `date` (2nd param) and enumerates `shiftCatalogForDate(date)` instead of the old static `SHIFT_CODES`; `enforceRestInvariantAcrossWeek` takes a required `weekStart` and resolves `flightDateFor(weekStart, day)` per day inside its main walk and its cyclic Sunday→Monday wrap check.
+- `lib/planning/roster-generation.ts` — `shortestFirstCatalogCodes(date)` now takes a date and is recomputed fresh per day inside `computeEmployeeDayCountTopUp` (its old single precomputed `catalogCodes` parameter was removed entirely, since a straddling week can no longer have one fixed catalog); `generateObligationToppedUpShifts` takes a required `weekStart`.
+- `lib/planning/specialized-team-generation.ts` — `assignPoolToWindow(WithRoles)`, `generateProfilingMesureShifts`, and `generateForeignCompanyShifts` all resolve `date = flightDateFor(weekStart, day)` per day and pass it down to every shift-time lookup.
+- `lib/foreign-shift-planning.ts` — `selectCompatibleShiftCode(s)` and `planForeignCompanyDay` take a `date` parameter (see the documented exception below) and enumerate `shiftCatalogForDate(date)`.
+- `lib/planning/checkin-capacity-timeline.ts` — `buildEligibleEmployeeAvailabilityForDay` takes a required `date`, threaded to `buildDayEffectivePoolFromRosterEntries`; the atomic-interval timeline functions themselves need no date awareness since they operate on already-resolved availability windows.
+- `lib/planning/generate-draft-plan.ts` — `generateDraftWeeklyPlan` takes a required `weekStart` and resolves `date = flightDateFor(weekStart, day)` at every per-day shift-time read across both Stage-6 passes, the rest-hours-scheduled-this-window accumulation, and duty generation.
+- `lib/planning/validation.ts` — `checkRestBetweenDays`, `computeScheduledWeeklyHours`, `checkAverageWeeklyHours`, `auditAverageWeeklyHoursFeasibility`, `auditStaticShiftRestFeasibility`, `validateWeeklyPlan` all take a required `weekStart` and resolve each day's own date, including the cyclic Sunday→following-Monday wrap case (which resolves the wrapped day from `shiftWeek(weekStart, 1)`).
+- `lib/planning/rotation-context.ts` — `deriveTransitionContextFromPriorPlan` takes the PRIOR plan's own `priorWeekStart` (resolving the regime effective on that prior plan's real last day, never the new week's); `deriveFallbackBoundaryContext` takes `weekStart` and resolves a stand-in date one week before it.
+- `lib/planning/weekly-plan-service.ts`, `lib/planning/persisted-plan-view.ts`, `lib/planning/weekly-plan-view.ts` — thread `weekStart` through to every downstream date-resolved call.
+- `app/api/candidates/[requirementId]/route.ts` and `app/api/assign/route.ts` — pass `targetFlight.flight_date` (the real, authoritative per-flight date) into `buildDayEffectivePoolFromRosterEntries`.
+- `app/api/checkin-zone-candidates/[zoneRequirementId]/route.ts` and `app/api/checkin-zone-assign/route.ts` — compute `flightDateFor(plan.week_start, requirement.day_of_week)` and pass it the same way.
+- `lib/scoring.ts` — audited, needs **no changes**: `scoreCandidates` only ever reads already-resolved `shift_start`/`shift_end`/`rest_before_shift_hours` fields off the `Employee` objects its callers hand it; it never calls into `shift-templates.ts` directly, so it is correct by construction once its callers pass correctly-resolved data.
+
+### Consumers that could NOT be made fully, uniformly date-aware — flagged, not hidden
+
+- **`lib/foreign-shift-planning.ts`'s `selectCompatibleShiftCode(s)` and
+  `planForeignCompanyDay`** take `date` as a **defaulted** parameter
+  (`= LEGACY_BASELINE_DATE`), not a required one, unlike every function in
+  `lib/shift-templates.ts` itself. This is a deliberate, documented
+  compromise: the real planning caller
+  (`specialized-team-generation.ts`) always passes its own real resolved
+  date explicitly, but `tests/foreign-shift-planning.test.ts` exercises
+  these functions in isolation with no date/regime concept at all, and
+  forcing every one of those unit tests to adopt a date was judged not
+  worth the churn for a pure unit-level matching function. The
+  consequence: a hypothetical NEW caller of these functions that forgets
+  to pass `date` silently gets OLD-regime (`LEGACY_BASELINE_DATE`)
+  resolution instead of a compile error. This is a real, narrower
+  consistency gap than the rest of the pipeline (which makes `date`
+  strictly required everywhere else) and is called out here rather than
+  presented as fully closed.
+- **`lib/employee-generator.ts` and `lib/seed-data.ts`'s static baseline
+  fields** (`Employee.shift_start`/`shift_end`/`rest_before_shift_hours`
+  built once at generation/seed time) are **not** made date-aware — they
+  are built with no real plan date in scope at all (seed-time script
+  generation, not a real calendar plan), so there is no date to resolve
+  against. These now explicitly use `LEGACY_BASELINE_DATE` (2020-01-01,
+  pre-regime) to keep their numeric values identical to what they always
+  were, and are documented as durable fallback/legacy data that a
+  generation-driven employee's real per-date resolution
+  (`effectiveShiftForDay`, `resolvePlanRosterEntry`) already overrides
+  wherever a real plan roster exists. A caller that read one of these
+  static fields directly for a real POST-2026-09-20 date, bypassing the
+  per-date resolution path entirely, would see a stale OLD-regime number
+  — this is the same pre-existing "baseline vs. resolved" distinction this
+  document's earlier sections already describe for `effectiveShiftForDay`,
+  now extended to also cover regime, not a new gap this work introduced.
+- **UI components** (`components/employees/employee-filters.tsx`,
+  `components/agent-schedule-filters.tsx`) were audited and read only
+  `Object.keys(SHIFT_CODES)` (the code list, identical across regimes) for
+  dropdown options — never a time value — so they need no changes.
+  `components/employees/employee-drawer.tsx` only displays already-
+  resolved `Employee.shift_start`/`shift_end` strings handed to it by the
+  API layer; it never reads the catalog directly.
+
+### Test coverage
+
+A new dedicated file, `tests/shift-regime.test.ts` (27 tests), covers:
+the boundary itself (2026-09-19 PRE vs. 2026-09-20 POST, and dates far on
+either side); that both regimes share an identical 13-code key set;
+per-code OLD-vs-NEW resolution for a CONFIRMED-changed code (JR01, NR01),
+an AMBIGUOUS field kept intentionally at its OLD value (AP02), and
+immutability of historical lookups after POST-date lookups have run;
+overnight-shift correctness (AP03, AP04, NT01, N8) including the 24h-wrap
+duration math on both sides of the boundary; duration calculations for
+changed codes (NR01, JR01) and an INHERITED code (MT02); a 15h rest
+calculation across a boundary-crossing shift pair, proving each day's own
+regime is used rather than one regime for the pair; foreign-company shift
+compatibility resolved per date via `selectCompatibleShiftCode(s)`; and a
+real week spanning both regimes (`weekStart = "2026-09-14"`, whose Sunday
+is 2026-09-20) resolved per-day rather than per-week, including running
+the full `generateDraftWeeklyPlan` pipeline across that exact straddling
+week without error.
+
+Full suite: 53 test files, 438 tests pass (411 immediately before this
+change + 27 new in `tests/shift-regime.test.ts`), and `npm run build` is
+clean. The T1 derived-capacity-timeline suite
+(`tests/checkin-capacity-timeline.test.ts`, `tests/zone-plan-integration.test.ts`),
+the Stage-6 demand-bias suites (`tests/stage6-t1-demand-bias.test.ts`,
+`tests/stage6-t1-primary-bias.test.ts`), and the foreign-company suites
+(`tests/foreign-company-roster-topup.test.ts`,
+`tests/foreign-company-double-booking.test.ts`,
+`tests/foreign-company-redeployment-default.test.ts`,
+`tests/foreign-company-window.test.ts`) were all explicitly re-run and
+pass unmodified — none of the three prior fixes documented above was
+touched or regressed by this change.
+
+### Remaining honest limitations
+
+- The AMBIGUOUS AP01/AP02 sortie fields, and every INHERITED field, are
+  the model's best-available values, not confirmed by RAM's document —
+  if/when management resolves the ambiguity or supplies the missing
+  rows, only `SHIFT_CODES_GMT_EFFECTIVE_2026_09_20` in
+  `lib/shift-templates.ts` needs to change; no other file's logic depends
+  on which specific values those fields hold.
+- Separately, the `transportEquipeAF` "2027" date is flagged, not silently corrected —
+  if it is confirmed to be a genuine 2027 effective date rather than a
+  typo, `TRANSPORT_METADATA` would need a second, later effective-dated
+  entry of its own (not implemented, since transport metadata is not yet
+  consumed by any real computation).
+- `lib/foreign-shift-planning.ts`'s defaulted (not required) `date`
+  parameter, described above, remains a real, narrower consistency gap
+  versus the rest of the pipeline's strictly-required dates.
+- This work resolves shift-TIME regime only. It does not attempt to
+  infer or apply any other operational change RAM's transition might
+  carry (headcount, route, or policy changes outside the shift catalog)
+  — none were described in the task's scope, and none are assumed here.
