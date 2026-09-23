@@ -1,11 +1,31 @@
-import { Employee, Config } from "../types";
+import { Employee } from "../types";
 import { TimeWindow } from "../scoring";
 import { isTransitTeam, isFixedPlanningTeam, isRedeploymentAllowed } from "../teams";
 import { isProfilingOrMesureAssigned, isForeignCompanyAssigned } from "./workforce-pools";
-import { CheckinZoneId, ORDINARY_CHECKIN_ZONES } from "../checkin-zones";
-import { ZoneDailyDemand } from "./zone-demand-aggregation";
 
 /**
+ * 2026-09-23 ARCHITECTURE REFACTOR: this module used to also export
+ * `computeDefaultCheckinZonePlacement`, which produced discrete
+ * `ZoneCoverageDuty` rows (one per employee per free interval) that were
+ * then PERSISTED as `checkin_zone_assignments` rows with
+ * `source: "atlas_generated"`. That is exactly the architecture the
+ * product owner's audit identified as the root cause of the
+ * "Required 4 / Assigned 75" bug: a broad free-interval duty pinned, via a
+ * single midpoint lookup, to ONE zone requirement row, then matched back
+ * to a persisted row by a broken exact-window/first-match lookup
+ * (weekly-plan-service.ts's old `findZoneRequirementIdFor`). Per the
+ * owner's explicit instruction, default T1 placement is no longer
+ * generated as discrete persisted duty rows at all — it is now DERIVED at
+ * read time, atomic-interval by atomic-interval, by
+ * lib/planning/checkin-capacity-timeline.ts, which reuses the eligibility
+ * predicate below and `subtractBusyWindows`. See that module's doc
+ * comment for the real Required/Available/Gap computation.
+ *
+ * `isEligibleForDefaultCheckinPlacement` and `subtractBusyWindows` remain
+ * here, exported, as the shared primitives both the capacity-timeline
+ * module and this module's own tests build on — this is still the one
+ * true eligibility rule, never duplicated.
+ *
  * DEFAULT T1 CHECK-IN PLACEMENT — a genuinely different concept from
  * T1 Check-in DEMAND (zone-demand-aggregation.ts), per the product
  * owner's explicit instruction not to conflate the two:
@@ -68,14 +88,6 @@ import { ZoneDailyDemand } from "./zone-demand-aggregation";
  * this codebase) of never fabricating a duty from operationally
  * meaningless residual time.
  */
-export interface ZoneCoverageDuty {
-  employeeId: string;
-  zone: CheckinZoneId;
-  dayOfWeek: string;
-  window: TimeWindow;
-  reasoning: string;
-}
-
 const MINIMUM_PLACEMENT_MINUTES = 30;
 
 function timeToMinutes(t: string): number {
@@ -110,7 +122,15 @@ export function subtractBusyWindows(shift: TimeWindow, busy: TimeWindow[]): Time
     .map((f) => ({ start: minutesToTime(f.start), end: minutesToTime(f.end) }));
 }
 
-function isEligibleForDefaultCheckinPlacement(employee: Employee): boolean {
+/**
+ * The one true default-T1-placement eligibility rule — exported so
+ * lib/planning/checkin-capacity-timeline.ts (the derived Required/
+ * Available/Gap computation that replaced this module's old discrete
+ * duty generation) applies EXACTLY this same test, never a parallel
+ * eligibility engine. See the module doc comment above for the rule
+ * itself.
+ */
+export function isEligibleForDefaultCheckinPlacement(employee: Employee): boolean {
   if (!employee.active) return false;
   if (employee.is_duty_officer) return false;
   if (isFixedPlanningTeam(employee.assignment)) return false;
@@ -119,60 +139,4 @@ function isEligibleForDefaultCheckinPlacement(employee: Employee): boolean {
   if (isForeignCompanyAssigned(employee) && !isRedeploymentAllowed(employee.assignment)) return false;
   if (!employee.skills.includes("Check-in")) return false;
   return true;
-}
-
-/** Picks the ordinary zone with the highest required headcount overlapping the given interval's midpoint — a plausible, demand-informed default location, never itself a claim about required capacity (see the module doc comment's DEMAND vs PLACEMENT distinction). Falls back to t1_main_checkin, the largest/general zone, when no zone has any demand at that moment (still a valid place to operationally position someone, since the zone genuinely exists and idle capacity there is normal). */
-function pickDefaultZone(midpointMinutes: number, zoneDemand: Partial<Record<CheckinZoneId, ZoneDailyDemand>>): CheckinZoneId {
-  let best: CheckinZoneId = "t1_main_checkin";
-  let bestRequired = -1;
-  for (const zone of ORDINARY_CHECKIN_ZONES) {
-    const daily = zoneDemand[zone];
-    if (!daily) continue;
-    const bucket = daily.buckets.find((b) => timeToMinutes(b.start) <= midpointMinutes && midpointMinutes < timeToMinutes(b.end));
-    const required = bucket?.required ?? 0;
-    if (required > bestRequired) {
-      bestRequired = required;
-      best = zone;
-    }
-  }
-  return best;
-}
-
-/**
- * The default-placement stage itself: given the day-effective pool, each
- * employee's shift window, and every busy window already consumed by
- * higher-priority duties this day (Gate/Boarding/Profiling/Mesure/
- * foreign-company — passed in exactly as computed by
- * duty-generation.ts's computeBusyWindowsForDay plus this same day's own
- * generated duties), produces zero or more ZoneCoverageDuty rows per
- * eligible employee for their remaining free time.
- */
-export function computeDefaultCheckinZonePlacement(
-  dayOfWeek: string,
-  dayEffectivePool: (Employee & { shift_start: string; shift_end: string })[],
-  busyWindows: Record<string, TimeWindow[]>,
-  zoneDemand: Partial<Record<CheckinZoneId, ZoneDailyDemand>>
-): ZoneCoverageDuty[] {
-  const duties: ZoneCoverageDuty[] = [];
-
-  for (const employee of dayEffectivePool) {
-    if (!isEligibleForDefaultCheckinPlacement(employee)) continue;
-
-    const shiftWindow: TimeWindow = { start: employee.shift_start, end: employee.shift_end };
-    const free = subtractBusyWindows(shiftWindow, busyWindows[employee.id] ?? []);
-
-    for (const interval of free) {
-      const midpoint = (timeToMinutes(interval.start) + timeToMinutes(interval.end)) / 2;
-      const zone = pickDefaultZone(midpoint, zoneDemand);
-      duties.push({
-        employeeId: employee.id,
-        zone,
-        dayOfWeek,
-        window: interval,
-        reasoning: `Default T1 Check-in placement — ${employee.name} has no specific flight/specialized duty during ${interval.start}–${interval.end} while rostered WORK; positioned in the zone with the highest concurrent demand at that time (prototype placement heuristic, not itself a claim about required headcount — see lib/planning/checkin-zone-placement.ts).`,
-      });
-    }
-  }
-
-  return duties;
 }

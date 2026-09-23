@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeDefaultCheckinZonePlacement } from "../lib/planning/checkin-zone-placement";
+import { isEligibleForDefaultCheckinPlacement, subtractBusyWindows } from "../lib/planning/checkin-zone-placement";
 import { isRedeploymentAllowed } from "../lib/teams";
 import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { Employee } from "../lib/types";
@@ -44,24 +44,25 @@ describe("Fix 2 -- cross-team redeployment defaults to true for every configured
     expect(isRedeploymentAllowed("General T1 Pool")).toBe(false);
   });
 
-  it("a redeployment-eligible foreign-company employee is now a real candidate for T1 Check-in placement outside their protected window", () => {
+  it("a redeployment-eligible foreign-company employee is now a real eligibility-check pass for T1 Check-in placement outside their protected window", () => {
     const employee = makeEmployee({
       id: "e1", assignment: "Gulf Air", skills: ["Check-in"],
       shift_start: "05:45", shift_end: "14:45", rest_before_shift_hours: 15, weekly_hours: 8,
     }) as Employee & { shift_start: string; shift_end: string };
+    expect(isEligibleForDefaultCheckinPlacement(employee)).toBe(true);
     // Protected window recorded as busy, exactly as duty-generation.ts
-    // would produce it for a real company_config assignment.
-    const busy = { e1: [{ start: "05:45", end: "10:15" }] };
-    const duties = computeDefaultCheckinZonePlacement("Wednesday", [employee], busy, {});
-    expect(duties.length).toBe(1);
-    expect(duties[0].window).toEqual({ start: "10:15", end: "14:45" });
+    // would produce it for a real company_config assignment -- subtracting
+    // it leaves only the time after it free, same as
+    // lib/planning/checkin-capacity-timeline.ts does per atomic period.
+    const free = subtractBusyWindows({ start: employee.shift_start, end: employee.shift_end }, [{ start: "05:45", end: "10:15" }]);
+    expect(free).toEqual([{ start: "10:15", end: "14:45" }]);
   });
 
-  it("the '12 required but 16 available -> required stays 12' invariant still holds (placement never caps at demand)", () => {
+  it("the '12 required but 16 available -> required stays 12' invariant still holds: eligibility/availability is computed for every free employee, independent of any zone's required headcount elsewhere", () => {
     const employees = Array.from({ length: 16 }, (_, i) =>
       makeEmployee({ id: `e${i}`, skills: ["Check-in"], shift_start: "05:45", shift_end: "14:45", rest_before_shift_hours: 15, weekly_hours: 8 })
     ) as (Employee & { shift_start: string; shift_end: string })[];
-    const duties = computeDefaultCheckinZonePlacement("Wednesday", employees, {}, {});
-    expect(duties.length).toBe(16); // all 16 placed -- required_headcount (elsewhere, e.g. 12) is a separate, independent number
+    const eligibleCount = employees.filter(isEligibleForDefaultCheckinPlacement).length;
+    expect(eligibleCount).toBe(16); // all 16 eligible -- required_headcount (elsewhere, e.g. 12) is a separate, independent number
   });
 });
