@@ -524,6 +524,147 @@ requires. Whether real Gulf Air/Qatar Airways/etc. ACEs hold a Check-in
 qualification in reality is a real-world data question for RAM Handling,
 outside this fix's scope.
 
+## T1 Check-in architecture audit + derived-capacity refactor (RAM Handling / product owner, 2026-09-23)
+
+**What was audited.** A live symptom — the same zone/day showing
+"04:00–08:30 Main Check-in — Required 4 / Assigned 75" immediately
+followed by "09:00–15:30 Main Check-in — Required 6 / Assigned 0" —
+was traced to `lib/planning/weekly-plan-service.ts`'s
+`findZoneRequirementIdFor`: it tried an exact-window string match between
+a default-placement duty's fine-grained free interval and a demand
+cluster's broad, bucket-aligned window (almost never equal), then fell
+back to `zoneRequirements.find(r => r.day_of_week === day && r.zone === zone)`
+— the FIRST requirement row for that zone/day, with **no time-overlap
+check at all**. Nearly every placement duty for a zone/day landed on the
+day's earliest demand cluster, inflating it, while every later cluster
+for that zone got zero.
+
+**Architectural conclusion.** The product owner's review (an authoritative,
+11-point brief from a real CMN Check-in/Boarding agent) concluded this was
+a symptom of a deeper mistake, not a lookup bug to patch: T1 Check-in was
+being modeled as its own separately-assigned, separately-persisted duty
+type, when it is actually the RESIDUE of an employee's rostered shift once
+every real specific-duty interval is subtracted — a derived availability
+fact, not a duty. The fix is architectural: compute Required (from the
+flight schedule) and Available (from the roster + already-persisted
+specific-duty intervals) as two separate timelines, built from real event
+boundaries (a flight's Check-in-open/close instant, a shift start/end, a
+specific-duty start/end) into ATOMIC periods, and compare them AT READ
+TIME — never persist automatic default placement as a discrete duty row
+that a broken lookup can mis-link.
+
+**What was refactored:**
+- New module `lib/planning/checkin-capacity-timeline.ts`: builds the
+  per-day atomic-interval timeline (`buildDailyCapacityTimeline`), a
+  per-zone display view with adjacent-equal periods merged
+  (`mergeAtomicPeriodsForZone`/`buildZoneCoverageRowsForDay`), and the
+  read-time reconstruction of "who is eligible and free" purely from
+  already-persisted `weekly_plan_roster_entries` + `assignments` +
+  `flights` (`buildEligibleEmployeeAvailabilityForDay`, reusing
+  `duty-generation.ts`'s `computeBusyWindowsForDay` and
+  `buildDayEffectivePoolFromRosterEntries` unchanged, and
+  `checkin-zone-placement.ts`'s `isEligibleForDefaultCheckinPlacement`,
+  now exported instead of private).
+- `lib/planning/checkin-zone-placement.ts`: removed
+  `computeDefaultCheckinZonePlacement`/`ZoneCoverageDuty`/`pickDefaultZone`
+  entirely — the discrete-duty-generation architecture that caused the
+  bug. `isEligibleForDefaultCheckinPlacement` and `subtractBusyWindows`
+  remain, exported, as the shared primitives the new module and Find Agent
+  both build on.
+- `lib/planning/generate-draft-plan.ts` / `weekly-plan-service.ts`: no
+  longer generate or persist a discrete `checkin_zone_assignments` row for
+  automatic placement at all (`bundle.zoneAssignments` is always `[]`
+  straight out of generation). `checkin_zone_requirements` (the DEMAND
+  side) is unaffected — it was never the buggy part and is still
+  generated and persisted exactly as before.
+- `lib/planning/persisted-plan-view.ts`: `zoneCoverage` is now built from
+  the derived capacity timeline (`required`/`available`/`gap`/`surplus`),
+  not from counting assignment rows. A genuine human Find Agent commitment
+  is still a real persisted row (`checkin_zone_assignments`,
+  `source: "human_modified"`) and is surfaced separately as
+  `manuallyAssigned`/`manuallyAssignedEmployees`, still reducing the gap.
+  Where a Find Agent action needs a `checkin_zone_requirements` id to post
+  to, it is resolved by a REAL overlap check against that day/zone's
+  persisted demand-cluster rows (picking the largest `required_headcount`
+  on a tie) — never the old "first row for this zone/day" fallback.
+  Per-employee Agent Schedule zone duties now distinguish `"confirmed"`
+  (a real human commitment) from `"available"` (derived default coverage,
+  never a persisted duty — see `AgentZoneDuty.status` in `lib/types.ts`).
+- **No schema migration was needed.** `checkin_zone_assignments` already
+  had a `source` column distinguishing `"atlas_generated"` from
+  `"human_modified"` (migration 0015); the fix is that generation simply
+  never writes an `"atlas_generated"` row into it any more. `checkin_zone_requirements`
+  and its `checkin_zone_requirement_contributing_flights` join table are
+  unchanged and still written the same way.
+- UI: `components/zone-coverage-card.tsx`, `components/planning-summary-bar.tsx`,
+  `components/summary-drilldown-sheet.tsx`, `components/agent-day-detail.tsx`,
+  and `app/planning/page.tsx` updated to the new `ZoneCoverageView` shape
+  and to "Required X · Available Y · Gap Z" / "Surplus Z" semantics instead
+  of "Required X / Assigned Y". `app/api/checkin-zone-assign/route.ts` and
+  `app/api/checkin-zone-candidates/[zoneRequirementId]/route.ts` needed no
+  logic changes — they already only cared about `human_modified` rows
+  through the same `checkin_zone_requirements`/`checkin_zone_assignments`
+  tables, and are in fact now MORE correct (no more spurious
+  `atlas_generated` rows in their "already covered"/"already assigned"
+  checks).
+- `lib/planning/checkin-zone-demand.ts`: the Check-in-open timing constant
+  changed from an unconfirmed 180 minutes to the product owner's CONFIRMED
+  4 hours (`CHECKIN_OPEN_BEFORE_DEPARTURE_MINUTES = 240`); the closing
+  point remains its own explicitly-named, still-unconfirmed constant
+  (`CHECKIN_CLOSE_BEFORE_DEPARTURE_MINUTES`). The staffing coefficients
+  themselves are untouched (still the same prototype values from
+  `checkin-demand.ts`, per the explicit instruction not to invent a
+  more-real-looking number).
+- `lib/planning/roster-generation.ts` / `generate-draft-plan.ts`: Stage 6
+  (`generateObligationToppedUpShifts`/`computeEmployeeDayCountTopUp`) now
+  optionally accepts a per-day aggregate T1 demand-peak minute
+  (`peakAggregateT1DemandMinuteForDay`, new in
+  `lib/planning/zone-demand-aggregation.ts`, computed on the flight
+  schedule alone, before Stage 6 runs). When more than one catalog shift
+  code is already EQUALLY legal for a day being topped up, it now prefers
+  one whose window covers that day's known demand peak instead of always
+  the shortest-first code — a heuristic BIAS between otherwise-equal
+  choices only; it never widens the legal set and never overrides a rest/
+  consecutive-OFF/obligation constraint (see
+  `tests/stage6-t1-demand-bias.test.ts`, including the explicit "never
+  overrides a hard rest constraint" case). This directly, honestly does
+  NOT eliminate all T1 shortages — see the benchmark below — and is not
+  claimed to.
+
+**Regression coverage added:** `tests/checkin-capacity-timeline.test.ts`
+(the atomic-interval computation itself, including the exact "partial
+overlap counted as full-window coverage" bug shape and the "spike then
+zero" adjacent-window bug shape), `tests/stage6-t1-demand-bias.test.ts`,
+and a rewritten `tests/zone-plan-integration.test.ts` (asserting the new
+architecture's invariants against the real seeded week: `bundle.zoneAssignments`
+is always empty out of generation, and `available` is always bounded by
+real headcount and never zero right next to a real spike for the same
+zone/day). `tests/checkin-zone-placement.test.ts` and
+`tests/foreign-company-redeployment-default.test.ts` were updated to test
+`isEligibleForDefaultCheckinPlacement` directly (the function that
+survived) instead of the removed `computeDefaultCheckinZonePlacement`.
+`tests/checkin-zones.test.ts` and `tests/zone-demand-aggregation.test.ts`
+pass unmodified — the zone taxonomy/classification and the demand-cluster
+computation were never the buggy part.
+
+**Remaining known gaps (explicitly not solved by this refactor):**
+- The real RAM management formula translating simultaneous-open-flight
+  count into required headcount is still unconfirmed/prototype (same
+  coefficients as before — see `checkin-zone-demand.ts`).
+- The real Check-in CLOSING point relative to departure is still
+  unconfirmed (`CHECKIN_CLOSE_BEFORE_DEPARTURE_MINUTES`).
+- The Stage-6 T1-demand bias is a heuristic tie-break between already-legal
+  choices, not an optimizer — a genuine, unavoidable T1 shortage (e.g. real
+  demand at 17:00 with no legally-rested candidate available) still
+  surfaces honestly as a real gap; it is never hidden or capped.
+- Fatigue modeling and updated GMT shift definitions remain explicitly out
+  of scope, deferred to a future phase per the product owner.
+- An overnight employee shift and a flight whose Check-in-open window
+  would reach into the previous calendar day are both still clamped to the
+  same calendar day (pre-existing limitations of the modules this refactor
+  reuses, not introduced here — see `checkin-capacity-timeline.ts`'s
+  module doc comment).
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
