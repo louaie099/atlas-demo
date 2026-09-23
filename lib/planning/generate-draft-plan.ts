@@ -10,7 +10,7 @@ import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce
 import { getShiftDurationHours } from "../shift-templates";
 import { CONFIGURED_COMPANIES } from "../company-config";
 import { CheckinZoneId, CHECKIN_ZONE_IDS } from "../checkin-zones";
-import { aggregateAllZonesDailyDemand, zoneDemandClusters, peakAggregateT1DemandMinuteForDay } from "./zone-demand-aggregation";
+import { aggregateAllZonesDailyDemand, zoneDemandClusters, peakAggregateT1DemandMinuteForDay, aggregateT1DemandProfileForDay } from "./zone-demand-aggregation";
 
 /** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
 export interface PlanRosterEntryDraft {
@@ -107,7 +107,13 @@ function runShiftGenerationPass(
   demandByDay: Record<string, DailyDemand>,
   config: Config,
   priorWeekBoundaryContext: PriorDayShiftMap,
-  getNextDayBaseline: (dayIndex: number, nextDay: string) => PriorDayShiftMap
+  getNextDayBaseline: (dayIndex: number, nextDay: string) => PriorDayShiftMap,
+  // STAGE-6 T1 AGGREGATE DEMAND BIAS (2026-09-23 follow-up) — this day's
+  // per-30-min-bucket aggregate T1 demand profile, computed from the
+  // flight schedule alone before Stage 6 ever runs (see
+  // generateDraftWeeklyPlan below). Optional; omitted reproduces the exact
+  // prior behavior for every existing caller/test.
+  t1DemandByBucketByDay?: Record<string, number[]>
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const hoursSoFarThisWeek = new Map<string, number>();
@@ -126,7 +132,8 @@ function runShiftGenerationPass(
       config.minimum_rest_hours,
       undefined,
       nextDayBaselineShift,
-      hoursSoFarThisWeek
+      hoursSoFarThisWeek,
+      t1DemandByBucketByDay?.[day]
     );
     generatedShiftsByDay[day] = generatedShifts;
 
@@ -182,7 +189,12 @@ function runTwoPassShiftGeneration(
   employees: Employee[],
   demandByDay: Record<string, DailyDemand>,
   config: Config,
-  priorWeekBoundaryContext: PriorDayShiftMap
+  priorWeekBoundaryContext: PriorDayShiftMap,
+  // STAGE-6 T1 AGGREGATE DEMAND BIAS (2026-09-23 follow-up) — see
+  // runShiftGenerationPass's own doc comment on the parameter of the same
+  // name. Passed identically to both passes so the bias is consistent
+  // discovery-to-real, exactly like `demandByDay` itself already is.
+  t1DemandByBucketByDay?: Record<string, number[]>
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const staticBaselineOnly = (nextDay: string): PriorDayShiftMap => {
     const map: PriorDayShiftMap = new Map();
@@ -198,23 +210,37 @@ function runTwoPassShiftGeneration(
     return map;
   };
 
-  const pass1 = runShiftGenerationPass(daysOrder, employees, demandByDay, config, priorWeekBoundaryContext, (_dayIndex, nextDay) =>
-    staticBaselineOnly(nextDay)
+  const pass1 = runShiftGenerationPass(
+    daysOrder,
+    employees,
+    demandByDay,
+    config,
+    priorWeekBoundaryContext,
+    (_dayIndex, nextDay) => staticBaselineOnly(nextDay),
+    t1DemandByBucketByDay
   );
 
-  const pass2 = runShiftGenerationPass(daysOrder, employees, demandByDay, config, priorWeekBoundaryContext, (dayIndex, nextDay) => {
-    const map: PriorDayShiftMap = new Map();
-    const nextDayIndex = (dayIndex + 1) % daysOrder.length;
-    const nextDayPass1Shifts = pass1.generatedShiftsByDay[daysOrder[nextDayIndex]] ?? [];
-    for (const employee of employees) {
-      if (isFlexibleGeneralPool(employee)) {
-        map.set(employee.id, effectiveShiftForDay(employee, nextDay, nextDayPass1Shifts));
-      } else {
-        map.set(employee.id, effectiveShiftForDay(employee, nextDay, []));
+  const pass2 = runShiftGenerationPass(
+    daysOrder,
+    employees,
+    demandByDay,
+    config,
+    priorWeekBoundaryContext,
+    (dayIndex, nextDay) => {
+      const map: PriorDayShiftMap = new Map();
+      const nextDayIndex = (dayIndex + 1) % daysOrder.length;
+      const nextDayPass1Shifts = pass1.generatedShiftsByDay[daysOrder[nextDayIndex]] ?? [];
+      for (const employee of employees) {
+        if (isFlexibleGeneralPool(employee)) {
+          map.set(employee.id, effectiveShiftForDay(employee, nextDay, nextDayPass1Shifts));
+        } else {
+          map.set(employee.id, effectiveShiftForDay(employee, nextDay, []));
+        }
       }
-    }
-    return map;
-  });
+      return map;
+    },
+    t1DemandByBucketByDay
+  );
 
   return pass2;
 }
@@ -306,7 +332,37 @@ export function generateDraftWeeklyPlan(
     demandByDay[day] = aggregateDailyDemand(day, flights, requirements, config.checkin_demand_policy);
   }
 
-  const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(daysOrder, employees, demandByDay, config, priorWeekBoundaryContext);
+  // STAGE-6 T1 AGGREGATE DEMAND BIAS (2026-09-23 follow-up to the product
+  // owner's point 9) — computed from the flight schedule ALONE, entirely
+  // independent of the roster Stage 6 is about to produce, and BEFORE
+  // Stage 6 ever runs (moved up from where the single-peak-minute version
+  // used to live, right before the secondary top-up pass) so the PRIMARY
+  // shift-code chooser (generateFlexiblePoolShifts) can see it too, not
+  // just the secondary obligation top-up pass. See
+  // zone-demand-aggregation.ts's aggregateT1DemandProfileForDay and
+  // shift-generation.ts's own doc comment on `t1DemandByBucket` for what
+  // this does and does not change (a soft, weighted bias between already-
+  // legal candidates, never an override of rest/consecutive-OFF/obligation
+  // constraints, and a genuine unavoidable shortage still surfaces
+  // honestly either way).
+  const t1DemandByBucketByDay: Record<string, number[]> = {};
+  const t1PeakDemandMinuteByDay: Record<string, number | null> = {};
+  for (const day of daysOrder) {
+    const dayFlights = flights.filter((f) => f.day_of_week === day && f.operator_type === "atlas_managed");
+    t1DemandByBucketByDay[day] = aggregateT1DemandProfileForDay(day, dayFlights, config.zone_checkin_demand_policy);
+    // Same semantics as before (bucket with the highest total, ties toward
+    // earlier) — see zone-demand-aggregation.ts's own doc comment.
+    t1PeakDemandMinuteByDay[day] = peakAggregateT1DemandMinuteForDay(day, dayFlights, config.zone_checkin_demand_policy);
+  }
+
+  const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(
+    daysOrder,
+    employees,
+    demandByDay,
+    config,
+    priorWeekBoundaryContext,
+    t1DemandByBucketByDay
+  );
 
   // HARD safety net (see enforceRestInvariantAcrossWeek's doc comment):
   // re-walks the whole week's real Stage 6 outcome one more time and
@@ -334,22 +390,10 @@ export function generateDraftWeeklyPlan(
   // obligation is confirmed and configured does this add real, additional
   // rostered-but-not-demand-justified days for the flexible pool, on top
   // of (never instead of) Stage 6's own demand-driven result.
-  // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9): computed
-  // from the flight schedule ALONE, entirely independent of the roster
-  // Stage 6 is about to produce — this is the "know the day's T1 demand
-  // peak BEFORE rostering" input the owner asked for, so shift-code
-  // selection can weight toward covering it instead of only ever
-  // discovering a T1 shortage after the roster is already frozen. See
-  // roster-generation.ts's own doc comment for exactly how little this
-  // changes: a bias between otherwise-EQUALLY-legal candidates only, never
-  // an override of rest/consecutive-OFF/obligation constraints, and a
-  // genuine unavoidable shortage still surfaces honestly either way.
-  const t1PeakDemandMinuteByDay: Record<string, number | null> = {};
-  for (const day of daysOrder) {
-    const dayFlights = flights.filter((f) => f.day_of_week === day && f.operator_type === "atlas_managed");
-    t1PeakDemandMinuteByDay[day] = peakAggregateT1DemandMinuteForDay(day, dayFlights, config.zone_checkin_demand_policy);
-  }
-
+  // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9) for the
+  // SECONDARY obligation top-up pass — `t1PeakDemandMinuteByDay` was
+  // already computed above (shared with the PRIMARY pass's full-profile
+  // bias) so it's simply reused here, not recomputed.
   const obligationToppedUpByDay = generateObligationToppedUpShifts(
     daysOrder,
     employees,

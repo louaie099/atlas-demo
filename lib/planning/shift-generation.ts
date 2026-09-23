@@ -3,6 +3,7 @@ import { DailyDemand } from "./demand-aggregation";
 import { SHIFT_CODES, getShiftTimesAs } from "../shift-templates";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { restHoursBetween } from "../roster-generation";
+import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
 
 /** An employee's effective shift on the immediately preceding day, or null if they were OFF/unrostered — undefined (not in the map) means "no prior-day data available" (e.g. the first day of the week), which is never treated as a rest violation. */
 export type PriorDayShiftMap = Map<string, { shift_start: string; shift_end: string } | null>;
@@ -133,6 +134,63 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * Do not attempt to solve this by treating
  * config.maximum_average_weekly_working_hours as a target-hours floor —
  * see that doc for why, and see average-hours.ts's own doc comment.
+ *
+ * STAGE-6 T1 AGGREGATE DEMAND BIAS (2026-09-23 follow-up to the product
+ * owner's point 9): a live finding on real imported flight data showed
+ * early-morning T1 Check-in severely understaffed (Available 0-1 vs
+ * Required 2-8) every day of the week. Root cause: this function is the
+ * PRIMARY shift-code chooser (it can assign ANY catalog code, including
+ * the earliest ones, to any eligible flexible-pool employee — it is not
+ * limited to an employee's seed-time default start), but it only ever
+ * scored candidates against `rolesToConsider`'s real per-flight demand
+ * (Gate/Boarding/Profiling/Mesure — "Check-in" was already in that list,
+ * but since the T1-zone-model cutover no per-flight "Check-in"
+ * StaffingRequirement row is ever produced any more, so
+ * `demand.buckets[].demandByRole["Check-in"]` is always empty and that
+ * role has been a structural no-op here). Gate/Boarding demand clusters
+ * close to departure, while Check-in opens a full 4h earlier
+ * (CHECKIN_OPEN_BEFORE_DEPARTURE_MINUTES) — so this function never had any
+ * reason to pull anyone onto an early code purely to cover Check-in. The
+ * existing `t1PeakDemandMinuteByDay` bias (roster-generation.ts's
+ * `computeEmployeeDayCountTopUp`) only reaches the SECONDARY obligation
+ * top-up pass, which rarely triggers once this primary pass has already
+ * given someone 5 working days — insufficient on its own, but correct for
+ * what it does and left unchanged.
+ *
+ * FIX: `t1DemandByBucket` (optional, final parameter below) is this day's
+ * AGGREGATE T1 demand profile — one number per 30-min bucket, summed
+ * across every T1 Check-in zone, computed from the flight schedule alone
+ * (zone-demand-aggregation.ts's `aggregateT1DemandProfileForDay` — the
+ * exact same computation `t1PeakDemandMinuteByDay` already collapses to a
+ * single peak instant, just kept as the full curve here). It becomes an
+ * ADDITIONAL, WEIGHTED, SOFT scoring signal (see `T1_DEMAND_BIAS_WEIGHT`
+ * below) that any employee eligible for default T1 placement
+ * (`isEligibleForDefaultCheckinPlacement` — reused unchanged, never a new
+ * parallel "Check-in zone" qualification the way Gate/Boarding have a hard
+ * role) can earn credit toward, for a bucket where they have no unmet HARD
+ * role demand to cover instead. Two invariants this weight is deliberately
+ * sized to guarantee:
+ *   1. A candidate covering strictly more real per-flight (bucket, role)
+ *      demand ALWAYS outranks one covering less, however much T1 aggregate
+ *      demand the weaker candidate would also cover — T1 demand can never
+ *      pull someone off, or ahead of someone needed for, a hard
+ *      requirement. (Bounded because at most BUCKETS_PER_DAY buckets exist
+ *      per candidate, and T1_DEMAND_BIAS_WEIGHT * BUCKETS_PER_DAY < 1.)
+ *   2. Once every hard (bucket, role) unit is satisfied for the day, this
+ *      soft signal is what can still pull in an ADDITIONAL, otherwise-idle,
+ *      legally-rested employee purely to sit across an early T1 demand
+ *      peak nothing else needed them for — which is exactly the gap this
+ *      fix closes.
+ *
+ * This is still a HEURISTIC/best-effort weighting, not a joint optimizer:
+ * it never widens the legal candidate set (rest/consecutive-OFF/obligation
+ * ceiling constraints are evaluated identically, before this bias is ever
+ * applied), and if there simply aren't enough legally-available flexible-
+ * pool employees on a given day, the early-morning shortage remains and
+ * must surface honestly (checkin-capacity-timeline.ts's Required/
+ * Available/Gap, unchanged) rather than being hidden or capped. See
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md's
+ * 2026-09-23 addendum for the full writeup and before/after numbers.
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
@@ -164,7 +222,15 @@ export function generateFlexiblePoolShifts(
   // delivered report on why a calendar-week hours gate must never
   // return). Defaults to empty (every employee starts "equally fair") so
   // every existing caller/test keeps working unchanged.
-  hoursSoFarThisWeek: Map<string, number> = new Map()
+  hoursSoFarThisWeek: Map<string, number> = new Map(),
+  // STAGE-6 T1 AGGREGATE DEMAND BIAS (see this function's own doc comment
+  // above) — one number per 30-min bucket (same BUCKET_MINUTES grid as
+  // `demand`), this day's aggregate required T1 Check-in headcount summed
+  // across every zone, computed from the flight schedule ALONE
+  // (zone-demand-aggregation.ts's aggregateT1DemandProfileForDay).
+  // Optional and defaulted to "no bias" (every existing caller/test that
+  // omits it keeps the exact prior behavior, byte-for-byte).
+  t1DemandByBucket?: number[]
 ): GeneratedShiftAssignment[] {
   // Every ACTIVE flexible-pool employee is a candidate today — no more
   // "already off per static weekly_shifts" pre-filter. Availability is
@@ -186,6 +252,23 @@ export function generateFlexiblePoolShifts(
     }
     return m;
   });
+
+  // STAGE-6 T1 AGGREGATE DEMAND BIAS's own mutable working copy — a
+  // SEPARATE remaining-demand track from `remaining` above (which is real,
+  // hard, per-flight Gate/Boarding/Profiling/Mesure demand). This one is a
+  // soft, residual signal: a bucket here is only ever "consumed" by an
+  // employee who had no unmet HARD role to cover in that same bucket (see
+  // the scoring loop below), so it never competes with or displaces hard
+  // coverage — it only ever picks up genuinely spare capacity `remaining`
+  // wouldn't otherwise have claimed.
+  const t1Remaining: number[] = demand.buckets.map((_, i) => Math.max(0, t1DemandByBucket?.[i] ?? 0));
+  // See this function's doc comment for why this weight's size matters:
+  // BUCKETS_PER_DAY (48) * this weight must stay below 1, so a candidate
+  // covering strictly more real hard-role demand always outranks one
+  // covering less, regardless of how much soft T1 bucket coverage the
+  // weaker candidate would also add. This is a bias between otherwise-tied
+  // or otherwise-idle candidates, never a competing hard objective.
+  const T1_DEMAND_BIAS_WEIGHT = 0.001;
 
   // Every catalog shift code, precomputed once (non-overnight only — see
   // doc comment above).
@@ -257,6 +340,7 @@ export function generateFlexiblePoolShifts(
       sortieMin: number;
       score: number;
       bucketRoles: { bucket: number; role: string }[];
+      t1Buckets: number[];
     } | null = null;
 
     for (const employee of availableToday) {
@@ -266,8 +350,19 @@ export function generateFlexiblePoolShifts(
 
       for (const candidate of legalCodes) {
         const buckets = bucketsCoveredBy(candidate.entreeMin, candidate.sortieMin);
-        let score = 0;
+        let hardScore = 0;
         const bucketRoles: { bucket: number; role: string }[] = [];
+        const t1Buckets: number[] = [];
+        // Eligible for the T1 aggregate soft signal at all? Reuses the one
+        // true default-T1-placement eligibility rule
+        // (checkin-zone-placement.ts) rather than a bespoke check — the
+        // only thing it adds on top of this function's own
+        // isFlexibleGeneralPool population filter is the Check-in
+        // skill/qualification test (active/duty-officer/fixed-team/
+        // transit/profiling-mesure are already guaranteed by
+        // isFlexibleGeneralPool, so this call is redundant-but-safe on
+        // those, never a narrower population than before).
+        const t1Eligible = t1DemandByBucket !== undefined && isEligibleForDefaultCheckinPlacement(employee);
         for (const bucket of buckets) {
           // One employee = one unit of capacity per bucket, however many
           // roles they're qualified for: pick at most ONE role per
@@ -308,14 +403,24 @@ export function generateFlexiblePoolShifts(
             }
           }
           if (pickedRole) {
-            score++;
+            hardScore++;
             bucketRoles.push({ bucket, role: pickedRole });
+          } else if (t1Eligible && (t1Remaining[bucket] ?? 0) > 0) {
+            // No unmet HARD role for this employee in this bucket — but
+            // real T1 aggregate demand still exists here and this employee
+            // is eligible to help satisfy it (see t1Eligible above).
+            // Credited as a SOFT signal only (see T1_DEMAND_BIAS_WEIGHT's
+            // doc comment): never claims the bucket away from a hard role
+            // (pickedRole is checked first, always), and can never itself
+            // out-rank a candidate with strictly more hard coverage.
+            t1Buckets.push(bucket);
           }
         }
+        const score = hardScore + t1Buckets.length * T1_DEMAND_BIAS_WEIGHT;
         if (score === 0) continue;
 
         if (!best || isBetterCandidate(employee, candidate, score, best)) {
-          best = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score, bucketRoles };
+          best = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score, bucketRoles, t1Buckets };
         }
       }
     }
@@ -325,12 +430,19 @@ export function generateFlexiblePoolShifts(
     for (const { bucket, role } of best.bucketRoles) {
       remaining[bucket].set(role, (remaining[bucket].get(role) ?? 0) - 1);
     }
+    for (const bucket of best.t1Buckets) {
+      t1Remaining[bucket] = Math.max(0, (t1Remaining[bucket] ?? 0) - 1);
+    }
     assignedIds.add(best.employee.id);
     assignments.set(best.employee.id, {
       employeeId: best.employee.id,
       dayOfWeek,
       shiftCode: best.code,
-      coversRoles: Array.from(new Set(best.bucketRoles.map((br) => br.role))),
+      // Informational only (see this interface's own doc comment) — a
+      // T1-bias-only placement (no hard role covered at all) is tagged
+      // "Check-in" here purely for visibility; Stage 9 independently
+      // re-derives actual duties and never reads this field.
+      coversRoles: Array.from(new Set([...best.bucketRoles.map((br) => br.role), ...(best.t1Buckets.length > 0 ? ["Check-in"] : [])])),
     });
   }
 
