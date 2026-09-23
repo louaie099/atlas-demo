@@ -665,6 +665,148 @@ computation were never the buggy part.
   reuses, not introduced here — see `checkin-capacity-timeline.ts`'s
   module doc comment).
 
+## Stage-6 PRIMARY-pass T1 aggregate demand bias (RAM Handling, 2026-09-23 follow-up)
+
+**Live finding.** On real imported flight data, early-morning (roughly
+04:00–09:00) T1 Check-in was consistently and severely understaffed for
+multiple zones, every day of the week (`Available` 0-1 against `Required`
+2-8), while the Required/Available/Gap COMPUTATION itself (the
+derived-capacity refactor immediately above) was independently verified
+correct.
+
+**Diagnosis (verified by re-reading the code, not just trusted):** the
+root cause is NOT in `checkin-capacity-timeline.ts` — it is upstream, in
+which shift codes Stage 6 actually chooses for the flexible pool.
+- `lib/shift-templates.ts`'s catalog has two codes starting at 04:30
+  (`MT02`, `JR02`); `lib/employee-generator.ts`'s General T1 Pool seed
+  template never defaults anyone into either — the earliest seeded default
+  is 05:45 (`MT01`/`JR01`).
+- More importantly: `lib/planning/shift-generation.ts`'s
+  `generateFlexiblePoolShifts` — the PRIMARY chooser, which CAN assign any
+  catalog code to any eligible employee, not just an employee's seeded
+  default — only ever scored candidates against real per-flight
+  Gate/Boarding/Profiling/Mesure demand. "Check-in" was already listed in
+  its `rolesToConsider`, but since the 2026-09-21 zone-model cutover no
+  per-flight `"Check-in"` `StaffingRequirement` row is ever produced any
+  more (see `weekly-requirements.ts`'s own doc comment on that cutover),
+  so `demand.buckets[].demandByRole["Check-in"]` has been a structural,
+  silent no-op ever since. Gate/Boarding demand clusters close to
+  departure; Check-in opens a full 4h earlier
+  (`CHECKIN_OPEN_BEFORE_DEPARTURE_MINUTES`) — so this function never had
+  any real signal telling it to pull anyone onto an early code purely to
+  cover Check-in.
+- The existing bias immediately above
+  (`computeEmployeeDayCountTopUp`'s `t1PeakDemandMinuteByDay`) is real and
+  correctly implemented, but it only ever reaches the SECONDARY obligation
+  top-up pass, which rarely triggers once the PRIMARY pass has already
+  given an employee 5 working days — insufficient on its own to move the
+  early-morning numbers in practice, which the diagnosis above confirms and
+  the benchmark below demonstrates. It is kept, unchanged.
+
+**What was changed:**
+- `lib/planning/zone-demand-aggregation.ts`: added
+  `aggregateT1DemandProfileForDay` — the full per-30-min-bucket aggregate
+  T1 demand curve (summed across every zone, from the flight schedule
+  alone), factored out of what `peakAggregateT1DemandMinuteForDay` already
+  computed internally (that function now calls this one instead of
+  duplicating the aggregation) so there is exactly one computation behind
+  both the single-peak-minute bias and this new full-profile one.
+- `lib/planning/shift-generation.ts`'s `generateFlexiblePoolShifts` gained
+  an optional final parameter, `t1DemandByBucket` (the profile above). Any
+  employee eligible for default T1 placement
+  (`isEligibleForDefaultCheckinPlacement`, reused unchanged — NOT a new
+  parallel "Check-in zone" hard qualification the way Gate/Boarding have a
+  role) earns a small additional score, `T1_DEMAND_BIAS_WEIGHT = 0.001`,
+  for each bucket of their candidate shift where they have no unmet HARD
+  role to cover AND real T1 aggregate demand still exists. Because
+  `T1_DEMAND_BIAS_WEIGHT * BUCKETS_PER_DAY (48) < 1`, a candidate covering
+  strictly more real hard-role demand ALWAYS outranks one covering less,
+  however much T1 aggregate demand the weaker candidate would also cover —
+  this can only ever break a tie between otherwise-equally-legal,
+  otherwise-equally-hard-productive candidates, or pull in an additional
+  otherwise-idle candidate once every hard unit is already satisfied. It
+  never widens the legal (rest/consecutive-OFF/obligation-respecting)
+  candidate set computed earlier in the same function.
+- `lib/planning/generate-draft-plan.ts`: the T1 profile is now computed
+  ONCE, from the flight schedule alone, BEFORE Stage 6 runs at all (moved
+  up from where the single-peak-minute version used to be computed, right
+  before the secondary pass), and threaded through both passes of
+  `runTwoPassShiftGeneration`/`runShiftGenerationPass` into
+  `generateFlexiblePoolShifts`. `t1PeakDemandMinuteByDay` (still used by
+  the unchanged secondary top-up pass) is now derived from the very same
+  per-day computation rather than a separate one.
+
+**This is still a HEURISTIC, best-effort weighting — not a joint
+optimizer.** It never widens the legal candidate set, and a genuinely
+unavoidable shortage (not enough legally-rested flexible-pool employees
+that day, however weighted) still surfaces honestly through the unchanged
+Required/Available/Gap computation — never hidden or capped. An extremely
+tight scenario with heavily competing Gate/Boarding and T1 demand on the
+same day could still produce a suboptimal choice; this is a bias among
+otherwise-tied candidates, not a search over all legal rosters.
+
+**Benchmark (before/after, real seed data — `lib/seed-data.ts`'s
+`EMPLOYEES`/`FLIGHTS`/`CONFIG`, T1 Main Check-in, 04:00–09:00 window,
+committed `HEAD` immediately before this fix vs. after it):**
+
+| Day | Before — worst row in window | After — worst row in window |
+|---|---|---|
+| Monday | 05:00–05:45 Required 2 / Available **0** (Gap 2) | 05:00–05:45 Required 2 / Available **4** (Gap 0) |
+| Tuesday | 06:30–07:15 Required 2 / Available **0** (Gap 2) | 06:30–07:15 Required 2 / Available **4** (Gap 0) |
+| Wednesday | 05:00–07:20 Required 4 / Available 71-72 (Gap 0) | 05:00–07:20 Required 4 / Available 48-50 (Gap 0) |
+| Thursday | 06:30–08:00 Required 2 / Available 2 (Gap 0) | 06:30–07:15 Required 2 / Available **6** (Gap 0) |
+| Friday | 05:00–05:45 Required 2 / Available **0** (Gap 2) | 05:00–05:45 Required 2 / Available **4** (Gap 0) |
+| Saturday | 06:30–07:15 Required 2 / Available **0** (Gap 2) | 06:30–07:15 Required 2 / Available **4** (Gap 0) |
+| Sunday | 05:00–05:45 Required 2 / Available **0** (Gap 2) | 05:00–05:45 Required 2 / Available **4** (Gap 0) |
+
+Whole-week total `gap × minutes` for T1 Main Check-in in the 04:00–09:00
+window: **940 before, 0 after.** The genuine early-morning gap that
+existed in the real committed seed data (worst single window: Required 2 /
+Available 0) is fully closed once the primary pass can see the same
+early demand the secondary pass already knew about. Honesty note: this
+repo's demo seed data is comfortably overstaffed relative to its flight
+volume (120 flexible-pool employees for 69 flights/week) — the ACTUAL
+live-reported gap (`Available` 0-1 vs `Required` 2-8) is more severe than
+what this seed data reproduces, because the live schedule's ratio of
+flights to flexible staff is tighter than this demo's. The fix targets the
+exact mechanism (Stage 6 blindness to T1 aggregate demand), verified
+directly against `generateFlexiblePoolShifts` in
+`tests/stage6-t1-primary-bias.test.ts`, and against the real, already-
+committed seed data end to end; it is not claimed to reproduce the live
+schedule's exact magnitude, which this repo does not have a fixture for.
+
+**Regression coverage added:** `tests/stage6-t1-primary-bias.test.ts` —
+(1) an idle, Check-in-eligible employee is pulled onto `MT02` purely for a
+synthetic early T1 peak when nothing else needed them, and is NOT pulled
+when the bias is omitted (byte-for-byte prior behavior); (2) a
+Gate-and-Check-in-qualified employee's single shift still covers the same
+real Gate requirement exactly once (never dropped, never duplicated) while
+ALSO now covering the T1 peak, versus a later, T1-blind code chosen
+without the bias; (3) a harsh prior-day shift that makes every code
+touching the T1 peak illegally under-rested leaves the employee genuinely
+unassigned — the shortage stays honest, no illegal shift is fabricated;
+(4) a real hard-coverage advantage (more Gate/Boarding units covered)
+always outranks a weaker candidate's larger T1-only soft score. Existing
+suites (`tests/shift-generation.test.ts`, `tests/stage6-t1-demand-bias.test.ts`,
+`tests/rest-invariant-hard.test.ts`, `tests/roster-generation-redesign.test.ts`,
+`tests/foreign-company-redeployment-default.test.ts`,
+`tests/foreign-company-double-booking.test.ts`, and the full remaining
+suite) pass unmodified — full run: 406/406 tests, clean `next build`.
+
+**Remaining known gaps (unchanged from immediately above, still honest):**
+- The real RAM management staffing-coefficient formula is still
+  unconfirmed/prototype; this fix changes WHO gets rostered when, never
+  WHAT the required headcount number is.
+- This is a heuristic weighting between already-legal candidates, not a
+  true joint optimizer across Gate/Boarding and T1 demand on the same
+  day — a scenario with extremely tight, genuinely competing demands on
+  both sides at once could still produce a suboptimal (though always
+  legal) choice.
+- A genuinely unavoidable shortage (not enough legally-rested
+  flexible-pool employees that day, full stop) is not eliminated by this
+  fix and must not be — it still surfaces honestly through
+  Required/Available/Gap, exactly as before.
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
