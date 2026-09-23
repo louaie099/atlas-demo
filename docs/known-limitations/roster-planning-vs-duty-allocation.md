@@ -807,6 +807,123 @@ suite) pass unmodified — full run: 406/406 tests, clean `next build`.
   fix and must not be — it still surfaces honestly through
   Required/Available/Gap, exactly as before.
 
+## Capacity-timeline single-zone attribution bug fixed (RAM Handling, 2026-09-23 follow-up)
+
+**Live finding.** On a real Supabase-backed deployment, for a real
+regenerated plan, `T1 Main Check-in` showed healthy `Available` numbers
+(4–70+, comfortable surplus) while `T1 Domestic Check-in` and
+`T1 Italy/Spain Check-in` showed a persistent, unbroken
+`Required 2 · Available 0 · Gap 2` in windows that DID overlap active
+employee shifts (e.g. 04:00–07:15 for Domestic, 05:00–06:30 for
+Italy/Spain — after the earliest catalog shift start, not before it). The
+pattern repeated identically every day of the week.
+
+**Diagnosis (confirmed by reading `lib/planning/checkin-capacity-timeline.ts`
+in full).** The two fixes immediately above this one (the derived
+Required/Available/Gap timeline, and Stage 6's T1-demand bias) are both
+correct and were not touched. The bug was a THIRD, independent issue in
+the SAME module that computes the timeline: at every atomic period, the
+entire free/eligible-employee pool was attributed to a single zone —
+`pickZoneForInstant` (`lib/planning/checkin-capacity-timeline.ts:159-171`
+pre-fix), called once per employee inside the availability loop
+(`lib/planning/checkin-capacity-timeline.ts:235-242` pre-fix) using the
+SAME static, never-decremented `requiredByZone` snapshot for every
+employee in that period. Because `t1_main_checkin` almost always has the
+highest simultaneous `required` headcount of the three ordinary zones (it
+serves the widest range of destinations — every UK/USA/Canada/Europe
+flight except Italy/Spain), 100% of every free employee at a given instant
+landed on Main, and `t1_domestic`/`t1_italy_spain` were structurally stuck
+at `Available 0` even when the total employee pool, split sensibly, would
+have comfortably covered all three zones at once. Reproduced directly
+against the module's own logic (see `tests/checkin-capacity-timeline.test.ts`,
+new "capacity SPLITS across zones" describe block) and against the real
+Monday-2026-09-07 flight schedule from this session's own
+`atlas_heavy_week_2026-09-07.csv` fixture (AT650→IST/Main, AT100+AT160→MAD/
+Italy-Spain, AT150+AT302→FEZ+RAK/Domestic, all open simultaneously
+03:15–08:35) — see the benchmark below.
+
+**Fix.** `checkin-capacity-timeline.ts`'s per-instant attribution now
+splits the free-employee pool across every ordinary zone with unmet
+demand, instead of concentrating it into the single highest-demand zone
+(`attributeFreeEmployeesForInstant`, replacing `pickZoneForInstant`'s
+per-employee use). It is a greedy, max-remaining-gap fill: each free
+employee, in order, is attributed to whichever zone currently has the
+LARGEST unmet need (required minus already-attributed so far in that same
+instant); a zone whose requirement is already fully covered receives no
+more of the pool while a sibling zone still has a gap; once every zone is
+fully covered (or every zone is at zero demand), any remaining surplus
+employees are parked on the single highest-demand zone, exactly as the old
+behavior did for that case. This stays a purely DERIVED, per-atomic-period
+computation — no persisted duty rows, no change to demand computation
+(`checkin-zone-demand.ts`), eligibility (`isEligibleForDefaultCheckinPlacement`),
+or the manual Find-Agent commitment path (`checkin_zone_assignments`,
+`source: "human_modified"`), any of which were explicitly out of scope.
+
+**Benchmark (real Monday 2026-09-07 flight schedule, 20-employee MT02
+(04:30–14:45) General T1 Pool cohort, all genuinely free):**
+
+| Window | Zone | BEFORE | AFTER |
+|---|---|---|---|
+| 02:40–04:30 (before any shift starts) | Main | Req 2 / Avail 0 / Gap 2 | Req 2 / Avail 0 / Gap 2 (unchanged — genuine) |
+| 03:15–04:30 (before any shift starts) | Italy/Spain | Req 2 / Avail 0 / Gap 2 | Req 2 / Avail 0 / Gap 2 (unchanged — genuine) |
+| 03:40–04:30 (before any shift starts) | Domestic | Req 2 / Avail 0 / Gap 2 | Req 2 / Avail 0 / Gap 2 (unchanged — genuine) |
+| 04:30–05:55 | Main | Req 2 / **Avail 20** / Gap 0 | Req 2 / Avail 16 / Gap 0 (still comfortable surplus) |
+| 04:35–05:55 | Italy/Spain | Req 2 / **Avail 0** / **Gap 2** | Req 2 / **Avail 2** / **Gap 0** — RECOVERED |
+| 04:30–06:55 | Domestic | Req 2 / **Avail 0** / **Gap 2** | Req 2 / **Avail 2** / **Gap 0** — RECOVERED |
+| 06:55–07:15 | Domestic | Req 2 / **Avail 0** / **Gap 2** | Req 2 / **Avail 2** / **Gap 0** — RECOVERED |
+
+Main never regresses into its own gap: it gives up only the surplus
+employees Domestic/Italy-Spain actually needed (20→16 at 04:30–05:55) and
+stays at `Gap 0` throughout. The pre-04:30 windows for all three zones are
+unaffected by the fix, on purpose — see the honest limitation below.
+
+**Fixed by better attribution vs. genuinely unavoidable, distinguished
+explicitly:**
+- FIXED (recovered coverage): every 04:30-onward Domestic and Italy/Spain
+  gap above — real, simultaneous multi-zone demand, enough total people
+  existed, they were just being misattributed entirely to Main.
+- NOT fixed, and must NOT be fixed (genuine structural gap): any window
+  strictly before 04:30, the earliest catalog shift start
+  (`lib/shift-templates.ts`'s `MT02`/`JR02`) — e.g. Italy/Spain's
+  03:15–04:30 (AT100/MAD opens Check-in at 03:15, a full 75 minutes before
+  any employee can be on shift). No attribution scheme can recover coverage
+  that does not exist yet; this must keep showing as a real
+  `Required > 0 / Available 0 / Gap > 0` after the fix, and the new test
+  `"REGRESSION: a window entirely before the earliest catalog shift start
+  is still a real, unavoidable structural gap"` (`tests/checkin-capacity-timeline.test.ts`)
+  asserts exactly that.
+
+**Regression coverage added:** `tests/checkin-capacity-timeline.test.ts`
+gained 5 new tests (12 total in that file, up from 7): a sufficient shared
+pool splits across Main+Domestic; a sufficient shared pool splits across
+Main+Italy/Spain; an insufficient shared pool still shows a real, honest
+gap split fairly across both zones (never fabricated coverage); a zone
+already fully covered receives no more of the pool even with employees
+left over (surplus still lands on the highest-demand zone); and the
+before-any-shift-starts case still shows a genuine, unhidden gap. Full
+suite: 411/411 tests pass (406 immediately before this fix + 5 new), and
+`npm run build` is clean. The Stage-6 primary/T1-demand-bias suites
+(`tests/stage6-t1-primary-bias.test.ts`, `tests/stage6-t1-demand-bias.test.ts`)
+and the derived-capacity-timeline integration suite
+(`tests/zone-plan-integration.test.ts`) all pass unmodified — neither of
+the two prior fixes was touched or regressed.
+
+**Remaining honest limitation.** The fix is a per-instant, greedy
+max-remaining-gap (max-min-fair) split, NOT a true joint optimizer across
+all ordinary zones and all atomic periods simultaneously. It always
+produces the fairest possible split for a SINGLE instant (no zone is left
+at a bigger gap than another while a sibling zone already has surplus),
+but it cannot "save" capacity from an easy atomic period for a harder one
+a few minutes later, and it can only reduce, not eliminate, an insufficient
+pool's total shortfall (see the "insufficient shared pool" test above,
+where a genuine 5-person total demand against a 3-person pool still leaves
+a real Gap 1 / Gap 1 split, correctly, rather than inventing coverage). An
+extremely tight multi-zone conflict whose shape changes every few minutes
+could still produce more employee-to-zone attribution churn (see
+`buildEmployeeZoneAvailabilitySegments`) than a hypothetical whole-shift
+optimizer would choose — the Required/Available/Gap numbers themselves are
+always correct at each instant regardless.
+
 ## Sequencing
 
 1. Multi-week Flight Program / Import Flights — done.
