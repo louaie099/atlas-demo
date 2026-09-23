@@ -198,6 +198,12 @@ export function chooseTopUpReservedOffDays(daysOrder: string[], freeDays: Readon
   return reserved;
 }
 
+/** Whether a shift's [entree,sortie] window (minute-of-day, sortie may wrap past midnight) contains the given minute-of-day — used only by the Stage-6 heuristic bias above, never by any legality check. */
+function shiftWindowCoversMinute(entreeMin: number, sortieMin: number, minute: number): boolean {
+  if (sortieMin > entreeMin) return minute >= entreeMin && minute < sortieMin;
+  return minute >= entreeMin || minute < sortieMin; // overnight wrap
+}
+
 /**
  * SHARED PER-EMPLOYEE DAY-COUNT/HOURS TOP-UP CORE (factored out 2026-09-22
  * — see docs/known-limitations/roster-planning-vs-duty-allocation.md's
@@ -227,7 +233,21 @@ export function computeEmployeeDayCountTopUp(
   targetWorkingDaysThisWindow: number,
   offDaysTarget: number,
   targetHoursThisWindow: number | null,
-  catalogCodes: { code: string; entreeMin: number; sortieMin: number }[]
+  catalogCodes: { code: string; entreeMin: number; sortieMin: number }[],
+  // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9) — OPTIONAL,
+  // and a HEURISTIC BIAS ONLY, never an override of a hard labor-rule
+  // constraint: this day's aggregate T1 demand peak instant (minute of day,
+  // from zone-demand-aggregation.ts's peakAggregateT1DemandMinuteForDay,
+  // computed on the flight schedule alone), or null/undefined when there is
+  // no known peak (e.g. no flights that day, or the caller doesn't have one
+  // — every existing caller/test that omits this keeps the exact prior
+  // shortest-first behavior unchanged). When several catalog codes are all
+  // EQUALLY LEGAL for a day (same rest-legality result), this breaks the
+  // tie toward whichever legal code's shift window actually COVERS the
+  // peak-demand instant, instead of always the shortest-first one. It never
+  // discards a legal candidate and never makes an illegal one legal — see
+  // `attemptDay` below for exactly where this applies.
+  t1PeakDemandMinuteByDay?: Record<string, number | null>
 ): Map<string, string> {
   const additional = new Map<string, string>(); // day -> shiftCode, this employee only
 
@@ -268,7 +288,7 @@ export function computeEmployeeDayCountTopUp(
     const nextFixed = nextDay ? getExistingShift(nextDay) : undefined;
     const nextFixedShift = nextFixed ? getShiftTimesAs(nextFixed.shiftCode) : null;
 
-    const legal = catalogCodes.find((c) => {
+    const legalCandidates = catalogCodes.filter((c) => {
       if (priorShift) {
         const entreeTime = minutesToTime(c.entreeMin);
         if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
@@ -281,7 +301,19 @@ export function computeEmployeeDayCountTopUp(
       return true;
     });
 
-    if (!legal) return false; // no legally-rested shift available today — leave the honest gap, try the next candidate day
+    if (legalCandidates.length === 0) return false; // no legally-rested shift available today — leave the honest gap, try the next candidate day
+
+    // STAGE-6 HEURISTIC BIAS: among the already-legal candidates (rest
+    // constraints already fully applied above — this NEVER widens or
+    // overrides that set), prefer one whose window covers today's known T1
+    // demand peak, breaking ties toward the original shortest-first catalog
+    // order. `t1PeakDemandMinuteByDay` omitted/day missing/null -> exact
+    // prior behavior (first catalog-order candidate).
+    const peakMinute = t1PeakDemandMinuteByDay?.[day];
+    const legal =
+      peakMinute != null && legalCandidates.length > 1
+        ? legalCandidates.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? legalCandidates[0]
+        : legalCandidates[0];
 
     additional.set(day, legal.code);
     scheduledDays.add(day);
@@ -348,7 +380,14 @@ export function generateObligationToppedUpShifts(
   demandDrivenShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
   config: Config,
   priorWeekBoundaryContext: PriorDayShiftMap,
-  minimumRestHours: number
+  minimumRestHours: number,
+  // STAGE-6 HEURISTIC BIAS (2026-09-23, product owner's point 9) — see
+  // computeEmployeeDayCountTopUp's own doc comment on the parameter of the
+  // same name. Optional; omitted (the default) reproduces the exact prior
+  // shortest-first selection, so every existing caller/test keeps working
+  // unchanged. generate-draft-plan.ts is the one real caller that computes
+  // and passes this, from the flight schedule alone, before this stage runs.
+  t1PeakDemandMinuteByDay?: Record<string, number | null>
 ): Record<string, GeneratedShiftAssignment[]> {
   const additional: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) additional[day] = [];
@@ -389,7 +428,8 @@ export function generateObligationToppedUpShifts(
       targetWorkingDaysThisWindow,
       config.normal_weekly_off_days,
       targetHoursThisWindow,
-      catalogCodes
+      catalogCodes,
+      t1PeakDemandMinuteByDay
     );
 
     for (const [day, shiftCode] of additions) {

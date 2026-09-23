@@ -124,6 +124,46 @@ export function aggregateAllZonesDailyDemand(
   return result;
 }
 
+/**
+ * STAGE-6 HEURISTIC BIAS INPUT (2026-09-23, product owner's point 9): a
+ * per-day AGGREGATE T1 demand-across-ALL-zones profile, computed from the
+ * flight schedule ALONE — independent of the roster, exactly like the rest
+ * of this module — so `roster-generation.ts`'s flexible-pool shift-code
+ * selection can be told "this is roughly when T1 demand peaks today" and
+ * weight an otherwise-equal choice toward a shift code that actually
+ * covers it. This is DELIBERATELY a coarse summary (the bucket with the
+ * highest SUMMED required headcount across every automatic zone, ties
+ * broken toward the earlier bucket), never itself a claim about which
+ * zone or how many agents — see roster-generation.ts's own doc comment on
+ * `computeEmployeeDayCountTopUp`'s new `t1PeakDemandMinuteByDay` parameter
+ * for exactly how (and how little) this changes shift selection: it is a
+ * heuristic bias between otherwise-equal legal candidates, never an
+ * override of a hard labor-rule constraint, and a genuine unavoidable
+ * shortage can and does still surface (per the owner: "do not hide
+ * shortages by capping numbers or manipulating the UI").
+ */
+export function peakAggregateT1DemandMinuteForDay(
+  dayOfWeek: string,
+  flights: Flight[],
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+): number | null {
+  const byZone = Array.from(new Set(CHECKIN_ZONE_IDS)).map((zone) => aggregateZoneDailyDemand(dayOfWeek, zone, flights, policy));
+  if (byZone.length === 0) return null;
+
+  const bucketCount = byZone[0].buckets.length;
+  let bestIndex = -1;
+  let bestTotal = 0;
+  for (let i = 0; i < bucketCount; i++) {
+    const total = byZone.reduce((sum, daily) => sum + daily.buckets[i].required, 0);
+    if (total > bestTotal) {
+      bestTotal = total;
+      bestIndex = i;
+    }
+  }
+  if (bestIndex === -1) return null; // no demand at all this day -- nothing to bias toward
+  return bestIndex * BUCKET_MINUTES;
+}
+
 export interface ZoneDemandCluster {
   start: string;
   end: string;
