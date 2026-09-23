@@ -73,10 +73,10 @@ export function PlanningSummaryBar({
   const requirementsCovered = roster.filter((v) => v.coverageStatus === "assigned").length;
   const gaps = roster.filter((v) => v.coverageStatus === "gap").length;
 
-  // required_headcount: 0 rows are the "coverage-only" synthesized rows
-  // (see generate-draft-plan.ts) -- not a real demand/coverage fact, so
-  // excluded from both zone tiles below.
-  const meaningfulZoneRequirements = zoneCoverage.filter((v) => v.requirement.required_headcount > 0);
+  // required: 0 rows are pure-surplus derived rows (idle capacity with no
+  // real demand at that instant -- see checkin-capacity-timeline.ts) -- not
+  // a real demand/coverage fact, so excluded from both zone tiles below.
+  const meaningfulZoneRequirements = zoneCoverage.filter((v) => v.required > 0);
   const zoneCovered = meaningfulZoneRequirements.filter((v) => v.gap <= 0).length;
   const zoneGaps = meaningfulZoneRequirements.filter((v) => v.gap > 0).length;
 

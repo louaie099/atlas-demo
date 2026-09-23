@@ -58,11 +58,11 @@ export function SummaryDrilldownSheet({
   const gapViews = useMemo(() => roster.filter((v) => v.coverageStatus === "gap"), [roster]);
   const coveredViews = useMemo(() => roster.filter((v) => v.coverageStatus === "assigned"), [roster]);
   const managedFlightIds = useMemo(() => new Set(roster.map((v) => v.flight.id)), [roster]);
-  // Zone requirements with required_headcount: 0 are the "coverage-only"
-  // rows synthesized so a default placement duty has somewhere to attach
-  // (see generate-draft-plan.ts) -- they're real rows but not a genuine
-  // demand-vs-coverage fact worth counting in either bucket here.
-  const meaningfulZoneRequirements = useMemo(() => zoneCoverage.filter((v) => v.requirement.required_headcount > 0), [zoneCoverage]);
+  // Rows with required: 0 are pure-surplus derived rows (idle capacity with
+  // no real demand at that instant -- see checkin-capacity-timeline.ts) --
+  // real rows but not a genuine demand-vs-coverage fact worth counting in
+  // either bucket here.
+  const meaningfulZoneRequirements = useMemo(() => zoneCoverage.filter((v) => v.required > 0), [zoneCoverage]);
   const zoneGapViews = useMemo(() => meaningfulZoneRequirements.filter((v) => v.gap > 0), [meaningfulZoneRequirements]);
   const zoneCoveredViews = useMemo(() => meaningfulZoneRequirements.filter((v) => v.gap <= 0), [meaningfulZoneRequirements]);
 
@@ -139,29 +139,31 @@ export function SummaryDrilldownSheet({
             </p>
             {zoneGapViews.length === 0 && <p className="text-sm text-muted">No T1 Check-in zone staffing gaps in this week's plan.</p>}
             {zoneGapViews.map((v) => {
-              const zone = CHECKIN_ZONES[v.requirement.zone];
-              const covered = v.assignedEmployees.length + v.proposedEmployees.length;
+              const zone = CHECKIN_ZONES[v.zone];
+              const covered = v.available + v.manuallyAssigned;
               return (
-                <div key={v.requirement.id} className="rounded-xl border border-border bg-white p-4 flex flex-col gap-1.5">
+                <div key={v.id} className="rounded-xl border border-border bg-white p-4 flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <span className="text-sm font-medium text-ink">
-                      {zone.label} · {v.requirement.day_of_week} {v.requirement.window_start}–{v.requirement.window_end}
+                      {zone.label} · {v.dayOfWeek} {v.windowStart}–{v.windowEnd}
                     </span>
                     <Badge tone="bad">Gap</Badge>
                   </div>
                   <p className="text-xs text-muted">
-                    Required {v.requirement.required_headcount} · Assigned {covered} · Gap {v.gap} · {zone.countersLabel}
+                    Required {v.required} · Available {covered} · Gap {v.gap} · {zone.countersLabel}
                   </p>
-                  <Button
-                    variant="secondary"
-                    className="self-start mt-1"
-                    onClick={() => {
-                      onClose();
-                      onFindZoneAgent(v.requirement.id);
-                    }}
-                  >
-                    Find Agent
-                  </Button>
+                  {v.zoneRequirementId && (
+                    <Button
+                      variant="secondary"
+                      className="self-start mt-1"
+                      onClick={() => {
+                        onClose();
+                        onFindZoneAgent(v.zoneRequirementId!);
+                      }}
+                    >
+                      Find Agent
+                    </Button>
+                  )}
                 </div>
               );
             })}
@@ -172,18 +174,18 @@ export function SummaryDrilldownSheet({
           <div className="flex flex-col gap-3">
             {zoneCoveredViews.length === 0 && <p className="text-sm text-muted">No fully-covered T1 Check-in zone requirements yet.</p>}
             {zoneCoveredViews.map((v) => {
-              const zone = CHECKIN_ZONES[v.requirement.zone];
-              const covered = v.assignedEmployees.length + v.proposedEmployees.length;
+              const zone = CHECKIN_ZONES[v.zone];
+              const covered = v.available + v.manuallyAssigned;
               return (
-                <div key={v.requirement.id} className="rounded-xl border border-border bg-white p-4 flex flex-col gap-1.5">
+                <div key={v.id} className="rounded-xl border border-border bg-white p-4 flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <span className="text-sm font-medium text-ink">
-                      {zone.label} · {v.requirement.day_of_week} {v.requirement.window_start}–{v.requirement.window_end}
+                      {zone.label} · {v.dayOfWeek} {v.windowStart}–{v.windowEnd}
                     </span>
-                    <Badge tone="good">Assigned</Badge>
+                    <Badge tone="good">Covered</Badge>
                   </div>
                   <p className="text-xs text-muted">
-                    {covered}/{v.requirement.required_headcount}: {[...v.assignedEmployees, ...v.proposedEmployees].map((e) => e.name).join(", ")}
+                    {covered}/{v.required}: {[...v.manuallyAssignedEmployees, ...v.availableEmployees].map((e) => e.name).join(", ")}
                   </p>
                 </div>
               );

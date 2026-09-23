@@ -277,7 +277,7 @@ export default function PlanningPage() {
                 <ZoneCoverageSection
                   key={`zone-${day}`}
                   day={day}
-                  views={(zoneCoverage ?? []).filter((v) => v.requirement.day_of_week === day)}
+                  views={(zoneCoverage ?? []).filter((v) => v.dayOfWeek === day)}
                   onFindAgent={setOpenZoneRequirementId}
                   focus={zoneCoverageFocus}
                 />

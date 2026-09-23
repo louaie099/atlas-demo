@@ -10,9 +10,15 @@ import { Badge, Button } from "./ui";
  * per-flight Flight Coverage rows above it (FlightCoverageRow in
  * flight-coverage-card.tsx, UNCHANGED), because Check-in is no longer a
  * per-flight requirement (see lib/checkin-zones.ts's module doc comment).
- * One row per zone/time-window requirement, with a drill-down into the
- * real flights whose combined workload produced that number -- never a
- * single merged "Check-in" number across the whole day.
+ *
+ * 2026-09-23: the badge changed from "Required X · Assigned Y · Gap Z" to
+ * "Required X · Available Y · Gap/Surplus Z" -- "Assigned" implied a
+ * discrete duty assignment, which no longer exists for automatic default
+ * placement (see lib/planning/checkin-capacity-timeline.ts). "Available"
+ * is a real, derived capacity number computed at read time from the
+ * roster + already-persisted specific-duty intervals, never a count of
+ * persisted assignment rows. A genuine human Find-Agent commitment still
+ * shows separately as "Manually assigned" and still reduces the gap.
  */
 export function ZoneCoverageRow({
   view,
@@ -22,9 +28,8 @@ export function ZoneCoverageRow({
   onFindAgent: (zoneRequirementId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const { requirement, assignedEmployees, proposedEmployees, gap, contributingFlights } = view;
-  const zone = CHECKIN_ZONES[requirement.zone];
-  const covered = assignedEmployees.length + proposedEmployees.length;
+  const { zone: zoneId, required, available, manuallyAssigned, gap, surplus, contributingFlights, availableEmployees, manuallyAssignedEmployees, reasoning, zoneRequirementId } = view;
+  const zone = CHECKIN_ZONES[zoneId];
   const tone = gap > 0 ? "bad" : "good";
 
   return (
@@ -36,13 +41,12 @@ export function ZoneCoverageRow({
       >
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-xs font-medium text-muted w-28 shrink-0">
-            {requirement.window_start}–{requirement.window_end}
+            {view.windowStart}–{view.windowEnd}
           </span>
           <span className="font-semibold text-ink">{zone.label}</span>
           <span className="text-sm text-muted">{zone.countersLabel}</span>
-          {requirement.source === "manual" && <Badge tone="neutral">Manual</Badge>}
           <Badge tone={tone}>
-            Required {requirement.required_headcount} · Assigned {covered} · Gap {gap}
+            Required {required} · Available {available + manuallyAssigned} · {gap > 0 ? `Gap ${gap}` : `Surplus ${surplus}`}
           </Badge>
           <span className="ml-auto text-xs text-muted">
             {contributingFlights.length} contributing flight{contributingFlights.length === 1 ? "" : "s"} {expanded ? "(hide)" : "(show)"}
@@ -52,20 +56,20 @@ export function ZoneCoverageRow({
 
       {expanded && (
         <div className="flex flex-col gap-3 border-t border-border bg-surface/60 px-4 py-3">
-          <p className="text-xs text-muted">{requirement.reasoning}</p>
+          <p className="text-xs text-muted">{reasoning}</p>
 
           <div className="flex flex-wrap gap-1.5">
-            {assignedEmployees.map((e) => (
+            {manuallyAssignedEmployees.map((e) => (
               <span key={e.id} className="text-xs bg-gray-100 text-ink px-2.5 py-1 rounded-full">
-                {e.name}
+                {e.name} (manually assigned)
               </span>
             ))}
-            {proposedEmployees.map((e) => (
+            {availableEmployees.map((e) => (
               <span key={e.id} className="text-xs bg-brand-50 text-brand-700 px-2.5 py-1 rounded-full">
                 {e.name}
               </span>
             ))}
-            {covered === 0 && <span className="text-xs text-muted">No one positioned here yet</span>}
+            {available + manuallyAssigned === 0 && <span className="text-xs text-muted">No one positioned here yet</span>}
           </div>
 
           {contributingFlights.length > 0 && (
@@ -83,8 +87,8 @@ export function ZoneCoverageRow({
             </div>
           )}
 
-          {gap > 0 && (
-            <Button onClick={() => onFindAgent(requirement.id)} className="self-start" variant="secondary">
+          {gap > 0 && zoneRequirementId && (
+            <Button onClick={() => onFindAgent(zoneRequirementId)} className="self-start" variant="secondary">
               Find Agent
             </Button>
           )}
@@ -110,7 +114,7 @@ export function ZoneCoverageSection({
 
   useEffect(() => {
     if (!focus) return;
-    if (!views.some((v) => v.requirement.id === focus.zoneRequirementId)) return;
+    if (!views.some((v) => v.id === focus.zoneRequirementId || v.zoneRequirementId === focus.zoneRequirementId)) return;
     sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.zoneRequirementId, focus?.token]);
@@ -122,7 +126,7 @@ export function ZoneCoverageSection({
       <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">{day} · T1 Check-in Zones</h2>
       <div className="flex flex-col gap-2">
         {views.map((v) => (
-          <ZoneCoverageRow key={v.requirement.id} view={v} onFindAgent={onFindAgent} />
+          <ZoneCoverageRow key={v.id} view={v} onFindAgent={onFindAgent} />
         ))}
       </div>
     </div>

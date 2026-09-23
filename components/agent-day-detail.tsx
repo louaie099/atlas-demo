@@ -121,14 +121,22 @@ function DutyRow({ duty }: { duty: AgentScheduleDuty }) {
 /**
  * "T1 Main Check-in · counters 30–76 · 05:45–08:30" -- never a flight
  * number or role, per the explicit instruction that a zone duty renders
- * completely differently from a per-flight one (DutyRow above). This is a
- * default IDLE-TIME PLACEMENT (see checkin-zone-placement.ts's own doc
- * comment), not a claim that this employee alone covers the zone's whole
- * required headcount -- see the zone coverage card for the real
- * required/assigned/gap numbers.
+ * completely differently from a per-flight one (DutyRow above).
+ *
+ * "available" (2026-09-23) is a DERIVED fact, not a persisted duty: this
+ * employee has no specific flight/specialized duty during this window
+ * while rostered WORK, and this is the ordinary zone the demand-informed
+ * heuristic attributes them to at that time (see
+ * lib/planning/checkin-capacity-timeline.ts) -- never a claim that this
+ * employee alone covers the zone's whole required headcount, and never
+ * itself a persisted checkin_zone_assignments row (see the zone coverage
+ * card for the real required/available/gap numbers). "confirmed" IS a
+ * real persisted row: a genuine human Find Agent commitment.
  */
 function ZoneDutyRow({ duty }: { duty: AgentZoneDuty }) {
   const zone = CHECKIN_ZONES[duty.zone];
+  const label = duty.status === "confirmed" ? "Confirmed" : duty.status === "assigned" ? "Assigned" : "Available";
+  const tone = duty.status === "confirmed" ? "good" : duty.status === "assigned" ? "brand" : "neutral";
   return (
     <div className="flex items-center justify-between gap-3 text-sm bg-surface rounded-lg px-3 py-2">
       <div>
@@ -138,9 +146,7 @@ function ZoneDutyRow({ duty }: { duty: AgentZoneDuty }) {
           ({duty.window.start}–{duty.window.end})
         </span>
       </div>
-      <Badge tone={duty.status === "assigned" ? "brand" : "good"}>
-        {duty.status === "assigned" ? "Assigned" : "Confirmed"}
-      </Badge>
+      <Badge tone={tone}>{label}</Badge>
     </div>
   );
 }
