@@ -160,14 +160,19 @@ export interface DraftPlanBundle {
   plan: WeeklyPlan;
   rosterEntries: WeeklyPlanRosterEntry[];
   assignments: Assignment[];
-  // T1 Check-in ZONE model (2026-09-21 cutover) -- PARALLEL rows, never
-  // merged into `assignments`/`requirements` above (see
-  // supabase/migrations/0015_checkin_zones.sql's doc comment).
-  // `zoneRequirements` is DEMAND (one row per contiguous zone/day demand
-  // cluster); `zoneAssignments` is DEFAULT PLACEMENT, one row per employee
-  // per free interval, source "atlas_generated" -- both distinct from a
-  // human_modified Find Agent zone-gap fill (see the zone-candidates/
-  // zone-assign API routes).
+  // T1 Check-in ZONE model (2026-09-21 cutover; architecture reworked
+  // 2026-09-23) -- PARALLEL rows, never merged into `assignments`/
+  // `requirements` above (see supabase/migrations/0015_checkin_zones.sql's
+  // doc comment). `zoneRequirements` is DEMAND (one row per contiguous
+  // zone/day demand cluster) -- still generated and persisted exactly as
+  // before. `zoneAssignments` is now ALWAYS EMPTY straight out of
+  // generation: default T1 Check-in placement is no longer generated as a
+  // discrete row at all (see the doc comment above buildDraftPlanBundle's
+  // zoneRequirements construction, and lib/planning/checkin-capacity-timeline.ts).
+  // The type/field stays (never removed) because a genuine human Find
+  // Agent commitment still needs somewhere to persist a real row, source
+  // "human_modified" -- see app/api/checkin-zone-assign/route.ts, which
+  // inserts directly, entirely outside plan generation.
   zoneRequirements: ZoneCheckinRequirement[];
   zoneAssignments: ZoneCheckinAssignment[];
   summary: PlanSummary;
@@ -234,14 +239,32 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     shift_code: r.shift_code,
   }));
 
-  // T1 Check-in ZONE model (2026-09-21 cutover) -- deterministic ids
-  // mirror the existing `req-<flightId>-<role>`/`assign-<planId>-...`
-  // convention: `zonereq-<planId>-<day>-<zone>-<index>` (index is this
-  // day+zone's own cluster/synthesized-row order, stable across a
-  // byte-identical regeneration) and
-  // `zoneassign-<planId>-<zoneRequirementId>-<employeeId>`.
+  // T1 Check-in ZONE DEMAND (2026-09-21 cutover) -- deterministic ids
+  // mirror the existing `req-<flightId>-<role>` convention:
+  // `zonereq-<planId>-<day>-<zone>-<index>` (index is this day+zone's own
+  // cluster order, stable across a byte-identical regeneration).
+  //
+  // 2026-09-23: this used to ALSO build `zoneAssignments` here, matching
+  // each of generate-draft-plan.ts's now-removed `zoneDutiesByDay` rows
+  // back to one of the requirement rows below via `findZoneRequirementIdFor`
+  // -- an exact-window lookup that almost never hit (a placement duty's
+  // free-interval window is fine-grained; a demand cluster's window is
+  // broad and bucket-aligned), falling back to "the FIRST requirement row
+  // for this zone/day" with NO overlap check at all. That is the exact,
+  // confirmed root cause of the live "04:00–08:30 Main Check-in —
+  // Required 4 / Assigned 75" / "09:00–15:30 Main Check-in — Required 6 /
+  // Assigned 0" bug. Per the product owner's explicit architectural
+  // instruction, default T1 Check-in placement is no longer generated or
+  // persisted as a discrete `checkin_zone_assignments` row at all -- it is
+  // DERIVED at read time from the roster + real specific-duty intervals
+  // (see lib/planning/checkin-capacity-timeline.ts, used by
+  // persisted-plan-view.ts). This eliminates the bug BY CONSTRUCTION:
+  // there is no separate row here to mis-link in the first place.
+  // `checkin_zone_assignments` now only ever holds genuine human Find
+  // Agent commitments (source: "human_modified" -- see
+  // app/api/checkin-zone-assign/route.ts), which is why `zoneAssignments`
+  // below is always empty coming out of a fresh generation.
   const zoneRequirements: ZoneCheckinRequirement[] = [];
-  const zoneRequirementIdByDayZoneWindow = new Map<string, string>();
   for (const day of daysOrder) {
     const perZoneIndex = new Map<CheckinZoneId | string, number>();
     for (const r of draft.zoneRequirementsByDay[day] ?? []) {
@@ -260,53 +283,16 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
         reasoning: r.reasoning,
         contributingFlightIds: r.contributingFlightIds,
       });
-      zoneRequirementIdByDayZoneWindow.set(`${day}|${r.zone}|${r.window_start}|${r.window_end}`, id);
     }
   }
 
-  function findZoneRequirementIdFor(day: string, zone: CheckinZoneId, window: { start: string; end: string }): string {
-    // Placement duties are matched back to the zone requirement row
-    // generate-draft-plan.ts already guaranteed exists for this exact
-    // window (either a real demand cluster or the zero-headcount
-    // "coverage-only" synthesized row -- see that file's own comment) --
-    // this never needs to create a row itself, only look one up.
-    const direct = zoneRequirementIdByDayZoneWindow.get(`${day}|${zone}|${window.start}|${window.end}`);
-    if (direct) return direct;
-    // Fallback: an overlapping (not necessarily identical) window, for
-    // robustness against a future change to the overlap-matching logic in
-    // generate-draft-plan.ts -- picks the first requirement row for this
-    // day/zone that overlaps at all.
-    const candidate = zoneRequirements.find((r) => r.plan_id === planId && r.day_of_week === day && r.zone === zone);
-    if (!candidate) {
-      throw new Error(
-        `No checkin_zone_requirements row found for ${zone} on ${day} at ${window.start}-${window.end} -- generate-draft-plan.ts should have guaranteed one exists for every placement duty's window.`
-      );
-    }
-    return candidate.id;
-  }
-
-  const allZoneDuties = Object.values(draft.zoneDutiesByDay).flat();
-  const zoneAssignments: ZoneCheckinAssignment[] = allZoneDuties.map((d) => {
-    const zoneRequirementId = findZoneRequirementIdFor(d.dayOfWeek, d.zone, d.window);
-    // Suffixed with the placement window (colons stripped) rather than
-    // just <zoneRequirementId>-<employeeId> -- an employee can have TWO
-    // separate free intervals on the same day that both happen to fall
-    // under the same zone requirement row (e.g. two short gaps either
-    // side of a lunch-hour duty, both inside one wide demand cluster);
-    // without this suffix those would collide on the same id.
-    const windowSuffix = `${d.window.start}-${d.window.end}`.replace(/:/g, "");
-    return {
-      id: `zoneassign-${planId}-${zoneRequirementId}-${d.employeeId}-${windowSuffix}`,
-      plan_id: planId,
-      zone_requirement_id: zoneRequirementId,
-      employee_id: d.employeeId,
-      window_start: d.window.start,
-      window_end: d.window.end,
-      source: "atlas_generated",
-      created_by: null,
-      assigned_at: draft.generatedAt,
-    };
-  });
+  // Always empty out of a fresh generation -- see the comment above. Typed
+  // explicitly (never inferred as `never[]`) so persistZoneRequirementsAndAssignments
+  // and every other consumer of DraftPlanBundle.zoneAssignments keeps
+  // compiling unchanged; a real human Find Agent commitment is inserted
+  // directly by app/api/checkin-zone-assign/route.ts, entirely outside plan
+  // generation.
+  const zoneAssignments: ZoneCheckinAssignment[] = [];
 
   const allDuties = Object.values(draft.dutiesByDay).flat();
   const assignments: Assignment[] = allDuties.map((d) => ({
