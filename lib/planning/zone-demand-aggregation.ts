@@ -147,21 +147,57 @@ export function peakAggregateT1DemandMinuteForDay(
   flights: Flight[],
   policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
 ): number | null {
-  const byZone = Array.from(new Set(CHECKIN_ZONE_IDS)).map((zone) => aggregateZoneDailyDemand(dayOfWeek, zone, flights, policy));
-  if (byZone.length === 0) return null;
+  const totals = aggregateT1DemandProfileForDay(dayOfWeek, flights, policy);
+  if (totals.length === 0) return null;
 
-  const bucketCount = byZone[0].buckets.length;
   let bestIndex = -1;
   let bestTotal = 0;
-  for (let i = 0; i < bucketCount; i++) {
-    const total = byZone.reduce((sum, daily) => sum + daily.buckets[i].required, 0);
-    if (total > bestTotal) {
-      bestTotal = total;
+  for (let i = 0; i < totals.length; i++) {
+    if (totals[i] > bestTotal) {
+      bestTotal = totals[i];
       bestIndex = i;
     }
   }
   if (bestIndex === -1) return null; // no demand at all this day -- nothing to bias toward
   return bestIndex * BUCKET_MINUTES;
+}
+
+/**
+ * STAGE-6 PRIMARY-PASS BIAS INPUT (2026-09-23 follow-up): the FULL
+ * per-30-min-bucket profile behind `peakAggregateT1DemandMinuteForDay`
+ * above, kept instead of collapsed to a single peak instant. Computed the
+ * exact same way (summed required headcount across every zone in
+ * CHECKIN_ZONE_IDS, from the flight schedule alone — no roster dependency)
+ * — this function and `peakAggregateT1DemandMinuteForDay` now share this
+ * one computation rather than duplicating it.
+ *
+ * WHY A FULL PROFILE, NOT JUST THE PEAK: the existing peak-minute bias
+ * (`computeEmployeeDayCountTopUp`'s `t1PeakDemandMinuteByDay`) only ever
+ * reaches the SECONDARY obligation top-up pass, which rarely triggers once
+ * an employee already has 5 working days from the PRIMARY pass
+ * (`generateFlexiblePoolShifts`, Stage 6's own greedy set-cover chooser).
+ * That primary pass needs the full per-bucket shape — not one instant — to
+ * weight EVERY candidate shift code by how much of the day's T1 demand
+ * curve it would actually sit across (see shift-generation.ts's own doc
+ * comment on `t1DemandByBucket` for exactly how this is used: an added,
+ * WEIGHTED preference among already-legal candidates, never a hard
+ * constraint, and never able to outrank a candidate that covers strictly
+ * more real per-flight Gate/Boarding/Profiling/Mesure demand).
+ */
+export function aggregateT1DemandProfileForDay(
+  dayOfWeek: string,
+  flights: Flight[],
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+): number[] {
+  const byZone = Array.from(new Set(CHECKIN_ZONE_IDS)).map((zone) => aggregateZoneDailyDemand(dayOfWeek, zone, flights, policy));
+  if (byZone.length === 0) return [];
+
+  const bucketCount = byZone[0].buckets.length;
+  const totals: number[] = new Array(bucketCount).fill(0);
+  for (let i = 0; i < bucketCount; i++) {
+    totals[i] = byZone.reduce((sum, daily) => sum + daily.buckets[i].required, 0);
+  }
+  return totals;
 }
 
 export interface ZoneDemandCluster {
