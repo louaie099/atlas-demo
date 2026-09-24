@@ -1315,3 +1315,147 @@ issue. This case is pinned in `tests/stage6-off-window-bias.test.ts`.
 Tests: 438 → 494. The new files are `tests/stage6-off-window-bias.test.ts`,
 `tests/fatigue-model.test.ts` and `tests/fatigue-continuity.test.ts`. No
 existing test was modified. `npm run build` is clean.
+
+## 2026-09-24 addendum: fatigue-aware roster planning, part 2 — fatigue wired into the planner (OFF by default)
+
+**`FATIGUE_MODEL_ENABLED` stays `false` globally.** This phase builds the
+wiring and proves it works when a caller explicitly passes an enabled
+`FatigueConfig`. No real plan changes: every real caller
+(`weekly-plan-service.ts`, `weekly-plan-view.ts`, the API routes) passes no
+fatigue input, and no planner module imports `FATIGUE_MODEL_ENABLED`,
+`DEFAULT_FATIGUE_CONFIG` or `PROTOTYPE_FATIGUE_CONFIG` to switch itself on.
+Enabling it for real plans is a separate future decision. No numeric weight
+in `lib/fatigue-config.ts` was changed, and transport burden stays at 0.
+
+### What got wired where
+
+- **Planner glue: `lib/planning/fatigue-planning.ts` (new).**
+  - `projectFatigueForShift` projects one (employee, code, real date)
+    option. It takes the state entering the day, adds the code's
+    date-resolved burden plus the transition from the last worked shift,
+    and returns the resulting state.
+  - `FatigueLedger` carries running state day by day:
+    `createFatigueLedger`, `advanceFatigueLedger`,
+    `stage6FatigueContextFromLedger`. An employee with no incoming state is
+    an explicit `UnknownFatigueState`.
+  - `explainFatigueChoice` produces the explanation labels.
+- **Stage 6 (`generateFlexiblePoolShifts`).** A new optional trailing
+  `fatigueContext` parameter carries the tier-4 term (formula below).
+  Running state across days is kept by a `FatigueLedger` in
+  `generate-draft-plan.ts`'s `runShiftGenerationPass`. It advances once per
+  day because an employee gets at most one shift per day, so state cannot
+  change inside a day's greedy loop. The ledger covers Stage-6 days only;
+  top-up days are added later and ordered separately.
+- **Stage-6.5 top-up.** `computeEmployeeDayCountTopUp` and
+  `generateObligationToppedUpShifts` take an optional trailing
+  `TopUpFatigueOptions` / `fatigueConfig`. Among one day's legal codes it
+  prefers the lower-burden code. Burden here is the code's own
+  date-resolved burden plus the transition in from the previous worked
+  shift and out to the next worked shift, quantized with the same
+  `fatigueScoreSteps`. This ordering sits strictly below the existing
+  T1-peak and OFF/OFF neighbour-feasibility preferences. It never adds,
+  removes or legalizes a code, and it never changes how many days get
+  filled.
+- **Foreign-company distribution.** The real planner path is
+  `generateForeignCompanyShifts`, not `buildForeignCommitmentAssignments`
+  (legacy seed baseline). It takes an optional trailing
+  `ForeignFatigueOptions`. On each flight day the team pool is sorted by:
+  1. the resulting burden of taking that day's commitment code;
+  2. least-used hours;
+  3. original order.
+
+  This ordering happens before the unchanged `assignPoolToWindowWithRoles`
+  walk. That walk still tries every member until the confirmed headcount
+  is met, so fatigue can never cause, hide or delay a shortfall. Required
+  coverage always wins. The ranking uses the day's combined-window code;
+  a member's actual code may differ if their rest requires it.
+- **Stage 9 / Find-Agent (`scoreCandidates`).** A new
+  `fairness_weights.fatigueWeight` (optional, default 0) and an optional
+  `fatigue: CandidateFatigueInput` parameter, forwarded by
+  `generateDutiesForDay`. `generateDraftWeeklyPlan` builds the input from
+  the final roster: each employee's state entering each day.
+- **`generateDraftWeeklyPlan`** gains
+  `planningOptions.fatigue = { config, incomingSeeds? }`. `incomingSeeds`
+  maps employees to seeds from `deriveIncomingFatigueState` (`prior_plan`,
+  approximate `fallback_static_baseline`, or `unknown`); an employee with
+  no seed is treated as unknown. `weekly-plan-service.ts` does not derive
+  or pass seeds yet. That is part of the future enablement.
+
+### Final Stage-6 fatigue formula (tier 4)
+
+```
+resultingBurden = accumulateFatigue(stateEnteringToday,
+                    burden(code, realDate) + transition(lastWorked -> code)).accumulatedBurden
+fatigueSteps    = clamp(round(resultingBurden / 0.01), 0, 9999)      // fatigueScoreSteps
+score           = hard*1 + t1*0.001 - conflicts*0.00003 - fatigueSteps*1e-9
+```
+
+The fatigue term's maximum total is 9999 × 1e-9 = 0.000009999. That is
+below `FATIGUE_TIER_BUDGET` (0.00001), which is below one OFF/OFF
+structural conflict (0.00003). Tiers 3 and 4 together (≤ 0.000099999)
+are still below one T1 bucket (0.001), so a covering candidate always
+scores more than 0.
+
+Fatigue therefore only reorders candidates that are tied on hard coverage,
+T1 and OFF/OFF structure. Among those, it picks the lower resulting burden:
+- the less-loaded employee for a given code;
+- the less burdensome code for a given employee.
+
+Integer steps keep score comparisons exact. With `fatigueSteps = 0` the
+score is bit-identical to the old formula.
+
+### `scoreCandidates`: fatigue and workload hours stay separate
+
+The two signals are never summed into one number. Within the `recommended`
+group only, they are two lexicographic keys in a fixed order:
+
+- **(4a) workload hours**, when `workloadHoursWeight > 0`.
+- **(4b) fatigue burden**, when `fatigueWeight > 0` and the fatigue input's
+  config is enabled. Lower recent accumulated burden ranks first. An
+  unknown history counts as a neutral 0.
+- **Stable input order** breaks any remaining tie.
+
+Hours comes first on purpose. Switching fatigue on can only break ties
+that hours leaves, so it never reorders a pair the shipped hours signal
+already separates. The relative size of the two weights does not change
+this key order. Fatigue never excludes a candidate, never lifts a flagged
+candidate above a recommended one, and never bypasses the hard gates
+(roster, team, protected-window overlap, shift overlap, skill or
+authorization).
+
+Stage 6 ranks differently: it places fatigue (tier 4) above its own
+hours-so-far tie-break. That tie-break is an internal load-spreading
+heuristic, not the business workload-fairness dimension.
+
+### Explainability
+
+These fields are populated only when the fatigue model is enabled:
+- `GeneratedShiftAssignment.fatigueReason?: string[]` on Stage-6, top-up
+  and foreign-roster assignments;
+- `CandidateResult.fatigueReason?: string[]` on recommended candidates.
+
+The labels come from `explainFatigueFactors`: neutral wording, no digits,
+no raw scores. Each label compares the choice with the option the planner
+would have picked without fatigue:
+- a different employee → compared on their incoming history;
+- a different code → compared on what each code alone adds.
+
+The field is `[]` when fatigue did not change the choice. When fatigue is
+off, the key is absent entirely.
+
+### Tests
+
+The new file is `tests/stage6-fatigue-wiring.test.ts`, with 33 tests.
+Part 1's import-level guard in `tests/fatigue-model.test.ts` ("nothing
+imports the fatigue model") no longer holds by design. It was replaced by
+a narrower guard: the model is consumed only by the five gated planner
+modules, none of which imports the global switch.
+
+The new behavioural regression guard runs Stage 6, the top-up, the
+foreign roster, `scoreCandidates` and the full seed pipeline in both
+regimes. It checks their output fingerprints against values captured from
+commit `37f70c4`, the last commit before wiring. They match byte for byte
+both with no fatigue argument and with fatigue arguments passed but
+disabled.
+
+Tests went from 494 to 527, all passing. `npm run build` is clean.
