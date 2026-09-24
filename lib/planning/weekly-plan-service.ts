@@ -214,7 +214,21 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
   const { planId, weekStart, weekLabel, revision, flights, employees, config, daysOrder } = input;
   const priorWeekBoundaryContext =
     input.priorWeekBoundaryContext ?? deriveFallbackBoundaryContext(employees, daysOrder, weekStart);
-  const draft = generateDraftWeeklyPlan(flights, employees, [], config, daysOrder, weekLabel, weekStart, priorWeekBoundaryContext);
+  // Provenance (rotation-context.ts's BoundaryContextProvenance): a caller-
+  // supplied context is, per this input's own contract, a real persisted
+  // predecessor plan's roster; otherwise it is the static fallback.
+  const priorWeekBoundaryProvenance = input.priorWeekBoundaryContext ? "prior_plan" : "fallback_static_baseline";
+  const draft = generateDraftWeeklyPlan(
+    flights,
+    employees,
+    [],
+    config,
+    daysOrder,
+    weekLabel,
+    weekStart,
+    priorWeekBoundaryContext,
+    priorWeekBoundaryProvenance
+  );
 
   const plan: WeeklyPlan = {
     id: planId,

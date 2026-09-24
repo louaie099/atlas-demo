@@ -28,6 +28,21 @@ import { flightDateFor, shiftWeek } from "../flight-date";
  */
 
 /**
+ * Where a week's cross-week boundary context came from — the honest
+ * three-way distinction every consumer of continuity data must respect:
+ *
+ *  - "prior_plan": derived from a REAL, persisted immediately-preceding
+ *    WeeklyPlan (deriveTransitionContextFromPriorPlan) — genuine history.
+ *  - "fallback_static_baseline": no predecessor plan; stood in by each
+ *    employee's own static weekly_shifts baseline
+ *    (deriveFallbackBoundaryContext) — a documented approximation. For the
+ *    demand-driven flexible pool this yields `null` for everyone purely for
+ *    lack of data, which must NOT be read as "was really OFF".
+ *  - "unknown": nothing at all is known (e.g. a caller passed no context).
+ */
+export type BoundaryContextProvenance = "prior_plan" | "fallback_static_baseline" | "unknown";
+
+/**
  * The calendar date (YYYY-MM-DD) seven days before `weekStart` -- i.e.
  * the start of the immediately preceding displayed week, assuming every
  * WeeklyPlan covers a fixed 7-day span (true for every plan this demo

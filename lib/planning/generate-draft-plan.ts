@@ -1,7 +1,10 @@
 import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../types";
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
-import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest } from "./shift-generation";
+import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest, STAGE6_DEFAULT_ROLES } from "./shift-generation";
+import { planPreferredOffWindows, Stage6OffWindowContext } from "./off-window";
+import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
+import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict } from "./specialized-team-generation";
 import { generateObligationToppedUpShifts } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
@@ -115,11 +118,31 @@ function runShiftGenerationPass(
   // flight schedule alone before Stage 6 ever runs (see
   // generateDraftWeeklyPlan below). Optional; omitted reproduces the exact
   // prior behavior for every existing caller/test.
-  t1DemandByBucketByDay?: Record<string, number[]>
+  t1DemandByBucketByDay?: Record<string, number[]>,
+  // OFF/OFF STRUCTURE BIAS (2026-09-24) — each flexible ACE's pre-planned
+  // preferred OFF window (off-window.ts). Optional; omitted = no bias.
+  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const hoursSoFarThisWeek = new Map<string, number>();
   let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
+
+  // Tier-3 context per day: the preferred windows plus this day's in-window
+  // neighbours, wrapping cyclically for a full 7-day window (the same
+  // same-week Sunday<->Monday convention the top-up's reservation search
+  // and wrap safety check use — see off-window.ts's Stage6OffWindowContext).
+  const n = daysOrder.length;
+  const offWindowContextFor = (dayIndex: number): Stage6OffWindowContext | undefined => {
+    if (!preferredOffDaysByEmployee) return undefined;
+    const wraps = n === 7;
+    const prevIndex = dayIndex > 0 ? dayIndex - 1 : wraps ? n - 1 : -1;
+    const nextIndex = dayIndex < n - 1 ? dayIndex + 1 : wraps ? 0 : -1;
+    return {
+      preferredOffDaysByEmployee,
+      previousDay: prevIndex >= 0 ? { dayOfWeek: daysOrder[prevIndex], date: flightDateFor(weekStart, daysOrder[prevIndex]) } : undefined,
+      nextDay: nextIndex >= 0 ? { dayOfWeek: daysOrder[nextIndex], date: flightDateFor(weekStart, daysOrder[nextIndex]) } : undefined,
+    };
+  };
 
   for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
     const day = daysOrder[dayIndex];
@@ -137,7 +160,8 @@ function runShiftGenerationPass(
       undefined,
       nextDayBaselineShift,
       hoursSoFarThisWeek,
-      t1DemandByBucketByDay?.[day]
+      t1DemandByBucketByDay?.[day],
+      offWindowContextFor(dayIndex)
     );
     generatedShiftsByDay[day] = generatedShifts;
 
@@ -199,7 +223,10 @@ function runTwoPassShiftGeneration(
   // runShiftGenerationPass's own doc comment on the parameter of the same
   // name. Passed identically to both passes so the bias is consistent
   // discovery-to-real, exactly like `demandByDay` itself already is.
-  t1DemandByBucketByDay?: Record<string, number[]>
+  t1DemandByBucketByDay?: Record<string, number[]>,
+  // OFF/OFF STRUCTURE BIAS — passed identically to both passes, like
+  // t1DemandByBucketByDay above.
+  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const staticBaselineOnly = (nextDay: string): PriorDayShiftMap => {
     const map: PriorDayShiftMap = new Map();
@@ -224,7 +251,8 @@ function runTwoPassShiftGeneration(
     config,
     priorWeekBoundaryContext,
     (_dayIndex, nextDay) => staticBaselineOnly(nextDay),
-    t1DemandByBucketByDay
+    t1DemandByBucketByDay,
+    preferredOffDaysByEmployee
   );
 
   const pass2 = runShiftGenerationPass(
@@ -248,7 +276,8 @@ function runTwoPassShiftGeneration(
       }
       return map;
     },
-    t1DemandByBucketByDay
+    t1DemandByBucketByDay,
+    preferredOffDaysByEmployee
   );
 
   return pass2;
@@ -339,7 +368,21 @@ export function generateDraftWeeklyPlan(
   // of Monday-reset this milestone corrects. Defaults to empty for a
   // genuinely first-ever window (no prior plan exists yet) — never a
   // reason to skip the check when a prior plan DOES exist.
-  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
+  // Where priorWeekBoundaryContext came from (rotation-context.ts's
+  // BoundaryContextProvenance). Only "prior_plan" is treated as REAL
+  // knowledge of who was OFF on the day before this window (used by the
+  // OFF/OFF window planner to avoid extending a real OFF run across the
+  // week boundary) — the static fallback maps every flexible ACE to null
+  // purely for lack of data, which must never be read as "was OFF".
+  // Defaults to "unknown" (no cross-week OFF information used).
+  priorWeekBoundaryProvenance: BoundaryContextProvenance = "unknown",
+  // Planner switches. `offWindowStructureBias` defaults to
+  // stage6-score-tiers.ts's OFF_WINDOW_STRUCTURE_BIAS_ENABLED (true); passing
+  // false reproduces the pre-2026-09-24 Stage 6 exactly (no preferred OFF
+  // windows, no tier-3 term, earliest-start top-up reservation tie-break)
+  // — used by tests to compare before/after on identical inputs.
+  planningOptions: { offWindowStructureBias?: boolean } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
 
@@ -371,6 +414,32 @@ export function generateDraftWeeklyPlan(
     t1PeakDemandMinuteByDay[day] = peakAggregateT1DemandMinuteForDay(day, dayFlights, config.zone_checkin_demand_policy);
   }
 
+  // OFF/OFF STRUCTURE BIAS (2026-09-24, fatigue-aware roster planning
+  // milestone part A) — each flexible ACE's PREFERRED consecutive OFF
+  // window for this week, decided BEFORE Stage 6 from predicted demand
+  // alone (see off-window.ts's planPreferredOffWindows for the heuristic).
+  // Stage 6 gets a strictly-bounded structural tie-break against rostering
+  // someone inside their own window (stage6-score-tiers.ts tier 3), and the
+  // Stage-6.5 top-up below reuses the SAME map as its reservation tie-break,
+  // so both passes steer toward the same block. Fixed-cycle, foreign,
+  // Profiling/Mesure employees never get a window (isFlexibleGeneralPool).
+  const priorDayOffEmployeeIds = new Set<string>();
+  if (priorWeekBoundaryProvenance === "prior_plan") {
+    for (const [employeeId, shift] of priorWeekBoundaryContext) if (shift === null) priorDayOffEmployeeIds.add(employeeId);
+  }
+  const preferredOffDaysByEmployee = (planningOptions.offWindowStructureBias ?? OFF_WINDOW_STRUCTURE_BIAS_ENABLED)
+    ? planPreferredOffWindows({
+        daysOrder,
+        weekStart,
+        employees,
+        demandByDay,
+        t1DemandByBucketByDay,
+        offDaysTarget: config.normal_weekly_off_days,
+        roles: STAGE6_DEFAULT_ROLES,
+        priorDayOffEmployeeIds,
+      })
+    : undefined;
+
   const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(
     daysOrder,
     weekStart,
@@ -378,7 +447,8 @@ export function generateDraftWeeklyPlan(
     demandByDay,
     config,
     priorWeekBoundaryContext,
-    t1DemandByBucketByDay
+    t1DemandByBucketByDay,
+    preferredOffDaysByEmployee
   );
 
   // HARD safety net (see enforceRestInvariantAcrossWeek's doc comment):
@@ -420,7 +490,8 @@ export function generateDraftWeeklyPlan(
     priorWeekBoundaryContext,
     config.minimum_rest_hours,
     weekStart,
-    t1PeakDemandMinuteByDay
+    t1PeakDemandMinuteByDay,
+    preferredOffDaysByEmployee
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
