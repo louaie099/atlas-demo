@@ -25,6 +25,33 @@
  * discrete duties happened to be split up; (5) other soft preferences
  * (continuity, shift duration — already handled elsewhere, e.g.
  * shift-generation.ts's own tie-break chain, untouched by this file).
+ *
+ * FATIGUE BURDEN — A SEPARATE DIMENSION (2026-09-24, fatigue milestone
+ * part 2). `fatigueWeight` below is NOT folded into workloadHoursWeight and
+ * the two are never summed into one number: the business asked for
+ * workload HOURS and fatigue BURDEN (circadian/early/night/late/transition
+ * pattern load — lib/planning/fatigue-model.ts) to stay distinct. Both are
+ * secondary sort keys WITHIN the "recommended" group only, combined in a
+ * fixed lexicographic order:
+ *
+ *   (4a) workload hours  — when workloadHoursWeight > 0: fewer scheduled
+ *        hours this window first;
+ *   (4b) fatigue burden  — when fatigueWeight > 0 AND the caller supplies
+ *        an ENABLED fatigue input: lower recent accumulated burden first
+ *        (an unknown history ranks as a neutral 0, never penalized);
+ *   then the input pool's own order (Array.prototype.sort is stable).
+ *
+ * Hours comes first deliberately: it is the dimension that already
+ * shipped, so switching fatigue on can only break ties hours leaves — it
+ * never reorders a pair the existing hours signal already distinguishes
+ * (a strictly additive rollout). With workloadHoursWeight at 0 (today's
+ * default), fatigue is the only secondary key. (Stage 6's own numeric
+ * hierarchy places fatigue ABOVE its hours-so-far tie-break — that tie-
+ * break is an internal load-spreading heuristic of shift generation, not
+ * this business-confirmed workload-fairness dimension; see
+ * lib/planning/stage6-score-tiers.ts.) Neither key ever excludes,
+ * downgrades or flags a candidate, and neither can move a "flagged"
+ * candidate relative to a "recommended" one.
  */
 export interface FairnessWeights {
   // 0 (the default) is a genuine no-op: scoreCandidates' sort is stable,
@@ -40,8 +67,19 @@ export interface FairnessWeights {
   // can be combined with it via relative magnitude without another
   // breaking config-shape change.
   workloadHoursWeight: number;
+  // FATIGUE BURDEN dimension (see the doc comment above) — 0 / absent (the
+  // default) is a genuine no-op. Optional so every persisted
+  // config_snapshot written before this field existed still parses and
+  // behaves exactly as before. A positive value turns on key (4b): lower
+  // recent fatigue burden first, within the recommended group, after the
+  // workload-hours key. As with workloadHoursWeight, only "> 0" carries
+  // meaning today; relative magnitudes are NOT used to reorder the keys.
+  // Requires the caller to pass scoreCandidates' `fatigue` input with an
+  // enabled config (FATIGUE_MODEL_ENABLED stays false by default).
+  fatigueWeight?: number;
 }
 
 export const DEFAULT_FAIRNESS_WEIGHTS: FairnessWeights = {
   workloadHoursWeight: 0,
+  fatigueWeight: 0,
 };

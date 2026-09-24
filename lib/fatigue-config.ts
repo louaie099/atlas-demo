@@ -3,13 +3,18 @@
  * planning milestone, part 1 — "Part B"). Consumed ONLY by
  * lib/planning/fatigue-model.ts and lib/planning/fatigue-continuity.ts.
  *
- * NOT WIRED INTO PLANNING YET. Nothing in Stage 6 (shift-generation.ts),
- * the Stage-6.5 top-up (roster-generation.ts) or Stage 9 (lib/scoring.ts)
- * reads this file today. Wiring is the next phase, and when it happens the
- * resulting score term must fit strictly inside FATIGUE_TIER_BUDGET
- * (lib/planning/stage6-score-tiers.ts, tier 4): below hard coverage, T1
- * coverage refinement AND consecutive OFF/OFF structure, above only the
- * lexicographic fairness tie-breaks.
+ * WIRED, BUT OFF BY DEFAULT (part 2, 2026-09-24). Stage 6 (tier 4 of
+ * lib/planning/stage6-score-tiers.ts, strictly inside FATIGUE_TIER_BUDGET:
+ * below hard coverage, T1 coverage refinement AND consecutive OFF/OFF
+ * structure, above only the lexicographic fairness tie-breaks), the
+ * Stage-6.5 top-up, the foreign-company roster and scoreCandidates'
+ * `fatigueWeight` dimension all consume the model — but ONLY through a
+ * FatigueConfig explicitly passed by the caller
+ * (lib/planning/fatigue-planning.ts). No planner module imports
+ * FATIGUE_MODEL_ENABLED / DEFAULT_FATIGUE_CONFIG to switch itself on, and
+ * FATIGUE_MODEL_ENABLED stays false: real plans are unaffected until a
+ * future phase consciously enables it (tests build their own enabled
+ * config, e.g. PROTOTYPE_FATIGUE_CONFIG).
  *
  * Follows lib/fairness-config.ts's convention deliberately:
  *   - centralized: every coefficient and threshold the model uses lives

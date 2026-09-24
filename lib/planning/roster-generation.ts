@@ -5,6 +5,31 @@ import { getShiftTimesAs, getShiftDurationHours, shiftCatalogForDate } from "../
 import { restHoursBetween } from "../roster-generation";
 import { flightDateFor } from "../flight-date";
 import { chooseBestCyclicWindowStart, cyclicWindowDays, preferredWindowStart } from "./off-window";
+import { FatigueConfig } from "../fatigue-config";
+import { unknownFatigueState, transitionBurdenForSpans, spanFromResolvedTimes } from "./fatigue-model";
+import { projectFatigueForShift, explainFatigueChoice, shiftSpanOnDate, LastWorkedShift, FatigueCandidateProjection } from "./fatigue-planning";
+import { fatigueScoreSteps } from "./stage6-score-tiers";
+
+/**
+ * FATIGUE OPTION for the Stage-6.5 top-up (2026-09-24, fatigue milestone
+ * part 2). When `config.enabled` is true, computeEmployeeDayCountTopUp
+ * orders a day's legal candidate codes by LOWER fatigue burden — this
+ * code's own burden on the day's REAL date (getShiftTimesAs) plus the
+ * transition cost from the employee's previous worked shift and into
+ * their next worked shift inside the window, quantized with
+ * stage6-score-tiers.ts's fatigueScoreSteps — placed strictly BELOW the
+ * existing preferences (T1-peak coverage, then the OFF/OFF-aware
+ * neighbour-feasibility preference): it only reorders codes those leave
+ * tied, and never adds, removes or legalizes a code. `reasonsOut`, when
+ * supplied, receives day -> explainFatigueFactors labels for each day this
+ * call adds (vs the code the ordering would have preferred without
+ * fatigue; [] when fatigue changed nothing). Omitted / disabled = exact
+ * prior behaviour.
+ */
+export interface TopUpFatigueOptions {
+  config: FatigueConfig;
+  reasonsOut?: Map<string, string[]>;
+}
 
 /**
  * STAGE: CONTINUOUS ROSTER GENERATION — sits BEFORE shift assignment
@@ -278,7 +303,10 @@ export function computeEmployeeDayCountTopUp(
   // equally-free consecutive block to reserve (see
   // chooseTopUpReservedOffDays); omitted = the original earliest-start
   // tie-break, byte-for-byte.
-  preferredOffWindowStart?: number
+  preferredOffWindowStart?: number,
+  // FATIGUE (2026-09-24, part 2) — see TopUpFatigueOptions. Optional;
+  // omitted or disabled reproduces the prior ordering byte-for-byte.
+  fatigue?: TopUpFatigueOptions
 ): Map<string, string> {
   const additional = new Map<string, string>(); // day -> shiftCode, this employee only
 
@@ -342,6 +370,46 @@ export function computeEmployeeDayCountTopUp(
 
   type CatalogCode = { code: string; entreeMin: number; sortieMin: number };
 
+  // FATIGUE ORDERING (see TopUpFatigueOptions). Inert unless enabled.
+  const fatigueActive = fatigue?.config.enabled === true;
+  /** The employee's nearest worked shift strictly before day `i` (inside the window, else the prior-week boundary shift). */
+  function lastWorkedBefore(i: number): LastWorkedShift | null {
+    for (let j = i - 1; j >= 0; j--) {
+      const code = getExistingShift(daysOrder[j])?.shiftCode ?? additional.get(daysOrder[j]);
+      if (code) return { span: shiftSpanOnDate(code, flightDateFor(weekStart, daysOrder[j])), date: flightDateFor(weekStart, daysOrder[j]) };
+    }
+    const boundary = priorWeekBoundaryContext.get(employeeId);
+    if (boundary) {
+      const firstDate = flightDateFor(weekStart, daysOrder[0]);
+      const d = new Date(`${firstDate}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - 1);
+      return { span: spanFromResolvedTimes(boundary.shift_start, boundary.shift_end), date: d.toISOString().slice(0, 10) };
+    }
+    return null;
+  }
+  function projectCode(i: number, code: string): FatigueCandidateProjection {
+    return projectFatigueForShift(employeeId, unknownFatigueState("Top-up code comparison (same employee, same base)."), lastWorkedBefore(i), code, flightDateFor(weekStart, daysOrder[i]), fatigue!.config);
+  }
+  /** Quantized burden of putting `code` on day `i`: own burden + transition in (projectCode) + transition out to the next worked day in the window. */
+  function topUpBurdenSteps(i: number, code: string): number {
+    const projection = projectCode(i, code);
+    let burden = projection.after.accumulatedBurden;
+    for (let k = i + 1; k < n; k++) {
+      const nextCode = getExistingShift(daysOrder[k])?.shiftCode ?? additional.get(daysOrder[k]);
+      if (!nextCode) continue;
+      burden += transitionBurdenForSpans(shiftSpanOnDate(code, flightDateFor(weekStart, daysOrder[i])), shiftSpanOnDate(nextCode, flightDateFor(weekStart, daysOrder[k])), k - i, fatigue!.config);
+      break;
+    }
+    return fatigueScoreSteps(burden);
+  }
+  /** Stable sort by fatigue steps ascending (original order breaks ties). */
+  function byFatigue(i: number, list: CatalogCode[]): CatalogCode[] {
+    return list
+      .map((c, k) => ({ c, k, steps: topUpBurdenSteps(i, c.code) }))
+      .sort((a, b) => a.steps - b.steps || a.k - b.k)
+      .map((x) => x.c);
+  }
+
   /**
    * Rest-legal codes for day `i`, in PREFERENCE order: the code the
    * original single-pick rule would choose comes first (neighbour-feasible,
@@ -349,7 +417,7 @@ export function computeEmployeeDayCountTopUp(
    * neighbour-feasible codes, then the remaining legal codes. Never
    * contains an illegal code.
    */
-  function orderedCandidates(i: number, allowReserved: boolean): CatalogCode[] {
+  function orderedCandidates(i: number, allowReserved: boolean, useFatigue: boolean = fatigueActive): CatalogCode[] {
     const day = daysOrder[i];
     const legalCandidates = legalCodesAt(i);
     if (legalCandidates.length === 0) return []; // no legally-rested shift available today — an honest gap
@@ -383,6 +451,21 @@ export function computeEmployeeDayCountTopUp(
     // order. `t1PeakDemandMinuteByDay` omitted/day missing/null -> exact
     // prior behavior (first catalog-order candidate).
     const peakMinute = t1PeakDemandMinuteByDay?.[day];
+    if (useFatigue) {
+      // Same structure as below, with each preference group re-ordered by
+      // lower fatigue burden (stable — ties keep shortest-first order). The
+      // T1-peak and neighbour-feasibility preferences still come first.
+      const preferredByFatigue = byFatigue(i, preferredCandidates);
+      const firstByFatigue =
+        peakMinute != null && preferredByFatigue.length > 1
+          ? preferredByFatigue.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? preferredByFatigue[0]
+          : preferredByFatigue[0];
+      return [
+        firstByFatigue,
+        ...preferredByFatigue.filter((c) => c !== firstByFatigue),
+        ...byFatigue(i, legalCandidates.filter((c) => !preferredCandidates.includes(c))),
+      ];
+    }
     const first =
       peakMinute != null && preferredCandidates.length > 1
         ? preferredCandidates.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? preferredCandidates[0]
@@ -493,6 +576,21 @@ export function computeEmployeeDayCountTopUp(
     }
   }
 
+  // FATIGUE EXPLAINABILITY: for each added day, the chosen code vs the
+  // code the SAME ordering would have put first without the fatigue key
+  // (re-evaluated against the final week). Same code -> fatigue did not
+  // change the choice -> [].
+  if (fatigueActive && fatigue!.reasonsOut) {
+    for (const [day, code] of additional) {
+      const i = daysOrder.indexOf(day);
+      const displaced = orderedCandidates(i, reservedOffDays.has(day), false)[0];
+      fatigue!.reasonsOut.set(
+        day,
+        displaced && displaced.code !== code ? explainFatigueChoice(projectCode(i, code), projectCode(i, displaced.code), fatigue!.config) : []
+      );
+    }
+  }
+
   return additional;
 }
 
@@ -532,7 +630,11 @@ export function generateObligationToppedUpShifts(
   // planPreferredOffWindows), the SAME map Stage 6 was biased with. Used
   // only as the reservation tie-break so both passes agree. Optional;
   // omitted reproduces the prior earliest-start behaviour exactly.
-  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>
+  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>,
+  // FATIGUE (2026-09-24, part 2) — see TopUpFatigueOptions. Optional;
+  // omitted or `enabled: false` reproduces the prior output byte-for-byte
+  // (no reordering, no fatigueReason key).
+  fatigueConfig?: FatigueConfig
 ): Record<string, GeneratedShiftAssignment[]> {
   const additional: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) additional[day] = [];
@@ -561,6 +663,7 @@ export function generateObligationToppedUpShifts(
 
     const getExistingShift = (day: string) => (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employee.id);
 
+    const fatigueReasons = fatigueConfig?.enabled ? new Map<string, string[]>() : undefined;
     const additions = computeEmployeeDayCountTopUp(
       employee.id,
       daysOrder,
@@ -574,11 +677,14 @@ export function generateObligationToppedUpShifts(
       config.normal_weekly_off_days,
       targetHoursThisWindow,
       t1PeakDemandMinuteByDay,
-      preferredWindowStart(daysOrder, preferredOffDaysByEmployee?.get(employee.id), config.normal_weekly_off_days)
+      preferredWindowStart(daysOrder, preferredOffDaysByEmployee?.get(employee.id), config.normal_weekly_off_days),
+      fatigueReasons ? { config: fatigueConfig!, reasonsOut: fatigueReasons } : undefined
     );
 
     for (const [day, shiftCode] of additions) {
-      additional[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] });
+      const g: GeneratedShiftAssignment = { employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] };
+      if (fatigueReasons) g.fatigueReason = fatigueReasons.get(day) ?? [];
+      additional[day].push(g);
     }
   }
 

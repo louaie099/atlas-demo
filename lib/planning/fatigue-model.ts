@@ -5,9 +5,11 @@ import { DEFAULT_FATIGUE_CONFIG, FatigueConfig } from "../fatigue-config";
  * CENTRALIZED FATIGUE-BURDEN MODEL CORE (2026-09-24, fatigue-aware roster
  * planning milestone, part 1 — "Part B").
  *
- * STATUS: ARCHITECTURE + PURE FUNCTIONS ONLY. Not consulted by Stage 6,
- * the Stage-6.5 top-up, or lib/scoring.ts yet — wiring is the next phase,
- * and must fit inside stage6-score-tiers.ts's FATIGUE_TIER_BUDGET.
+ * STATUS: PURE FUNCTIONS, consumed by the planner (part 2, 2026-09-24)
+ * only through lib/planning/fatigue-planning.ts and only with an
+ * explicitly-passed ENABLED config — Stage 6's tier 4 (inside
+ * stage6-score-tiers.ts's FATIGUE_TIER_BUDGET), the Stage-6.5 top-up, the
+ * foreign-company roster and lib/scoring.ts's fatigueWeight dimension.
  *
  * Vocabulary is deliberately operational, never medical: "burden",
  * "recent workload pattern", "recovery" (as in rest days). Nothing here

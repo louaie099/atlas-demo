@@ -1,5 +1,7 @@
 import { Employee, Config, CandidateResult } from "./types";
 import { isFixedPlanningTeam, isTransitTeam } from "./teams";
+import { CandidateFatigueInput, rankingBurden } from "./planning/fatigue-planning";
+import { explainFatigueFactors, unknownFatigueState } from "./planning/fatigue-model";
 
 export interface TimeWindow {
   start: string; // "HH:mm"
@@ -81,7 +83,17 @@ export function scoreCandidates(
   // exclude or downgrade anyone, and never consulted at all while the
   // weight is 0 (the default). Defaults to an empty map so every existing
   // caller/test keeps working unchanged.
-  hoursScheduledThisWindow: Map<string, number> = new Map()
+  hoursScheduledThisWindow: Map<string, number> = new Map(),
+  // FATIGUE BURDEN AS A SEPARATE SOFT DIMENSION (2026-09-24, fatigue
+  // milestone part 2 — see lib/fairness-config.ts's doc comment for where
+  // it sits relative to workloadHoursWeight). Each candidate's recent
+  // fatigue state + the config it came from. Consulted ONLY when
+  // config.fairness_weights.fatigueWeight > 0 AND `fatigue.config.enabled`
+  // — and then only to order candidates WITHIN the "recommended" group,
+  // after the workload-hours key. Never an exclusion: every hard gate
+  // above runs first and is untouched. Omitted (the default) = exact prior
+  // behaviour, no fatigueReason key.
+  fatigue?: CandidateFatigueInput
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e): e is RosteredEmployee => {
     if (!e.active) return false;
@@ -163,7 +175,9 @@ export function scoreCandidates(
     };
   });
 
-  return results.sort((a, b) => {
+  const fatigueActive = (config.fairness_weights.fatigueWeight ?? 0) > 0 && fatigue?.config.enabled === true;
+
+  const sorted = results.sort((a, b) => {
     if (a.status !== b.status) return a.status === "recommended" ? -1 : 1;
     // Hours-based fairness tie-break — soft objective #4 in the priority
     // chain (see fairness-config.ts). Gated behind a non-zero weight so
@@ -178,6 +192,26 @@ export function scoreCandidates(
       const hoursB = hoursScheduledThisWindow.get(b.employee.id) ?? 0;
       if (hoursA !== hoursB) return hoursA - hoursB; // fewer scheduled hours first
     }
+    // Fatigue-burden key (4b) — a SEPARATE dimension from hours above (see
+    // fairness-config.ts), only among recommended candidates (a flagged
+    // pair keeps its stable order), never an exclusion.
+    if (fatigueActive && a.status === "recommended") {
+      const burdenA = rankingBurden(fatigue!.statesByEmployee.get(a.employee.id));
+      const burdenB = rankingBurden(fatigue!.statesByEmployee.get(b.employee.id));
+      if (burdenA !== burdenB) return burdenA - burdenB; // lower recent burden first
+    }
     return 0;
   });
+
+  if (fatigueActive) {
+    // Explainability: each recommended candidate vs the next-ranked
+    // recommended one (labels only — never a raw number).
+    const recommended = sorted.filter((r) => r.status === "recommended");
+    const stateOf = (id: string) => fatigue!.statesByEmployee.get(id) ?? unknownFatigueState("No recent fatigue history supplied for this candidate.");
+    recommended.forEach((r, i) => {
+      const next = recommended[i + 1];
+      r.fatigueReason = explainFatigueFactors(stateOf(r.employee.id), { comparedWith: next ? stateOf(next.employee.id) : undefined, config: fatigue!.config });
+    });
+  }
+  return sorted;
 }

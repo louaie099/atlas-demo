@@ -1,4 +1,5 @@
 import { Employee, Flight, StaffingRequirement, Assignment, Config, WeeklyPlanRosterEntry } from "../types";
+import type { CandidateFatigueInput } from "./fatigue-planning";
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments, computeForeignCompanyProtectedWindow } from "../foreign-company-window";
@@ -261,7 +262,13 @@ export function generateDutiesForDay(
   // Defaults to empty so every existing caller/test keeps working
   // unchanged; only relevant while config.fairness_weights.workloadHoursWeight
   // is non-zero.
-  hoursScheduledThisWindow: Map<string, number> = new Map()
+  hoursScheduledThisWindow: Map<string, number> = new Map(),
+  // FATIGUE fairness input (2026-09-24, fatigue milestone part 2) —
+  // forwarded unchanged to scoreCandidates' `fatigue` parameter: each
+  // employee's fatigue state ENTERING this day. Optional; only consulted
+  // while config.fairness_weights.fatigueWeight > 0 and the input's config
+  // is enabled — omitted = exact prior behaviour.
+  fatigue?: CandidateFatigueInput
 ): { duties: GeneratedDuty[]; unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] } {
   const dayFlightIds = new Set(flights.filter((f) => f.day_of_week === dayOfWeek).map((f) => f.id));
   const dayRequirements = requirements
@@ -428,7 +435,7 @@ export function generateDutiesForDay(
         // decides eligibility/exclusion — the clustering fix alone only
         // orders processing; this is what closes the double-booking
         // regardless of which requirement in a cluster is resolved first.
-        const results = scoreCandidates(requirement.role, conflictWindows[idx], dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow);
+        const results = scoreCandidates(requirement.role, conflictWindows[idx], dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow, fatigue);
         const recommended = results.filter((r) => r.status === "recommended");
 
         if (

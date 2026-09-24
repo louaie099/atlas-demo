@@ -5,8 +5,10 @@ import { flightDateFor } from "../flight-date";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { restHoursBetween } from "../roster-generation";
 import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
-import { stage6CandidateScore } from "./stage6-score-tiers";
+import { stage6CandidateScore, fatigueScoreSteps } from "./stage6-score-tiers";
 import { Stage6OffWindowContext, startForcesPreviousDayOff, endForcesNextDayOff, countOffWindowStructureConflicts } from "./off-window";
+import { Stage6FatigueContext, FatigueCandidateProjection, projectFatigueForShift, explainFatigueChoice } from "./fatigue-planning";
+import { unknownFatigueState } from "./fatigue-model";
 
 /** An employee's effective shift on the immediately preceding day, or null if they were OFF/unrostered — undefined (not in the map) means "no prior-day data available" (e.g. the first day of the week), which is never treated as a rest violation. */
 export type PriorDayShiftMap = Map<string, { shift_start: string; shift_end: string } | null>;
@@ -16,6 +18,17 @@ export interface GeneratedShiftAssignment {
   dayOfWeek: string;
   shiftCode: string;
   coversRoles: string[]; // every role this employee's single shift ended up covering AT LEAST ONE bucket of, across the day (informational — Stage 9/scoring.ts independently re-derives the actual per-flight duty assignment from shift_start/shift_end + real requirement windows, it does not read this field)
+  /**
+   * FATIGUE EXPLAINABILITY (2026-09-24, part 2) — present ONLY when this
+   * assignment was decided with an ENABLED fatigue config (Stage 6's
+   * fatigueContext, the top-up's / foreign roster's fatigue option).
+   * Neutral, digit-free labels from explainFatigueFactors (never a raw
+   * score) describing why this (employee, code) was preferred over the
+   * option the planner would have chosen WITHOUT the fatigue signal; []
+   * when fatigue did not change the choice. Absent (not even the key) when fatigue is
+   * off, so default output is byte-identical to before.
+   */
+  fatigueReason?: string[];
 }
 
 function timeToMinutes(t: string): number {
@@ -221,6 +234,26 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * employee is still rostered on their preferred OFF day — a separated
  * result stays legal and is reported by validation.ts's non-blocking
  * `separated_off_days` issue, exactly as before.
+ *
+ * STAGE-6 FATIGUE TIER (2026-09-24, fatigue milestone part 2): the optional
+ * trailing `fatigueContext` (lib/planning/fatigue-planning.ts) wires tier 4
+ * of the same hierarchy. For each (employee, legal code) the RESULTING
+ * accumulated burden — the employee's state entering today plus this code's
+ * burden on today's REAL date (getShiftTimesAs, so both sides of
+ * 2026-09-20 resolve their own times) plus the transition from their last
+ * worked shift — is quantized into integer steps (fatigueScoreSteps) and
+ * subtracted at FATIGUE_SCORE_STEP (1e-9) each, total < FATIGUE_TIER_BUDGET
+ * (1e-5) < one structural conflict. So fatigue only ever reorders
+ * candidates tied on hard coverage, T1 refinement AND OFF/OFF structure:
+ * among those, the lower-resulting-burden pairing wins (the less-loaded
+ * employee for a given code; the less burdensome code for a given
+ * employee). Legality is still filtered before scoring and a covering
+ * candidate still always scores > 0, so fatigue can never create a gap,
+ * pick a non-covering candidate or relax 15h rest. Running state across
+ * days is the caller's FatigueLedger (generate-draft-plan.ts), advanced
+ * once per day — within a day an employee's state cannot change. When
+ * active, each assignment carries `fatigueReason` (explainFatigueFactors
+ * labels vs the pick fatigue displaced, [] when it changed nothing).
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
@@ -270,7 +303,14 @@ export function generateFlexiblePoolShifts(
   // each employee's preferred consecutive OFF window this week plus this
   // day's in-window calendar neighbours. Optional; omitted (or an employee
   // absent from the map) = no structural bias, exact prior behaviour.
-  offWindowContext?: Stage6OffWindowContext
+  offWindowContext?: Stage6OffWindowContext,
+  // STAGE-6 FATIGUE TIER (2026-09-24, fatigue milestone part 2 — tier 4 of
+  // stage6-score-tiers.ts) — each employee's fatigue state ENTERING this
+  // day plus their last worked shift (fatigue-planning.ts; the caller
+  // advances a FatigueLedger day by day). Optional; omitted, or a config
+  // with `enabled: false` (FATIGUE_MODEL_ENABLED's default), = no fatigue
+  // term and no fatigueReason, exact prior behaviour byte-for-byte.
+  fatigueContext?: Stage6FatigueContext
 ): GeneratedShiftAssignment[] {
   // Every ACTIVE flexible-pool employee is a candidate today — no more
   // "already off per static weekly_shifts" pre-filter. Availability is
@@ -305,8 +345,9 @@ export function generateFlexiblePoolShifts(
   // The T1 bias weight (T1_DEMAND_BIAS_WEIGHT = 0.001) and every other
   // score tier now live in ONE place — lib/planning/stage6-score-tiers.ts,
   // which documents and proves the full ordering (hard coverage > T1
-  // required-coverage refinement > OFF/OFF structure > [reserved: fatigue]
-  // > lexicographic fairness tie-breaks). See stage6CandidateScore below.
+  // required-coverage refinement > OFF/OFF structure > fatigue (tier 4,
+  // inert unless fatigueContext is enabled) > lexicographic fairness
+  // tie-breaks). See stage6CandidateScore below.
 
   // Every catalog shift code, precomputed once (non-overnight only — see
   // doc comment above).
@@ -381,6 +422,22 @@ export function generateFlexiblePoolShifts(
     if (legal.length > 0) legalCodesByEmployee.set(employee.id, legal);
   }
 
+  // Tier-4 fatigue projections, per (employee, legal code), computed ONCE:
+  // an employee receives at most one shift per day, so their state
+  // entering today cannot change inside this day's greedy loop (see
+  // fatigue-planning.ts's "RUNNING STATE" note). Only when enabled.
+  const fatigueActive = fatigueContext?.config.enabled === true;
+  const fatigueProjections = new Map<string, FatigueCandidateProjection>(); // key `${employeeId}|${code}`
+  if (fatigueActive) {
+    for (const [employeeId, legal] of legalCodesByEmployee) {
+      const before = fatigueContext!.statesEnteringDay.get(employeeId) ?? unknownFatigueState("No incoming fatigue state supplied for this employee.");
+      const lastWorked = fatigueContext!.lastWorkedShift?.get(employeeId);
+      for (const c of legal) {
+        fatigueProjections.set(`${employeeId}|${c.code}`, projectFatigueForShift(employeeId, before, lastWorked, c.code, date, fatigueContext!.config));
+      }
+    }
+  }
+
   const assignments = new Map<string, GeneratedShiftAssignment>();
   const assignedIds = new Set<string>();
 
@@ -393,7 +450,13 @@ export function generateFlexiblePoolShifts(
       score: number;
       bucketRoles: { bucket: number; role: string }[];
       t1Buckets: number[];
+      baseScore: number;
     } | null = null;
+    // Fatigue explainability only: the candidate this same loop WOULD have
+    // picked without the tier-4 term (tiers 1-3 + the unchanged tier-5
+    // tie-breaks). If it differs from `best`, fatigue displaced it and
+    // fatigueReason explains why. Only tracked while fatigue is active.
+    let bestWithoutFatigue: { employee: Employee; code: string; entreeMin: number; sortieMin: number; score: number } | null = null;
 
     for (const employee of availableToday) {
       if (assignedIds.has(employee.id)) continue;
@@ -474,11 +537,20 @@ export function generateFlexiblePoolShifts(
         // A non-covering candidate scores exactly 0 regardless of tier 3.
         const forced = forcedOffByCode.get(candidate.code);
         const structureConflicts = countOffWindowStructureConflicts(employee.id, dayOfWeek, forced?.prev ?? false, forced?.next ?? false, offWindowContext);
-        const score = stage6CandidateScore(hardScore, t1Buckets.length, structureConflicts);
+        // Tier 4 (fatigue): integer steps of this candidate's RESULTING
+        // accumulated burden (state entering today + this code on today's
+        // real date), bounded strictly inside FATIGUE_TIER_BUDGET — can only
+        // reorder candidates tied on tiers 1-3. 0 when inactive.
+        const fatigueSteps = fatigueActive ? fatigueScoreSteps(fatigueProjections.get(`${employee.id}|${candidate.code}`)!.after.accumulatedBurden) : 0;
+        const score = stage6CandidateScore(hardScore, t1Buckets.length, structureConflicts, fatigueSteps);
         if (score === 0) continue;
+        const baseScore = fatigueActive ? stage6CandidateScore(hardScore, t1Buckets.length, structureConflicts) : score;
+        if (fatigueActive && (!bestWithoutFatigue || isBetterCandidate(employee, candidate, baseScore, bestWithoutFatigue))) {
+          bestWithoutFatigue = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score: baseScore };
+        }
 
         if (!best || isBetterCandidate(employee, candidate, score, best)) {
-          best = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score, bucketRoles, t1Buckets };
+          best = { employee, code: candidate.code, entreeMin: candidate.entreeMin, sortieMin: candidate.sortieMin, score, bucketRoles, t1Buckets, baseScore };
         }
       }
     }
@@ -492,7 +564,7 @@ export function generateFlexiblePoolShifts(
       t1Remaining[bucket] = Math.max(0, (t1Remaining[bucket] ?? 0) - 1);
     }
     assignedIds.add(best.employee.id);
-    assignments.set(best.employee.id, {
+    const generated: GeneratedShiftAssignment = {
       employeeId: best.employee.id,
       dayOfWeek,
       shiftCode: best.code,
@@ -501,7 +573,22 @@ export function generateFlexiblePoolShifts(
       // "Check-in" here purely for visibility; Stage 9 independently
       // re-derives actual duties and never reads this field.
       coversRoles: Array.from(new Set([...best.bucketRoles.map((br) => br.role), ...(best.t1Buckets.length > 0 ? ["Check-in"] : [])])),
-    });
+    };
+    if (fatigueActive) {
+      // Explain against the pick fatigue displaced (necessarily tied with
+      // the winner on tiers 1-3 — fatigue cannot beat a higher tier). Same
+      // pick with or without fatigue -> fatigue did not decide -> [].
+      const displaced: { employee: Employee; code: string } | null = bestWithoutFatigue;
+      generated.fatigueReason =
+        displaced && (displaced.employee.id !== best.employee.id || displaced.code !== best.code)
+          ? explainFatigueChoice(
+              fatigueProjections.get(`${best.employee.id}|${best.code}`)!,
+              fatigueProjections.get(`${displaced.employee.id}|${displaced.code}`)!,
+              fatigueContext!.config
+            )
+          : [];
+    }
+    assignments.set(best.employee.id, generated);
   }
 
   function isBetterCandidate(

@@ -15,6 +15,31 @@ import { flightDateFor } from "../flight-date";
 import { CONFIGURED_COMPANIES } from "../company-config";
 import { CheckinZoneId, CHECKIN_ZONE_IDS } from "../checkin-zones";
 import { aggregateAllZonesDailyDemand, zoneDemandClusters, peakAggregateT1DemandMinuteForDay, aggregateT1DemandProfileForDay } from "./zone-demand-aggregation";
+import { FatigueConfig } from "../fatigue-config";
+import { FatigueStateOrUnknown } from "./fatigue-model";
+import { IncomingFatigueSeed } from "./fatigue-continuity";
+import { createFatigueLedger, advanceFatigueLedger, stage6FatigueContextFromLedger, CandidateFatigueInput } from "./fatigue-planning";
+
+/**
+ * FATIGUE PLANNING OPTION (2026-09-24, fatigue milestone part 2) — see
+ * generateDraftWeeklyPlan's `planningOptions.fatigue`. `config` must have
+ * `enabled: true` for anything to change (FATIGUE_MODEL_ENABLED, the global
+ * default, stays false). `incomingSeeds`: each employee's real incoming
+ * state (fatigue-continuity.ts's deriveIncomingFatigueState — "prior_plan",
+ * approximate "fallback_static_baseline", or "unknown"); an employee with
+ * no seed is treated as an explicit unknown, never a fabricated history.
+ */
+export interface DraftPlanFatigueOptions {
+  config: FatigueConfig;
+  incomingSeeds?: ReadonlyMap<string, IncomingFatigueSeed>;
+}
+
+/** The calendar day before `date` ("YYYY-MM-DD"). */
+function previousCalendarDate(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
 
 /** The pure, not-yet-persisted shape of one WeeklyPlanRosterEntry row (see lib/types.ts) -- `plan_id`/`id` are added by the persistence layer, never computed here. */
 export interface PlanRosterEntryDraft {
@@ -121,11 +146,31 @@ function runShiftGenerationPass(
   t1DemandByBucketByDay?: Record<string, number[]>,
   // OFF/OFF STRUCTURE BIAS (2026-09-24) — each flexible ACE's pre-planned
   // preferred OFF window (off-window.ts). Optional; omitted = no bias.
-  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>
+  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>,
+  // FATIGUE TIER (2026-09-24, part 2) — an ENABLED config plus each
+  // employee's incoming state. Optional; omitted = no fatigue term.
+  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> }
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const hoursSoFarThisWeek = new Map<string, number>();
   let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
+
+  // Running fatigue state for the flexible pool (fatigue-planning.ts's
+  // FatigueLedger): seeded from the incoming states, read as today's
+  // Stage6FatigueContext, advanced once per day with that day's Stage-6
+  // result (worked -> work day, not selected -> OFF/recovery day). Each
+  // pass starts its own fresh ledger, like hoursSoFarThisWeek. Reflects
+  // Stage-6 days only — top-up days are added after Stage 6 and are
+  // fatigue-ordered separately (roster-generation.ts).
+  const fatigueLedger = fatigue?.config.enabled
+    ? createFatigueLedger(
+        employees.filter(isFlexibleGeneralPool).map((e) => e.id),
+        fatigue.config,
+        fatigue.incomingStates,
+        priorWeekBoundaryContext,
+        previousCalendarDate(flightDateFor(weekStart, daysOrder[0]))
+      )
+    : null;
 
   // Tier-3 context per day: the preferred windows plus this day's in-window
   // neighbours, wrapping cyclically for a full 7-day window (the same
@@ -161,9 +206,11 @@ function runShiftGenerationPass(
       nextDayBaselineShift,
       hoursSoFarThisWeek,
       t1DemandByBucketByDay?.[day],
-      offWindowContextFor(dayIndex)
+      offWindowContextFor(dayIndex),
+      fatigueLedger ? stage6FatigueContextFromLedger(fatigueLedger) : undefined
     );
     generatedShiftsByDay[day] = generatedShifts;
+    if (fatigueLedger) advanceFatigueLedger(fatigueLedger, date, new Map(generatedShifts.map((g) => [g.employeeId, g.shiftCode])));
 
     for (const assignment of generatedShifts) {
       const hours = getShiftDurationHours(assignment.shiftCode, date);
@@ -226,7 +273,10 @@ function runTwoPassShiftGeneration(
   t1DemandByBucketByDay?: Record<string, number[]>,
   // OFF/OFF STRUCTURE BIAS — passed identically to both passes, like
   // t1DemandByBucketByDay above.
-  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>
+  preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>,
+  // FATIGUE TIER — passed identically to both passes (each pass seeds its
+  // own ledger from the same incoming states).
+  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> }
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
   const staticBaselineOnly = (nextDay: string): PriorDayShiftMap => {
     const map: PriorDayShiftMap = new Map();
@@ -252,7 +302,8 @@ function runTwoPassShiftGeneration(
     priorWeekBoundaryContext,
     (_dayIndex, nextDay) => staticBaselineOnly(nextDay),
     t1DemandByBucketByDay,
-    preferredOffDaysByEmployee
+    preferredOffDaysByEmployee,
+    fatigue
   );
 
   const pass2 = runShiftGenerationPass(
@@ -277,7 +328,8 @@ function runTwoPassShiftGeneration(
       return map;
     },
     t1DemandByBucketByDay,
-    preferredOffDaysByEmployee
+    preferredOffDaysByEmployee,
+    fatigue
   );
 
   return pass2;
@@ -382,9 +434,25 @@ export function generateDraftWeeklyPlan(
   // false reproduces the pre-2026-09-24 Stage 6 exactly (no preferred OFF
   // windows, no tier-3 term, earliest-start top-up reservation tie-break)
   // — used by tests to compare before/after on identical inputs.
-  planningOptions: { offWindowStructureBias?: boolean } = {}
+  //
+  // `fatigue` (2026-09-24, fatigue milestone part 2 — DraftPlanFatigueOptions
+  // above): when given an ENABLED config, wires the fatigue model into
+  // Stage 6 (tier 4), the Stage-6.5 top-up's code ordering, the foreign-
+  // company roster distribution, and Stage 9's scoreCandidates (only if
+  // config.fairness_weights.fatigueWeight > 0). Omitted (the default, and
+  // what every real caller passes today) or disabled = byte-identical
+  // output to before this phase. FATIGUE_MODEL_ENABLED stays false.
+  planningOptions: { offWindowStructureBias?: boolean; fatigue?: DraftPlanFatigueOptions } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
+
+  // FATIGUE (see planningOptions.fatigue above) — resolved once. An
+  // employee without a supplied seed maps to nothing here and is treated
+  // as an explicit unknown by every consumer (createFatigueLedger).
+  const fatigueConfig = planningOptions.fatigue?.config.enabled ? planningOptions.fatigue.config : undefined;
+  const fatigueIncomingStates = new Map<string, FatigueStateOrUnknown>();
+  for (const [employeeId, seed] of planningOptions.fatigue?.incomingSeeds ?? []) fatigueIncomingStates.set(employeeId, seed.state);
+  const stageFatigue = fatigueConfig ? { config: fatigueConfig, incomingStates: fatigueIncomingStates } : undefined;
 
   const demandByDay: Record<string, DailyDemand> = {};
   for (const day of daysOrder) {
@@ -448,7 +516,8 @@ export function generateDraftWeeklyPlan(
     config,
     priorWeekBoundaryContext,
     t1DemandByBucketByDay,
-    preferredOffDaysByEmployee
+    preferredOffDaysByEmployee,
+    stageFatigue
   );
 
   // HARD safety net (see enforceRestInvariantAcrossWeek's doc comment):
@@ -491,7 +560,8 @@ export function generateDraftWeeklyPlan(
     config.minimum_rest_hours,
     weekStart,
     t1PeakDemandMinuteByDay,
-    preferredOffDaysByEmployee
+    preferredOffDaysByEmployee,
+    fatigueConfig
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
@@ -529,7 +599,8 @@ export function generateDraftWeeklyPlan(
     // doc comment) — foreign-company employees now get the same
     // "5 WORK + 2 OFF" normal roster target as the flexible pool,
     // constrained (not replaced) by their company's real flight days.
-    config
+    config,
+    stageFatigue
   );
 
   // Every population whose day is decided by generation this run, merged
@@ -651,6 +722,34 @@ export function generateDraftWeeklyPlan(
     }
   }
 
+  // FATIGUE fairness input for Stage 9 (scoreCandidates' separate
+  // fatigueWeight dimension): every employee's state ENTERING each day,
+  // folded over the FINAL roster (generated populations from
+  // finalGeneratedShiftsByDay, static teams from their patched
+  // weekly_shifts). Only computed when fatigue is enabled; scoreCandidates
+  // still ignores it unless config.fairness_weights.fatigueWeight > 0.
+  const fatigueStatesEnteringDay: Record<string, ReadonlyMap<string, FatigueStateOrUnknown>> = {};
+  if (fatigueConfig) {
+    const ledger = createFatigueLedger(
+      employeesForPipeline.map((e) => e.id),
+      fatigueConfig,
+      fatigueIncomingStates,
+      priorWeekBoundaryContext,
+      previousCalendarDate(flightDateFor(weekStart, daysOrder[0]))
+    );
+    for (const day of daysOrder) {
+      fatigueStatesEnteringDay[day] = new Map(ledger.states);
+      const worked = new Map<string, string>();
+      for (const g of finalGeneratedShiftsByDay[day] ?? []) worked.set(g.employeeId, g.shiftCode);
+      for (const employee of employeesForPipeline) {
+        if (isGenerationDrivenPopulation(employee)) continue;
+        const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
+        if (entry?.status === "working" && entry.shift_code) worked.set(employee.id, entry.shift_code);
+      }
+      advanceFatigueLedger(ledger, flightDateFor(weekStart, day), worked);
+    }
+  }
+
   const dutiesByDay: Record<string, GeneratedDuty[]> = {};
   const allUnfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
@@ -665,7 +764,8 @@ export function generateDraftWeeklyPlan(
       config,
       flightDateFor(weekStart, day),
       restHoursByEmployeeDay,
-      hoursScheduledThisWindow
+      hoursScheduledThisWindow,
+      fatigueConfig ? ({ config: fatigueConfig, statesByEmployee: fatigueStatesEnteringDay[day] } satisfies CandidateFatigueInput) : undefined
     );
     dutiesByDay[day] = duties;
     allUnfilled.push(...unfilled);

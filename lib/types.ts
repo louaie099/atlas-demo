@@ -265,6 +265,15 @@ export interface CandidateResult {
   employee: Employee;
   status: CandidateStatus;
   reasoning: string;
+  /**
+   * FATIGUE EXPLAINABILITY (2026-09-24, fatigue milestone part 2) — present
+   * ONLY on "recommended" candidates when scoreCandidates ran with
+   * fairness_weights.fatigueWeight > 0 and an enabled fatigue input:
+   * neutral, digit-free labels (explainFatigueFactors) describing this
+   * candidate's recent burden vs the next-ranked recommended candidate.
+   * Absent otherwise, so default output is byte-identical to before.
+   */
+  fatigueReason?: string[];
 }
 
 export interface RosterRequirementView {

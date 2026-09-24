@@ -7,6 +7,22 @@ import { getShiftTimesAs, getShiftDurationHours, LEGACY_BASELINE_DATE } from "..
 import { flightDateFor } from "../flight-date";
 import { isShiftExtensionPreferred } from "../teams";
 import { computeEmployeeDayCountTopUp } from "./roster-generation";
+import { FatigueConfig } from "../fatigue-config";
+import { FatigueStateOrUnknown } from "./fatigue-model";
+import { createFatigueLedger, advanceFatigueLedger, projectFatigueForShift, explainFatigueChoice, FatigueCandidateProjection } from "./fatigue-planning";
+import { fatigueScoreSteps } from "./stage6-score-tiers";
+
+/**
+ * FATIGUE-AWARE FOREIGN-COMPANY DISTRIBUTION (2026-09-24, fatigue
+ * milestone part 2). Optional input to generateForeignCompanyShifts; inert
+ * unless `config.enabled` is true (FATIGUE_MODEL_ENABLED stays false).
+ * `incomingStates`: each employee's state entering the window
+ * (fatigue-continuity.ts); a missing employee is an explicit unknown.
+ */
+export interface ForeignFatigueOptions {
+  config: FatigueConfig;
+  incomingStates?: ReadonlyMap<string, FatigueStateOrUnknown>;
+}
 
 /**
  * FAIRNESS FIX (2026-09-21): `assignPoolToWindow`/`assignPoolToWindowWithRoles`
@@ -33,6 +49,13 @@ import { computeEmployeeDayCountTopUp } from "./roster-generation";
  * Applies uniformly to Profiling, Mesure, and every foreign-company team —
  * no per-team or per-airline special-casing.
  */
+/** The calendar day before `date` ("YYYY-MM-DD"). */
+function previousCalendarDate(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 function sortByLeastUsedFirst(pool: Employee[], usageHours: Map<string, number>): Employee[] {
   return [...pool].sort((a, b) => (usageHours.get(a.id) ?? 0) - (usageHours.get(b.id) ?? 0));
 }
@@ -302,6 +325,18 @@ export function generateProfilingMesureShifts(
  * why not): on a real flight day they're still anchored to the protected-
  * window-covering shift above; this top-up only ever fills a day company
  * demand left completely untouched.
+ *
+ * FATIGUE (2026-09-24, fatigue milestone part 2): with an ENABLED
+ * `fatigue` option, each flight day's team pool is ordered by the
+ * resulting fatigue burden of taking that day's commitment (lowest first;
+ * least-used hours second; original order third) before the unchanged
+ * assignPoolToWindowWithRoles walk — so a difficult (e.g. very early)
+ * commitment is distributed to the eligible, rest-legal member with the
+ * lowest recent burden. Required foreign-company coverage ALWAYS wins:
+ * the walk still tries every member until the confirmed headcount is met,
+ * so the reordering can never cause a shortfall and never delays or blocks
+ * an assignment. The team's top-up days get the same lower-burden code
+ * ordering as the flexible pool's (TopUpFatigueOptions).
  */
 export function generateForeignCompanyShifts(
   daysOrder: string[],
@@ -320,10 +355,15 @@ export function generateForeignCompanyShifts(
   // cares about the flight-driven roster keeps working byte-for-byte
   // unchanged (the top-up is a strict, additive no-op without a config to
   // read `normal_weekly_off_days` from).
-  config?: Pick<Config, "normal_weekly_off_days">
+  config?: Pick<Config, "normal_weekly_off_days">,
+  // FATIGUE-AWARE DISTRIBUTION (2026-09-24, part 2) — see
+  // ForeignFatigueOptions and the "FATIGUE" paragraph of this function's
+  // doc comment. Optional; omitted or disabled = exact prior behaviour.
+  fatigue?: ForeignFatigueOptions
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
+  const fatigueActive = fatigue?.config.enabled === true;
 
   for (const company of configuredCompanies) {
     const pool = employees.filter((e) => e.active && e.assignment === company);
@@ -337,15 +377,47 @@ export function generateForeignCompanyShifts(
     // `pool` (the bug that left Tarik Idrissi/Widad Idrissi permanently
     // OFF while Fadwa/Khalid/Marouane Idrissi took every Air France duty).
     const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
+    // Running fatigue state for this company's team (see fatigue-planning.ts's
+    // FatigueLedger), advanced once per day. Only when fatigue is enabled.
+    const ledger = fatigueActive
+      ? createFatigueLedger(
+          pool.map((e) => e.id),
+          fatigue!.config,
+          fatigue!.incomingStates,
+          priorWeekBoundaryContext,
+          previousCalendarDate(flightDateFor(weekStart, daysOrder[0]))
+        )
+      : null;
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
       const plan = planForeignCompanyDay(company, day, flights, undefined, undefined, undefined, date);
       let dayAssignments: { employeeId: string; shiftCode: string }[] = [];
+      const fatigueReasons = new Map<string, string[]>();
 
       if (plan && headcount !== undefined) {
+        // FATIGUE: when enabled, the pool is ordered by the RESULTING burden
+        // of taking today's commitment (state entering today + the
+        // commitment's covering code on today's real date + transition),
+        // quantized like Stage 6's tier 4, with least-used hours as the
+        // secondary key. This is ONLY an ordering of the same pool:
+        // assignPoolToWindowWithRoles still walks EVERY member until the
+        // headcount is met, so whether the protected window is covered is
+        // unchanged — fatigue can never cause, or hide, a shortfall.
+        let orderedPool = sortByLeastUsedFirst(pool, usageHours);
+        const projections = new Map<string, FatigueCandidateProjection>();
+        if (ledger && plan.shiftCode) {
+          for (const e of pool) {
+            projections.set(e.id, projectFatigueForShift(e.id, ledger.states.get(e.id)!, ledger.lastWorked.get(e.id), plan.shiftCode, date, ledger.config));
+          }
+          const steps = (id: string) => fatigueScoreSteps(projections.get(id)!.after.accumulatedBurden);
+          orderedPool = orderedPool
+            .map((e, k) => ({ e, k, s: steps(e.id) }))
+            .sort((a, b) => a.s - b.s || a.k - b.k)
+            .map((x) => x.e);
+        }
         const { assigned, shortfall } = assignPoolToWindowWithRoles(
-          sortByLeastUsedFirst(pool, usageHours),
+          orderedPool,
           plan.combinedWindow,
           headcount,
           roleConfig,
@@ -358,6 +430,25 @@ export function generateForeignCompanyShifts(
         if (shortfall > 0) {
           conflicts.push({ team: company, dayOfWeek: day, window: plan.combinedWindow, needed: headcount, covered: headcount - shortfall });
         }
+        if (ledger && plan.shiftCode) {
+          // Explainability: re-run the SAME (pure) walk with the pre-fatigue
+          // order to see whom fatigue displaced. Each member fatigue brought
+          // in is explained against a displaced member (in order); a member
+          // selected either way gets [] (fatigue did not change that pick).
+          const withoutFatigue = assignPoolToWindowWithRoles(
+            sortByLeastUsedFirst(pool, usageHours), plan.combinedWindow, headcount, roleConfig, priorDayShift, minimumRestHours, preferExtended, date
+          ).assigned.map((a) => a.employeeId);
+          const selectedIds = new Set(assigned.map((a) => a.employeeId));
+          const displaced = withoutFatigue.filter((id) => !selectedIds.has(id));
+          for (const a of assigned) {
+            if (withoutFatigue.includes(a.employeeId)) {
+              fatigueReasons.set(a.employeeId, []);
+              continue;
+            }
+            const other = displaced.shift();
+            fatigueReasons.set(a.employeeId, other ? explainFatigueChoice(projections.get(a.employeeId)!, projections.get(other)!, ledger.config) : []);
+          }
+        }
       }
       // No flight today (plan === null), or no confirmed headcount for
       // this company (shouldn't happen for a CONFIGURED company, but
@@ -369,9 +460,12 @@ export function generateForeignCompanyShifts(
 
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
       for (const a of dayAssignments) {
-        generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [company] });
+        const g: GeneratedShiftAssignment = { employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [company] };
+        if (ledger) g.fatigueReason = fatigueReasons.get(a.employeeId) ?? [];
+        generatedShiftsByDay[day].push(g);
         usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode, date));
       }
+      if (ledger) advanceFatigueLedger(ledger, date, new Map(dayAssignments.map((a) => [a.employeeId, a.shiftCode])));
 
       const nextPriorDayShift: PriorDayShiftMap = new Map();
       for (const employee of pool) {
@@ -397,6 +491,7 @@ export function generateForeignCompanyShifts(
           daysOrder.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === employee.id))
         );
         const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
+        const topUpReasons = fatigueActive ? new Map<string, string[]>() : undefined;
 
         const additions = computeEmployeeDayCountTopUp(
           employee.id,
@@ -409,12 +504,17 @@ export function generateForeignCompanyShifts(
           minimumRestHours,
           targetWorkingDaysThisWindow,
           config.normal_weekly_off_days,
-          null // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
+          null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
+          undefined,
+          undefined,
+          topUpReasons ? { config: fatigue!.config, reasonsOut: topUpReasons } : undefined
         );
 
         for (const [day, shiftCode] of additions) {
           if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
-          generatedShiftsByDay[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] });
+          const g: GeneratedShiftAssignment = { employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] };
+          if (topUpReasons) g.fatigueReason = topUpReasons.get(day) ?? [];
+          generatedShiftsByDay[day].push(g);
         }
       }
     }

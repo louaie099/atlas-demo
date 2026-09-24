@@ -25,7 +25,11 @@ import {
  * each prior-week day rather than re-reading roster rows or baselines on
  * its own).
  *
- * NOT WIRED INTO PLANNING YET (next phase). Pure and deterministic.
+ * Pure and deterministic. Part 2 (2026-09-24): generateDraftWeeklyPlan
+ * accepts these seeds via planningOptions.fatigue.incomingSeeds (an
+ * employee with no seed is treated as an explicit unknown). The
+ * persistence-layer caller (weekly-plan-service.ts) does not derive or
+ * pass them yet — FATIGUE_MODEL_ENABLED is still false.
  *
  * The three honest outcomes, each with a distinct shape:
  *   - { source: "prior_plan", state: FatigueState(provenance "prior_plan") }

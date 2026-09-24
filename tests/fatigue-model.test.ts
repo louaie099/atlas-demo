@@ -310,13 +310,35 @@ describe("transport burden — architecture only, inert by default, never availa
     }), "state");
   });
 
-  it("nothing in the planning pipeline consumes the fatigue model yet — so it cannot change availability, eligibility, rest or coverage in this phase", () => {
+  // Part 1 pinned "nothing in the planning pipeline imports the fatigue
+  // model yet". Part 2 (2026-09-24) wires it in on purpose, so that
+  // import-level guard is replaced by (1) this narrower guard — the model
+  // is consumed ONLY by the explicitly-gated decision points listed below,
+  // and the global default stays OFF — and (2) the behavioural guard in
+  // tests/stage6-fatigue-wiring.test.ts, which RUNS Stage 6, the top-up,
+  // the foreign roster, scoreCandidates and the full pipeline at the
+  // default and diffs them against fingerprints captured from the
+  // pre-wiring commit (byte-identical).
+  it("the fatigue model is consumed only by the explicitly-gated decision points, and stays OFF globally by default", () => {
+    expect(FATIGUE_MODEL_ENABLED).toBe(false);
+    expect(DEFAULT_FATIGUE_CONFIG.enabled).toBe(false);
     const planningDir = join(__dirname, "..", "lib", "planning");
     const importers = readdirSync(planningDir)
-      .filter((f) => f.endsWith(".ts") && f !== "fatigue-model.ts" && f !== "fatigue-continuity.ts")
-      .filter((f) => /from\s+["'][^"']*fatigue-(model|continuity|config)["']/.test(readFileSync(join(planningDir, f), "utf8")));
-    expect(importers).toEqual([]);
-    const scoring = readFileSync(join(__dirname, "..", "lib", "scoring.ts"), "utf8");
-    expect(scoring).not.toMatch(/fatigue/i);
+      .filter((f) => f.endsWith(".ts") && !["fatigue-model.ts", "fatigue-continuity.ts", "fatigue-planning.ts"].includes(f))
+      .filter((f) => /from\s+["'][^"']*fatigue-(model|continuity|config|planning)["']/.test(readFileSync(join(planningDir, f), "utf8")))
+      .sort();
+    expect(importers).toEqual([
+      "duty-generation.ts", // forwards scoreCandidates' optional fatigue input only
+      "generate-draft-plan.ts", // planningOptions.fatigue (omitted by every real caller)
+      "roster-generation.ts", // Stage-6.5 top-up: optional TopUpFatigueOptions
+      "shift-generation.ts", // Stage 6: optional fatigueContext (tier 4)
+      "specialized-team-generation.ts", // foreign roster: optional ForeignFatigueOptions
+    ]);
+    // Nothing imports the global switch or a ready-made config to turn
+    // itself on: every consumer is driven by an explicitly-passed config.
+    for (const f of [...importers, "fatigue-planning.ts"]) {
+      expect(readFileSync(join(planningDir, f), "utf8")).not.toMatch(/import[^;]*\b(FATIGUE_MODEL_ENABLED|DEFAULT_FATIGUE_CONFIG|PROTOTYPE_FATIGUE_CONFIG)\b/);
+    }
+    expect(readFileSync(join(__dirname, "..", "lib", "scoring.ts"), "utf8")).not.toMatch(/import[^;]*\b(FATIGUE_MODEL_ENABLED|DEFAULT_FATIGUE_CONFIG|PROTOTYPE_FATIGUE_CONFIG)\b/);
   });
 });
