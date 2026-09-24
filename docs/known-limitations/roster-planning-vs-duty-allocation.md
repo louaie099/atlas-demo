@@ -1157,3 +1157,161 @@ touched or regressed by this change.
   infer or apply any other operational change RAM's transition might
   carry (headcount, route, or policy changes outside the shift catalog)
   — none were described in the task's scope, and none are assumed here.
+
+## 2026-09-24 addendum: fatigue-aware roster planning, part 1 — OFF/OFF root-cause fix + fatigue model core (not yet wired)
+
+Two separate deliverables. Part A changes planning behaviour. Part B only
+adds architecture and tested pure functions. Nothing in Part B is
+consulted by the planner yet.
+
+### Part A — why separated OFF days kept appearing, and the fix
+
+**Root cause.** For a flexible ACE, "OFF" was purely a side effect. Stage 6
+(`generateFlexiblePoolShifts`) assigned shifts per 30-min bucket and knew
+nothing about anyone's weekly OFF/OFF block, so an employee was OFF on a
+day only because Stage 6 didn't happen to need them that day. The Stage-6.5
+top-up (`computeEmployeeDayCountTopUp` / `chooseTopUpReservedOffDays`) ran
+a correct, wraparound-aware sliding-window search, but it could only
+choose among the days Stage 6 had already left free. It could not
+un-scatter a pattern Stage 6 had produced. Diagnosis on seed data found a
+second, related cause: an early code (e.g. MT02) placed on a day that is
+not adjacent to the employee's OFF block silently forces the PREVIOUS day
+OFF, because no catalog code ends early enough for 15h rest before it.
+The top-up's myopic per-day code choice (and its post-hoc Sunday→Monday
+wrap drop) also left some ACEs with 3 OFF days.
+
+**Fix.**
+- `lib/planning/off-window.ts` — `planPreferredOffWindows` picks each
+  flexible ACE's preferred consecutive OFF window BEFORE Stage 6. The
+  heuristic is a prototype judgment call: deterministic demand-aware
+  water-filling. It estimates required headcount per day, starts with
+  `offCapacity = poolSize - required`, then walks ACEs in id order and gives
+  each the cyclic window (Sun–Mon wrap included) with the best remaining
+  capacity (highest minimum, then highest sum, ties to earliest). After each
+  choice it lowers that window's capacity. OFF blocks therefore land on
+  low-demand days and spread out. It skips windows that would extend a
+  KNOWN real prior-day OFF run across the week boundary. It uses only
+  `prior_plan` provenance, never the static fallback, whose `null` for the
+  flexible pool means "no data", not "OFF".
+  `chooseBestCyclicWindowStart` is the one shared cyclic window search, used
+  by both this planner and `chooseTopUpReservedOffDays`.
+- `lib/planning/stage6-score-tiers.ts` centralizes the Stage-6 score
+  hierarchy. Stage 6 subtracts a tier-3 penalty for each structural conflict
+  with the employee's window: today is inside the window, or the code
+  forces a neighbouring day OFF outside it.
+- In the Stage-6.5 top-up:
+  - Reservation now tie-breaks toward the pre-planned window.
+  - The rest lookahead also checks neighbours that the top-up itself
+    added, and it checks the same-week Sun↔Mon wrap when choosing a code
+    rather than dropping the day afterwards.
+  - Codes that keep a free neighbouring day fillable are preferred.
+  - A bounded backtracking pass fills the non-reserved days. Its first leaf
+    is exactly the old greedy walk, so the result is unchanged whenever
+    greedy already succeeded.
+
+  None of these changes relaxes a rule. The shared top-up core also serves
+  foreign-company employees, and four of them moved from 3 OFF days to the
+  5+2 target as a result.
+- `generateDraftWeeklyPlan` gains two optional parameters:
+  `priorWeekBoundaryProvenance` (`weekly-plan-service.ts` passes it) and
+  `planningOptions.offWindowStructureBias`, which is on by default and is
+  used for A/B tests.
+
+**Score hierarchy.** For each tier, the maximum total it can contribute for
+one candidate on one day is smaller than the smallest difference the tier
+above it can make:
+
+| Tier | Meaning | Constant | Max total |
+|---|---|---|---|
+| 0 | hard legality (rest, qualification, population) | filtered before scoring | — |
+| 1 | hard coverage per (bucket, role) | `HARD_COVERAGE_UNIT = 1` | — |
+| 2 | T1 aggregate Check-in refinement | `T1_DEMAND_BIAS_WEIGHT = 0.001` / bucket | 0.048 < 1 |
+| 3 | consecutive OFF/OFF structure | `OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT = 0.00003` / conflict, ≤ 3 | 0.00009 < 0.001 |
+| 4 | fatigue (RESERVED, not wired) | `FATIGUE_TIER_BUDGET = 0.00001` | < 0.00003 |
+| 5 | fairness / continuity / id | lexicographic tie-break only | — |
+
+The structure penalty is always smaller than the smallest positive coverage
+score (one T1 bucket). It can reorder candidates, but it can never push a
+covering candidate out of selection or create a gap.
+
+**Results on seed data** (120 flexible ACEs, `unfilled_duty` stays 0,
+`rest_violation` stays 0):
+
+| Week | `separated_off_days` | 5 WORK + 2 consecutive OFF | ACEs with ≥ 3 OFF days |
+|---|---|---|---|
+| 2026-08-31 (GMT+1) | 26 → 3 | 83 → 116 | 10 → 0 |
+| 2026-09-21 (GMT) | 12 → 2 | 71 → 117 | 36 → 0 |
+
+The earlier "12" in the GMT week was low only because 36 ACEs had 3 OFF
+days, which falls outside the separated check's scope. Rosters for the
+fixed-cycle teams (Transit, Leaders, Duty Officers), Profiling/Mesure and
+Caisse/BCB are byte-identical.
+
+**Still legal and still flagged.** Separation remains a legal fallback. When
+coverage or rest genuinely forces it (for example, the only qualified ACE
+is needed Mon/Wed/Fri/Sun), the result is separated and
+`checkSeparatedOffDays` still reports the non-blocking `separated_off_days`
+issue. This case is pinned in `tests/stage6-off-window-bias.test.ts`.
+
+**Remaining limits:**
+- The demand estimate ignores qualifications.
+- Cross-week continuity uses only the prior Sunday. It cannot tell a
+  Sat–Sun block from a Sun–Mon block, so a real prior-Sunday OFF simply
+  excludes Monday windows.
+- Stability from week to week comes from the deterministic ordering, not
+  from an explicit multi-week anchor.
+
+### Part B — fatigue model core (architecture only, NOT wired)
+
+- **`lib/fatigue-config.ts`** follows the conventions of `fairness-config.ts`:
+  - All weights and thresholds are centralized and each can be set to zero
+    on its own.
+  - The weights are explicitly synthetic and unconfirmed; they are not
+    scientific or RAM-validated values.
+  - `FATIGUE_MODEL_ENABLED = false`, so `DEFAULT_FATIGUE_CONFIG` is a true
+    no-op. `PROTOTYPE_FATIGUE_CONFIG` has the same weights with the model
+    enabled.
+- **`lib/planning/fatigue-model.ts`** contains pure functions:
+  - `computeShiftBurden`: duration plus early, night and late terms,
+    computed on real `getShiftTimesAs(code, date)` times.
+  - `computeTransitionBurden`: a bounded start-time-swing cost. It is never
+    a rest verdict.
+  - `accumulateFatigue`: difficult days compound in runs; OFF days give
+    geometric recovery with a bonus for consecutive OFF days and a per-day
+    cap of 0.75, so one OFF day never erases accumulated burden.
+  - `explainFatigueFactors`: neutral, digit-free labels.
+  - A named breakdown object for each day.
+
+  **Nothing in Stage 6, the top-up or `lib/scoring.ts` imports it yet.** A
+  test asserts this. When the next phase wires it in, it must fit inside
+  `FATIGUE_TIER_BUDGET`.
+- **Transport burden is intentionally inert.** `transportBurdenWeight = 0`.
+  `TRANSPORT_METADATA` was judged not reliable enough for a quantitative
+  number, for these reasons:
+  - It covers only 2 groupings and 5 of 13 codes.
+  - It has values for the GMT regime only.
+  - The `transportEquipeAF.sortie` row carries the "2027" date caveat.
+  - That same row (15:15) is earlier than JR02's own 16:45 sortie, which is
+    inconsistent.
+  - It records shuttle times, not commute time or availability.
+
+  The architecture is ready for a later phase: an optional `transportContext`
+  is threaded through the burden functions, and `lookupTransportContext`
+  returns `{known:false}` rather than guessing. Transport never feeds
+  eligibility, availability, rest or capacity.
+- **Incoming fatigue state** (`lib/planning/fatigue-continuity.ts`,
+  `deriveIncomingFatigueState`) calls rotation-context's own derivations for
+  each prior-week day, using `deriveTransitionContextFromPriorPlan` and the
+  new per-day `deriveFallbackContextForDay` (extracted from
+  `deriveFallbackBoundaryContext` with unchanged behaviour). It returns one
+  of three distinct shapes:
+  - **`prior_plan`**: a real persisted predecessor plan.
+  - **`fallback_static_baseline`**: marked `approximate: true`. It is used
+    only for employees whose static baseline is authoritative.
+  - **`unknown`**: returned when there is no context, when the employee is
+    absent from the predecessor plan, or when a demand-driven employee has
+    only a baseline. It never fabricates a history.
+
+Tests: 438 → 494. The new files are `tests/stage6-off-window-bias.test.ts`,
+`tests/fatigue-model.test.ts` and `tests/fatigue-continuity.test.ts`. No
+existing test was modified. `npm run build` is clean.
