@@ -1,6 +1,7 @@
 /**
  * STAGE-6 CANDIDATE SCORE — THE EPSILON-NESTED PRIORITY HIERARCHY
- * (2026-09-24, fatigue-aware roster planning milestone, part 1).
+ * (2026-09-24, fatigue-aware roster planning milestone, part 1; tier 4
+ * wired in part 2).
  *
  * Stage 6 (shift-generation.ts's generateFlexiblePoolShifts) is a greedy
  * set-cover: every iteration it picks the single (employee, legal shift
@@ -41,11 +42,30 @@
  *      pre-regime) placed on a Wednesday for someone whose window is
  *      Thu–Fri silently forces Tuesday OFF, since no code ends early enough
  *      for 15h rest before 04:30.
- *   4. FATIGUE BURDEN — NOT WIRED YET (next phase). Its whole per-
- *      candidate-per-day contribution is RESERVED to stay strictly below
- *      FATIGUE_TIER_BUDGET (see lib/fatigue-config.ts and
- *      lib/planning/fatigue-model.ts, which exist but are not consulted by
- *      Stage 6 today).
+ *   4. FATIGUE BURDEN — WIRED (2026-09-24, part 2), INERT BY DEFAULT.
+ *      Only active when Stage 6 is handed a Stage6FatigueContext whose
+ *      config is enabled (lib/planning/fatigue-planning.ts);
+ *      FATIGUE_MODEL_ENABLED (lib/fatigue-config.ts) stays false, so no
+ *      real plan uses it yet. Formula, per (employee, candidate code, day):
+ *
+ *        resultingBurden = accumulateFatigue(stateEnteringToday,
+ *                            dayBurden(code, realDate) + transition from
+ *                            the employee's last worked shift
+ *                          ).accumulatedBurden
+ *        fatigueSteps    = clamp(round(resultingBurden /
+ *                            FATIGUE_BURDEN_PER_STEP), 0, MAX_FATIGUE_SCORE_STEPS)
+ *        tier-4 term     = - fatigueSteps * FATIGUE_SCORE_STEP
+ *
+ *      i.e. one score step (1e-9) per 0.01 units of resulting accumulated
+ *      burden, saturating at 99.99 burden units (far above any realistic
+ *      one-week accumulation under the prototype weights). LOWER resulting
+ *      burden = smaller penalty = preferred. Because the resulting burden
+ *      includes the employee's accumulated state, this both prefers the
+ *      less-loaded EMPLOYEE for the same code (Agent B over Agent A) and
+ *      the less burdensome legal CODE for the same employee.
+ *      Integer steps (never a raw float) keep the same exact-comparison
+ *      discipline as tier 3: any two mathematically different scores still
+ *      differ by a representable amount (see "Floating point" below).
  *   5. FAIRNESS / OTHER SOFT PREFERENCES — not in the numeric score at
  *      all: shift-generation.ts's lexicographic isBetterCandidate tie-break
  *      chain (shortest duration, fewest hours so far, continuity, id) only
@@ -62,14 +82,20 @@
  *     OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT = 3 * 0.00003 = 0.00009
  *     < 0.001 = one T1 bucket.
  *   - Tier 4 budget = FATIGUE_TIER_BUDGET = 0.00001 < 0.00003 = one
- *     structural conflict (the smallest non-zero tier-3 difference). A
- *     future fatigue term must be scaled so its TOTAL per-candidate-per-
- *     day contribution stays in [0, FATIGUE_TIER_BUDGET).
+ *     structural conflict (the smallest non-zero tier-3 difference). The
+ *     wired fatigue term's TOTAL per-candidate-per-day contribution is
+ *     MAX_FATIGUE_SCORE_STEPS * FATIGUE_SCORE_STEP = 9999 * 1e-9
+ *     = 0.000009999 = FATIGUE_SCORE_MAX_TOTAL, inside [0, FATIGUE_TIER_BUDGET).
+ *   - Tiers 3+4 together (<= 0.00009 + 0.000009999) are still < 0.001 =
+ *     one T1 bucket, so a covering candidate's score stays > 0: fatigue
+ *     can never turn a covering candidate into a non-candidate.
  *
  * Consequences, each pinned by tests/stage6-off-window-bias.test.ts:
  *   - A candidate covering strictly more hard demand ALWAYS wins, however
- *     much T1 demand, OFF/OFF structure (or future fatigue) favours the
- *     other one.
+ *     much T1 demand, OFF/OFF structure or fatigue favours the other one.
+ *   - One fewer structural conflict ALWAYS wins over any fatigue
+ *     difference (tests/stage6-fatigue-wiring.test.ts pins the tier-4
+ *     half of these invariants).
  *   - Among equal hard coverage, one more T1 bucket ALWAYS wins over
  *     better OFF/OFF structure (required coverage > roster structure).
  *   - The full structure penalty (<= 0.00009) is smaller than the smallest positive
@@ -80,9 +106,13 @@
  *
  * Floating point: every score is computed by the same expression
  * (stage6CandidateScore below) from small non-negative integers, and any
- * two mathematically different scores differ by at least 1e-4 (well above
- * double rounding error at these magnitudes), so the strict `>` / `!==`
- * comparisons Stage 6 uses are exact in practice.
+ * two mathematically different scores differ by at least 1e-9 (one
+ * fatigue step; 1e-4-ish when the fatigue tier is inactive). Scores are
+ * bounded by ~48 (at most one hard unit per bucket), where a double's
+ * spacing is ~7e-15 — five orders of magnitude below 1e-9 — so the strict
+ * `>` / `!==` comparisons Stage 6 uses are exact in practice. With
+ * fatigueSteps = 0 (the default) the expression subtracts exactly 0 and
+ * the score is bit-identical to the pre-fatigue formula.
  */
 
 /** Stage 6's 30-min demand grid — 48 buckets per day. Mirrors shift-generation.ts/demand-aggregation.ts. */
@@ -115,11 +145,34 @@ export const MAX_OFF_WINDOW_STRUCTURE_CONFLICTS = 3;
 export const OFF_WINDOW_STRUCTURE_MAX_TOTAL = OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT * MAX_OFF_WINDOW_STRUCTURE_CONFLICTS;
 
 /**
- * Tier 4 — RESERVED budget for the next phase's fatigue term. Not used by
- * any code today. A fatigue contribution wired into Stage 6 must be
- * scaled into [0, FATIGUE_TIER_BUDGET) per candidate per day.
+ * Tier 4 — budget for the fatigue term. A fatigue contribution wired into
+ * Stage 6 must be scaled into [0, FATIGUE_TIER_BUDGET) per candidate per
+ * day; the constants below do exactly that.
  */
 export const FATIGUE_TIER_BUDGET = 0.00001;
+
+/** Tier 4 — score value of one fatigue step (see the hierarchy comment). */
+export const FATIGUE_SCORE_STEP = 1e-9;
+
+/** Tier 4 — resulting accumulated-burden units represented by one step. */
+export const FATIGUE_BURDEN_PER_STEP = 0.01;
+
+/** Tier 4 — steps are clamped to this, bounding the tier's total strictly below FATIGUE_TIER_BUDGET. */
+export const MAX_FATIGUE_SCORE_STEPS = 9999;
+
+/** Tier 4's maximum total contribution per candidate per day (0.000009999 < FATIGUE_TIER_BUDGET). */
+export const FATIGUE_SCORE_MAX_TOTAL = MAX_FATIGUE_SCORE_STEPS * FATIGUE_SCORE_STEP;
+
+/**
+ * Quantizes a candidate's RESULTING accumulated burden (fatigue-planning.ts's
+ * projectFatigueForShift(...).after.accumulatedBurden) into integer tier-4
+ * steps: round(burden / FATIGUE_BURDEN_PER_STEP), clamped to
+ * [0, MAX_FATIGUE_SCORE_STEPS]. Non-finite or non-positive input -> 0.
+ */
+export function fatigueScoreSteps(resultingBurden: number): number {
+  if (!Number.isFinite(resultingBurden) || resultingBurden <= 0) return 0;
+  return Math.min(MAX_FATIGUE_SCORE_STEPS, Math.round(resultingBurden / FATIGUE_BURDEN_PER_STEP));
+}
 
 /**
  * Master switch for Part A's OFF/OFF structural bias. When false,
@@ -135,15 +188,19 @@ export function stage6CoverageScore(hardBuckets: number, t1Buckets: number): num
 }
 
 /**
- * The full Stage-6 candidate score (tiers 1-3). Returns 0 when the
- * candidate covers nothing — the structure tier is never applied to a
- * non-covering candidate, so it can never turn "no coverage" into a
- * selectable (or negative) score. `structureConflicts` is clamped to
- * [0, MAX_OFF_WINDOW_STRUCTURE_CONFLICTS].
+ * The full Stage-6 candidate score (tiers 1-4). Returns 0 when the
+ * candidate covers nothing — neither the structure tier nor the fatigue
+ * tier is ever applied to a non-covering candidate, so they can never turn
+ * "no coverage" into a selectable (or negative) score.
+ * `structureConflicts` is clamped to [0, MAX_OFF_WINDOW_STRUCTURE_CONFLICTS];
+ * `fatigueSteps` (from fatigueScoreSteps; default 0 = fatigue tier
+ * inactive, bit-identical to the tiers 1-3 formula) is clamped to
+ * [0, MAX_FATIGUE_SCORE_STEPS].
  */
-export function stage6CandidateScore(hardBuckets: number, t1Buckets: number, structureConflicts: number): number {
+export function stage6CandidateScore(hardBuckets: number, t1Buckets: number, structureConflicts: number, fatigueSteps = 0): number {
   const coverage = stage6CoverageScore(hardBuckets, t1Buckets);
   if (coverage === 0) return 0;
   const conflicts = Math.max(0, Math.min(MAX_OFF_WINDOW_STRUCTURE_CONFLICTS, Math.floor(structureConflicts)));
-  return coverage - conflicts * OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT;
+  const steps = Number.isFinite(fatigueSteps) ? Math.max(0, Math.min(MAX_FATIGUE_SCORE_STEPS, Math.floor(fatigueSteps))) : 0;
+  return coverage - conflicts * OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT - steps * FATIGUE_SCORE_STEP;
 }
