@@ -118,15 +118,29 @@ export function deriveTransitionContextFromPriorPlan(
  */
 export function deriveFallbackBoundaryContext(employees: Employee[], daysOrder: string[], weekStart: string): PriorDayShiftMap {
   const lastDay = daysOrder[daysOrder.length - 1];
-  // The stand-in "day before this window" date: this window's own last
-  // day, one week earlier — matches this function's own doc comment
-  // (an employee's own baseline is assumed to continue from their most
-  // recent pattern) and resolves the regime effective on THAT date, not
-  // the upcoming window's.
-  const standInDate = flightDateFor(shiftWeek(weekStart, -1), lastDay);
+  return deriveFallbackContextForDay(employees, lastDay, weekStart);
+}
+
+/**
+ * The per-day core of deriveFallbackBoundaryContext, generalized
+ * (2026-09-24) so fatigue-continuity.ts can read the SAME static-baseline
+ * stand-in for every day of the previous week instead of re-implementing
+ * it: each employee's own baseline effective shift for `day`, resolved on
+ * that day's date one week before `weekStart` (the regime effective THEN,
+ * not the upcoming window's). Returns null for a generation-driven
+ * employee (no static baseline is authoritative for them) and for an OFF
+ * baseline day alike — see BoundaryContextProvenance on why a fallback
+ * null must not be read as "was really OFF".
+ */
+export function deriveFallbackContextForDay(employees: Employee[], day: string, weekStart: string): PriorDayShiftMap {
+  // The stand-in "previous week" date for this day label — matches
+  // deriveFallbackBoundaryContext's doc comment (an employee's own baseline
+  // is assumed to continue from their most recent pattern) and resolves the
+  // regime effective on THAT date, not the upcoming window's.
+  const standInDate = flightDateFor(shiftWeek(weekStart, -1), day);
   const map: PriorDayShiftMap = new Map();
   for (const employee of employees) {
-    map.set(employee.id, effectiveShiftForDay(employee, lastDay, [], standInDate));
+    map.set(employee.id, effectiveShiftForDay(employee, day, [], standInDate));
   }
   return map;
 }
