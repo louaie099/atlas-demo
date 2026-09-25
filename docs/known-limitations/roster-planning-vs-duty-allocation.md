@@ -1916,3 +1916,225 @@ generation on the seed week still takes well under a second.
   demand code might have left room for another day.
 
 **Phase 3** of the milestone is not part of this change.
+
+## 2026-09-25 addendum: specialized-team hard-cap lockstep fixed — cap-paced rest planning for Profiling/Mesure and foreign-company teams
+
+> **A production bug in phase 1/2, found on the real 2026-10-05 stress week
+> and fixed here.** The sections above are unchanged and kept as the
+> historical record. Where they describe a Gulf Air shortfall landing on a
+> single day ("Sunday stays BLOCKING, naming all 8 members"), that shape was
+> produced by this bug. The shortfall itself is real and structural; its
+> concentration on the last flight day was not.
+
+### The bug
+
+On the real 2026-10-05 stress week (154 flights, real seed workforce,
+default caps 42h / 5 days), **every one of the 24 Profiling and Mesure
+employees was OFF on both Saturday and Sunday**:
+
+| | Mon | Tue | Wed | Thu | Fri | Sat | Sun |
+|---|---|---|---|---|---|---|---|
+| Profiling+Mesure working (of 24) | 23 | 22 | 18 | 22 | 11 | **0** | **0** |
+
+With both caps set to 999, the same week shows 21-23 of 24 working on the
+weekend. So there was real demand on those days. Something about the
+caps at their real defaults removed all weekend coverage. 185 of the 207
+specialized-team hard-cap exclusions that week were on Saturday or Sunday.
+
+### Root cause
+
+`specialized-team-generation.ts`'s `sortByLeastUsedFirst` is the
+2026-09-21 fairness fix. It re-sorts a team by ascending hours-so-far every
+day, and the day's demand takes the first N legal members. It is used by
+both `generateProfilingMesureShifts` and `generateForeignCompanyShifts`.
+It works as designed: hours stay very evenly spread across the whole team,
+all week.
+
+Once a hard weekly-hours cap exists, that evenness becomes the problem.
+Every member's cumulative hours climb in near-lockstep:
+
+- by Thursday, all 24 were between 27h and 36h;
+- by Friday, between 36h and 40.5h, a band about one shift wide.
+
+So the whole team crosses the 42h cap on almost the same day. From then on
+nobody is left under the cap. That is not because demand is missing. It is
+because the fairness rule gave everyone the same hours trajectory, with no
+staggering.
+
+Two facts made this impossible to fix downstream:
+
+- **The phase-2 repair cannot catch it.** `hard-cap-repair.ts` hands a day
+  to one OFF, under-cap, eligible colleague. When the entire team is capped
+  at once, no such colleague exists.
+- **No ordering change alone can fix it.** That week Mesure needs 12
+  distinct people every day from a 12-person team, and Profiling about 11
+  of 12. Every ordering still assigns everyone Monday-Thursday. Under 42h
+  with 9h codes, each member fits 4 shifts, so the team can work about 48
+  person-days against 77-84 needed. When demand exceeds legal capacity,
+  somebody must **rest on a day that has demand**, so that capacity still
+  exists later in the week.
+
+The same defect existed for foreign-company teams. On the real 2026-09-07
+heavy week, Gulf Air (8 members, all 8 needed on each of 5 flight days)
+was fully crewed Mon/Wed/Fri/Sat and then had 0 of 8 on Sunday. The
+consecutive-work-day cap produced the same pattern: a 3-person Air France
+team working Mon-Fri, all forced OFF together on Saturday (0/3).
+
+### The fix — `lib/planning/cap-paced-rest.ts`
+
+Only for a team that is **genuinely capacity-constrained** under the hard
+caps:
+
+1. **Estimate each member's capacity** in work days this window. This is
+   the most demand days that fit under the hours cap (cheapest estimated
+   days first), and under the consecutive cap from the member's real
+   incoming streak. The day estimate is:
+   - Profiling/Mesure: the peak-weighted mean of each demand cluster's
+     top-ranked compatible code;
+   - foreign company: the top-ranked code for the protected window.
+2. **Decide whether to act.** The plan is active only when the team's total
+   capacity is below the week's demand in person-days (each day's need
+   capped at team size). Otherwise it is **inert and the output is
+   byte-identical** to before.
+3. **Spread the capacity over the days in proportion to demand.** Rounding
+   uses largest remainder. Ties are spread evenly across the tied days, not
+   handed to the earliest, and a sibling role sub-team's planned coverage
+   breaks ties, so ACE and Leader shortfalls do not stack on one day.
+4. **Give each member a deterministic, staggered set of preferred work
+   days**, day by day, most-constrained first:
+   - least slack (remaining demand days minus remaining capacity);
+   - then anyone whose planned OFF run has reached `max_consecutive_off_days`;
+   - then fewer planned hours;
+   - then team order.
+
+   Each placement lowers that member's remaining capacity, so the next day
+   favors others. That is what staggers who rests when.
+
+In the day loop:
+
+- Members on a preferred work day are offered work first, with the
+  2026-09-21 least-used ordering as the tie-break among them. For
+  Profiling/Mesure they are split across the day's clusters in proportion
+  to each cluster's peak (ties rotate with the day).
+- A member on a preferred rest day can be **drawn in** only when that cannot
+  cost one of their own later planned days (`planAllowsDrawIn`). This
+  absorbs estimate error and covers planned workers who turn out not to be
+  rest-legal.
+- Everyone else is held back to rest.
+
+The plan never decides eligibility. Every assignment still goes through the
+unchanged `selectCompatibleShiftCodes` filter: 15h rest, both hard caps,
+qualifications, and the Gulf Air ACE/Leader split.
+
+Other details:
+
+- Foreign-company teams get one plan per confirmed role sub-team.
+- The phase-2 repair still runs afterwards for a paced team with a
+  shortfall.
+- Stage 6 (`generateFlexiblePoolShifts`) and `off-window.ts` are not
+  touched.
+- `planningOptions.specializedCapPacing: false`, or
+  `SpecializedHardCaps.capPacing: false`, reproduces the pre-fix output.
+
+**Reporting.** A paced shortfall carries
+`DemandConflict.capPacing = { teamCapacityDays, weekDemandDays, heldBack }`.
+It is only attached when at least one member was actually held back that
+day. Its BLOCKING wording says what happened: the team's capacity under the
+caps against the week's demand, that the capacity was spread across the
+week, and who rested that day. It no longer claims that "no other team
+member was both rested…", which would be false for a paced day. Every other
+conflict keeps its exact prior wording.
+
+### Measured results (real fixtures, default caps, full pipeline)
+
+The exact repro from the bug report (2026-10-05 stress week, Profiling+Mesure
+working of 24):
+
+| | Mon | Tue | Wed | Thu | Fri | **Sat** | **Sun** | person-days |
+|---|---|---|---|---|---|---|---|---|
+| before | 23 | 22 | 18 | 22 | 11 | **0** | **0** | 96 |
+| after | 14 | 14 | 11 | 14 | 15 | **14** | **14** | 96 |
+
+The legal capacity is unchanged (96 person-days); it is no longer used up
+by Thursday. It is not the caps-off 21-23/24: the hard caps are real, and
+the week's demand is about 160 person-days. Wednesday is lower because
+Mesure has only two demand clusters that day.
+
+| Week | Configuration | Prof+Mesure per day | Spec. cap exclusions (Sat+Sun) | `unfilled_duty` | Specialized BLOCKING | Prof/Mesure `consecutive_off_violation` | Flexible repairs |
+|---|---|---|---|---|---|---|---|
+| 2026-10-05 stress | before | 23/22/18/22/11/0/0 | 207 (185) | 25 | 20 | 14 | 4 |
+| 2026-10-05 stress | after | 14/14/11/14/15/14/14 | 0 (0) | **12** | 45 | **0** | 0 |
+| 2026-09-28 full | before | 23/16/23/16/18/0/0 | 200 (194) | 19 | 19 | 7 | 4 |
+| 2026-09-28 full | after | 16/10/16/12/16/10/16 | 0 (0) | **10** | 38 | **0** | 0 |
+| 2026-09-07 heavy | before | 20/16/21/17/16/6/0 | 109 (105) | 14 | 14 | 7 | 1 |
+| 2026-09-07 heavy | after | 14/14/15/15/15/11/12 | 0 (0) | 18 | 29 | **0** | 0 |
+
+The 2026-09-21, 2026-09-28 (partial) and Gulf-Air-only weeks, and the
+2026-08-31 demo week, are not capacity-constrained. Their output is
+byte-identical with the fix on or off.
+
+Foreign companies:
+
+- **Heavy week, Gulf Air:** 8/8/8/8/**0** on its five flight days becomes
+  7/6/6/6/7, with the same 32 legal person-days.
+- **2026-09-21 week, Gulf Air:** 8/8/8/**0** becomes 6/6/6/6.
+
+Every Profiling/Mesure/foreign member stays within 42h, 5 consecutive days
+and 15h rest (tested on the whole stress week).
+
+### Tests
+
+- `tests/cap-paced-rest.test.ts` (18 tests): primitives; the bug at small
+  scale and on the real stress week, each asserting the pre-fix shape with
+  the fix off; constraint preservation (a plan-preferred but rest-illegal
+  member is still excluded, an incoming 5-day streak is still honored, the
+  Gulf Air leader slot is never filled by an ACE); determinism; the flexible
+  pool byte-identical; foreign companies, including the real heavy-week Gulf
+  Air; no-op when capacity suffices.
+- `tests/specialized-team-fairness.test.ts`: the 2026-09-21 fairness goal
+  still holds on the paced path. Air France gives 4/4/4/4/4 including
+  Tarik/Widad Idrissi, and a 12-of-12 team is spread within 1 day with
+  staggered rest. When capacity suffices, the output is identical to the
+  uncapped rotation.
+- `tests/hard-work-caps.test.ts`: 10 assertions that pinned the lockstep
+  shape itself were updated with inline justification. Examples are a whole
+  team OFF on the same day, and Gulf Air 8/8/8/0. The invariants they
+  protect are kept: never a 6th consecutive day, never over 42h, real
+  streak honored, honest BLOCKING, role split.
+
+### What it cannot do (known limitations, stated plainly)
+
+- **Spreading is a policy choice.** A paced week has more BLOCKING issues
+  (one per short cluster/day, e.g. 20 → 45 on the stress week), each
+  smaller. For Profiling/Mesure, partial coverage every day is clearly
+  better than none on the weekend. For foreign companies, it trades "full
+  crew on N-1 flights, none on one" for "short crew on every flight". The
+  second is judged better because no flight goes unhandled, but it is a
+  product decision, and `specializedCapPacing: false` restores the old
+  behavior.
+- **Total `unfilled_duty` can go up.** On the heavy week it went 14 → 18,
+  but the worst day went from 7 unfilled to 3. The plan spreads
+  *person-days* in proportion to cluster-level demand. It does not minimize
+  Stage-9 duty-level shortfall.
+- **The flexible-pool repair couples to it.** Stage 6 and its top-up are
+  byte-identical. But the phase-2 flexible repair only moves a flexible
+  employee off a day whose Profiling/Mesure demand the dedicated team
+  *fully* covers (`dedicatedRoleCovered`). A paced team is short a little
+  on most days, so those repairs no longer apply: 4 → 0 on the stress week.
+  This is correct, since moving them would lose real coverage, but it is a
+  visible downstream change.
+- **Capacity is an estimate.** It uses one representative code per day. A
+  member whose rest history forces longer codes can reach the hours cap
+  before their last planned day. The draw-in gate and the phase-2 repair
+  absorb part of that; the rest is reported honestly. A small late-week
+  shortfall can remain in such a week, far less severe than a whole-team
+  pileup.
+- **Activation is aggregate.** "Capacity < demand" is decided per team for
+  the whole week. A week with enough total capacity, where the greedy still
+  bunches some members at the cap on a particular day, is left to the
+  unchanged greedy and the phase-2 repair.
+- **Rest is not planned.** 15h legality is not modeled in the plan. A
+  planned worker who is not rest-legal is simply skipped, and a drawn-in
+  member covers only when their own plan has slack.
+- **No cross-week pacing.** The plan covers one displayed week. It uses the
+  incoming streak, but does not reserve capacity for the next week.
