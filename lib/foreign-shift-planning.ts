@@ -1,5 +1,23 @@
 import { Employee, Flight, StaffingRequirement } from "./types";
-import { shiftCatalogForDate, LEGACY_BASELINE_DATE } from "./shift-templates";
+import { shiftCatalogForDate, getShiftDurationHours, LEGACY_BASELINE_DATE } from "./shift-templates";
+import { wouldExceedConsecutiveDayCap, wouldExceedHardWeeklyHoursCap } from "./planning/hard-work-caps";
+
+/**
+ * HARD WORK CAPS for ONE specific employee (2026-09-25, hard-constraints
+ * milestone phase 1 — see lib/planning/hard-work-caps.ts), evaluated by
+ * selectCompatibleShiftCodes in the same filter step as its optional rest
+ * check: working today at all must not make this the
+ * (maxConsecutiveWorkDays + 1)th consecutive calendar work day, and a
+ * candidate code must not push the displayed week's hours past
+ * hardWeeklyHoursCap. Like the rest filter, only meaningful when ranking for
+ * one specific person.
+ */
+export interface EmployeeHardCapFilter {
+  consecutiveWorkDaysBeforeToday: number;
+  maxConsecutiveWorkDays: number;
+  hoursSoFarThisWeek: number;
+  hardWeeklyHoursCap: number;
+}
 import { computeForeignCompanyProtectedWindow } from "./foreign-company-window";
 import { restHoursBetween } from "./roster-generation";
 
@@ -135,7 +153,11 @@ export function selectCompatibleShiftCodes(
   preferExtended = false,
   // See selectCompatibleShiftCode's own doc comment on this parameter —
   // same default/rationale.
-  date: string = LEGACY_BASELINE_DATE
+  date: string = LEGACY_BASELINE_DATE,
+  // HARD WORK CAPS (2026-09-25, phase 1) — see EmployeeHardCapFilter.
+  // Optional; omitted = no cap filtering (every existing caller unchanged).
+  // Like the rest filter above, it only ever NARROWS the candidate pool.
+  hardCapFilter?: EmployeeHardCapFilter
 ): { code: string; entree: string; sortie: string }[] {
   const windowStartMin = timeToMinutes(windowStart);
   const windowEndMin = timeToMinutes(windowEnd);
@@ -156,6 +178,16 @@ export function selectCompatibleShiftCodes(
     candidates = candidates.filter(
       (c) => restHoursBetween(adjacentShiftStart, adjacentShiftEnd, minutesToTime(c.entreeMin)) >= minimumRestHours
     );
+  }
+
+  if (hardCapFilter) {
+    if (wouldExceedConsecutiveDayCap(hardCapFilter.consecutiveWorkDaysBeforeToday, true, hardCapFilter.maxConsecutiveWorkDays)) {
+      candidates = [];
+    } else {
+      candidates = candidates.filter(
+        (c) => !wouldExceedHardWeeklyHoursCap(hardCapFilter.hoursSoFarThisWeek, getShiftDurationHours(c.code, date), hardCapFilter.hardWeeklyHoursCap)
+      );
+    }
   }
 
   candidates.sort((a, b) => {

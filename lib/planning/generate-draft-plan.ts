@@ -6,7 +6,7 @@ import { planPreferredOffWindows, Stage6OffWindowContext } from "./off-window";
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict } from "./specialized-team-generation";
-import { generateObligationToppedUpShifts } from "./roster-generation";
+import { generateObligationToppedUpShifts, shortestFirstCatalogCodes } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
@@ -19,6 +19,8 @@ import { FatigueConfig } from "../fatigue-config";
 import { FatigueStateOrUnknown } from "./fatigue-model";
 import { IncomingFatigueSeed } from "./fatigue-continuity";
 import { createFatigueLedger, advanceFatigueLedger, stage6FatigueContextFromLedger, CandidateFatigueInput } from "./fatigue-planning";
+import { HardWorkCaps, HardCapExclusion, resolveHardWorkCaps, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
+import { IncomingConsecutiveWorkDaysSeed, incomingStreakForHardCap } from "./consecutive-days-continuity";
 
 /**
  * FATIGUE PLANNING OPTION (2026-09-24, fatigue milestone part 2) — see
@@ -113,6 +115,15 @@ export interface DraftWeeklyPlan {
   // persisted; kept here purely for transparency/reporting — an empty
   // array is the expected, normal case.
   restViolationsPrevented: DroppedShiftForRest[];
+  // HARD WORK CAPS transparency (2026-09-25, hard-constraints milestone
+  // phase 1 — see hard-work-caps.ts's HardCapExclusion): every employee-day
+  // a hard cap (max consecutive work days / hard weekly hours) removed from
+  // a generation gate's candidate set although a rest-legal code existed.
+  // NOT a gap list — genuine gaps are reported through `issues`
+  // (unfilled_duty) and `configurationIssues` (BLOCKING demand conflicts,
+  // top-up shortfall note). Stage 6 entries come from the final (second)
+  // pass only.
+  hardCapExclusions: HardCapExclusion[];
 }
 
 /**
@@ -149,11 +160,20 @@ function runShiftGenerationPass(
   preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>,
   // FATIGUE TIER (2026-09-24, part 2) — an ENABLED config plus each
   // employee's incoming state. Optional; omitted = no fatigue term.
-  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> }
-): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
+  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> },
+  // HARD WORK CAPS (2026-09-25, phase 1) — the caps plus each employee's
+  // incoming consecutive-work-day streak. Optional; omitted = no caps.
+  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number> }
+): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number>; hardCapExclusions: HardCapExclusion[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const hoursSoFarThisWeek = new Map<string, number>();
   let priorDayShift: PriorDayShiftMap = new Map(priorWeekBoundaryContext);
+  // Always-on consecutive-work-day streak per flexible employee (hard-work-
+  // caps.ts) — seeded from the incoming streak, advanced once per day right
+  // alongside hoursSoFarThisWeek/priorDayShift. Each pass starts fresh.
+  const streakEnteringDay = new Map<string, number>();
+  const hardCapExclusions: HardCapExclusion[] = [];
+  if (hardCaps) for (const e of employees.filter(isFlexibleGeneralPool)) streakEnteringDay.set(e.id, hardCaps.incomingStreakByEmployee.get(e.id) ?? 0);
 
   // Running fatigue state for the flexible pool (fatigue-planning.ts's
   // FatigueLedger): seeded from the incoming states, read as today's
@@ -207,9 +227,14 @@ function runShiftGenerationPass(
       hoursSoFarThisWeek,
       t1DemandByBucketByDay?.[day],
       offWindowContextFor(dayIndex),
-      fatigueLedger ? stage6FatigueContextFromLedger(fatigueLedger) : undefined
+      fatigueLedger ? stage6FatigueContextFromLedger(fatigueLedger) : undefined,
+      hardCaps ? { caps: hardCaps.caps, streakEnteringDay, exclusionsOut: hardCapExclusions } : undefined
     );
     generatedShiftsByDay[day] = generatedShifts;
+    if (hardCaps) {
+      const workedToday = new Set(generatedShifts.map((g) => g.employeeId));
+      for (const [id, streak] of streakEnteringDay) streakEnteringDay.set(id, nextConsecutiveWorkDayStreak(streak, workedToday.has(id)));
+    }
     if (fatigueLedger) advanceFatigueLedger(fatigueLedger, date, new Map(generatedShifts.map((g) => [g.employeeId, g.shiftCode])));
 
     for (const assignment of generatedShifts) {
@@ -224,7 +249,7 @@ function runShiftGenerationPass(
     priorDayShift = nextPriorDayShift;
   }
 
-  return { generatedShiftsByDay, hoursSoFarThisWeek };
+  return { generatedShiftsByDay, hoursSoFarThisWeek, hardCapExclusions };
 }
 
 /**
@@ -276,8 +301,11 @@ function runTwoPassShiftGeneration(
   preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>,
   // FATIGUE TIER — passed identically to both passes (each pass seeds its
   // own ledger from the same incoming states).
-  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> }
-): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number> } {
+  fatigue?: { config: FatigueConfig; incomingStates: ReadonlyMap<string, FatigueStateOrUnknown> },
+  // HARD WORK CAPS — passed identically to both passes (each pass keeps its
+  // own running streak, like hoursSoFarThisWeek).
+  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number> }
+): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; hoursSoFarThisWeek: Map<string, number>; hardCapExclusions: HardCapExclusion[] } {
   const staticBaselineOnly = (nextDay: string): PriorDayShiftMap => {
     const map: PriorDayShiftMap = new Map();
     const nextDate = flightDateFor(weekStart, nextDay);
@@ -303,7 +331,8 @@ function runTwoPassShiftGeneration(
     (_dayIndex, nextDay) => staticBaselineOnly(nextDay),
     t1DemandByBucketByDay,
     preferredOffDaysByEmployee,
-    fatigue
+    fatigue,
+    hardCaps
   );
 
   const pass2 = runShiftGenerationPass(
@@ -329,7 +358,8 @@ function runTwoPassShiftGeneration(
     },
     t1DemandByBucketByDay,
     preferredOffDaysByEmployee,
-    fatigue
+    fatigue,
+    hardCaps
   );
 
   return pass2;
@@ -442,9 +472,40 @@ export function generateDraftWeeklyPlan(
   // config.fairness_weights.fatigueWeight > 0). Omitted (the default, and
   // what every real caller passes today) or disabled = byte-identical
   // output to before this phase. FATIGUE_MODEL_ENABLED stays false.
-  planningOptions: { offWindowStructureBias?: boolean; fatigue?: DraftPlanFatigueOptions } = {}
+  //
+  // `incomingConsecutiveWorkDays` (2026-09-25, hard-constraints milestone
+  // phase 1): each employee's consecutive-work-day streak entering this
+  // window (consecutive-days-continuity.ts's
+  // deriveIncomingConsecutiveWorkDays — weekly-plan-service.ts derives it
+  // from the real predecessor plan when one exists). A generation-driven
+  // employee with no seed, or an "unknown" one, starts at 0 under the
+  // documented incomingStreakForHardCap policy AND the plan carries a
+  // visible, non-blocking `consecutive_work_history_unknown` note — never a
+  // silent assumption.
+  planningOptions: {
+    offWindowStructureBias?: boolean;
+    fatigue?: DraftPlanFatigueOptions;
+    incomingConsecutiveWorkDays?: ReadonlyMap<string, IncomingConsecutiveWorkDaysSeed>;
+  } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
+
+  // HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1 — see
+  // hard-work-caps.ts): resolved once and handed to EVERY generation-driven
+  // gate below (Stage 6, the top-up, Profiling/Mesure, foreign companies)
+  // as extra exclusion conditions in the same filter as the 15h rest rule.
+  // Fixed-cycle/static teams never pass through those gates (exempt).
+  const hardWorkCaps = resolveHardWorkCaps(config);
+  const incomingStreakByEmployee = new Map<string, number>();
+  const unknownStreakEmployeeIds: string[] = [];
+  for (const employee of employees) {
+    if (!isGenerationDrivenPopulation(employee)) continue;
+    const { streak, known } = incomingStreakForHardCap(planningOptions.incomingConsecutiveWorkDays?.get(employee.id));
+    incomingStreakByEmployee.set(employee.id, streak);
+    if (!known && employee.active) unknownStreakEmployeeIds.push(employee.id);
+  }
+  const hardCapExclusions: HardCapExclusion[] = [];
+  const stageHardCaps = { caps: hardWorkCaps, incomingStreakByEmployee };
 
   // FATIGUE (see planningOptions.fatigue above) — resolved once. An
   // employee without a supplied seed maps to nothing here and is treated
@@ -508,7 +569,7 @@ export function generateDraftWeeklyPlan(
       })
     : undefined;
 
-  const { generatedShiftsByDay: rawGeneratedShiftsByDay } = runTwoPassShiftGeneration(
+  const { generatedShiftsByDay: rawGeneratedShiftsByDay, hardCapExclusions: stage6CapExclusions } = runTwoPassShiftGeneration(
     daysOrder,
     weekStart,
     employees,
@@ -517,8 +578,10 @@ export function generateDraftWeeklyPlan(
     priorWeekBoundaryContext,
     t1DemandByBucketByDay,
     preferredOffDaysByEmployee,
-    stageFatigue
+    stageFatigue,
+    stageHardCaps
   );
+  hardCapExclusions.push(...stage6CapExclusions);
 
   // HARD safety net (see enforceRestInvariantAcrossWeek's doc comment):
   // re-walks the whole week's real Stage 6 outcome one more time and
@@ -561,7 +624,8 @@ export function generateDraftWeeklyPlan(
     weekStart,
     t1PeakDemandMinuteByDay,
     preferredOffDaysByEmployee,
-    fatigueConfig
+    fatigueConfig,
+    { ...stageHardCaps, exclusionsOut: hardCapExclusions }
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
@@ -585,7 +649,8 @@ export function generateDraftWeeklyPlan(
     demandByDay,
     config.minimum_rest_hours,
     weekStart,
-    priorWeekBoundaryContext
+    priorWeekBoundaryContext,
+    { ...stageHardCaps, exclusionsOut: hardCapExclusions }
   );
   const { generatedShiftsByDay: foreignShiftsByDay, conflicts: foreignDemandConflicts } = generateForeignCompanyShifts(
     daysOrder,
@@ -600,7 +665,8 @@ export function generateDraftWeeklyPlan(
     // "5 WORK + 2 OFF" normal roster target as the flexible pool,
     // constrained (not replaced) by their company's real flight days.
     config,
-    stageFatigue
+    stageFatigue,
+    { ...stageHardCaps, exclusionsOut: hardCapExclusions }
   );
 
   // Every population whose day is decided by generation this run, merged
@@ -865,10 +931,44 @@ export function generateDraftWeeklyPlan(
   // window," reported exactly as such rather than silently persisting a
   // rest-violating fallback (the previous foreign-company behavior this
   // milestone removes) or fabricating coverage from nowhere.
-  const demandConflictIssues: ConfigurationIssue[] = [...profilingMesureConflicts, ...foreignDemandConflicts].map((c) => ({
-    requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
-    description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
-  }));
+  // HARD WORK CAPS (2026-09-25, phase 1): when a hard cap excluded an
+  // otherwise rest-legal, compatible team member, the SAME BLOCKING issue
+  // says so explicitly (who, and which cap) — a conflict with no cap
+  // involvement keeps its original wording byte-for-byte.
+  const demandConflictIssues: ConfigurationIssue[] = [...profilingMesureConflicts, ...foreignDemandConflicts].map((c) => {
+    const capNote = c.capExcluded && c.capExcluded.length > 0
+      ? ` ${c.capExcluded.length} otherwise rested, compatible team member(s) were excluded by a HARD cap: ${c.capExcluded
+          .map((x) => `${employeesById.get(x.employeeId)?.name ?? x.employeeId} (${x.reason === "consecutive_work_days" ? `would be a ${hardWorkCaps.maxConsecutiveWorkDays + 1}th consecutive work day` : `would exceed the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap`})`)
+          .join(", ")}. A cross-employee reallocation pass that could free one of them is not implemented yet (hard-constraints milestone phase 2).`
+      : "";
+    return {
+      requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
+      description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window${capNote ? " within the hard work caps" : ""}. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment.${capNote} Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+    };
+  });
+
+  // HARD WORK CAPS — Stage-6.5 / foreign roster top-up shortfall. A top-up
+  // day is roster-shape capacity (the confirmed "5 WORK + 2 OFF" target),
+  // not flight demand, so no duty is left uncovered by it — but a cap
+  // keeping employees below that target is a real, structural finding,
+  // reported once per run (non-blocking) rather than hidden. When the
+  // hours cap cannot even fit the target's worth of the SHORTEST catalog
+  // code, that arithmetic conflict between two rules is stated explicitly.
+  const topUpCapShortfalls = hardCapExclusions.filter((x) => x.population === "flexible_pool_top_up" || x.population === "foreign_company_top_up");
+  const topUpShortfallEmployees = new Set(topUpCapShortfalls.map((x) => x.employeeId));
+  const hardCapTopUpIssues: ConfigurationIssue[] = [];
+  if (topUpShortfallEmployees.size > 0) {
+    const targetDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
+    const shortestHours = Math.min(...daysOrder.map((day) => Math.min(...shortestFirstCatalogCodes(flightDateFor(weekStart, day)).map((c) => getShiftDurationHours(c.code, flightDateFor(weekStart, day))))));
+    const structural = targetDays * shortestHours > hardWorkCaps.hardWeeklyHoursCap
+      ? ` Structural conflict: ${targetDays} work days x the shortest catalog code (${shortestHours}h) = ${targetDays * shortestHours}h already exceeds the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap, so NO generation-driven employee can reach the ${targetDays}-day target in this window while that cap stands.`
+      : "";
+    const byReason = (r: string) => new Set(topUpCapShortfalls.filter((x) => x.reason === r).map((x) => x.employeeId)).size;
+    hardCapTopUpIssues.push({
+      requirementId: "hard-cap-roster-top-up-shortfall",
+      description: `${topUpShortfallEmployees.size} employee(s) could not be topped up to the ${targetDays}-work-day normal roster target because a hard cap closed every remaining rest-legal day (${byReason("hard_weekly_hours")} by the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap, ${byReason("consecutive_work_days")} by the ${hardWorkCaps.maxConsecutiveWorkDays}-consecutive-work-day cap). No flight duty is left uncovered by this alone; those days stay OFF rather than breaking a hard rule.${structural}`,
+    });
+  }
 
   const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config, weekStart);
   const configurationIssues = [
@@ -886,7 +986,19 @@ export function generateDraftWeeklyPlan(
     ...auditStaticShiftRestFeasibility(employees, isGenerationDrivenPopulation, config, weekStart),
     ...specializedRestConflictIssues,
     ...demandConflictIssues,
+    ...hardCapTopUpIssues,
   ];
+
+  // HARD WORK CAPS — honest cross-week disclosure (see
+  // consecutive-days-continuity.ts's incomingStreakForHardCap policy): one
+  // visible, non-blocking plan note whenever any generation-driven
+  // employee's consecutive-work-day history before this week is unknown.
+  if (unknownStreakEmployeeIds.length > 0) {
+    issues.push({
+      type: "consecutive_work_history_unknown",
+      description: `Consecutive-work-day history before this week is unknown for ${unknownStreakEmployeeIds.length} generation-driven employee(s) (no persisted predecessor plan to read). The ${hardWorkCaps.maxConsecutiveWorkDays}-consecutive-work-day hard cap therefore counts their streak from 0 at the start of this week — a streak actually carried in from last week cannot be seen. Informational only; resolves automatically once the preceding week's plan exists.`,
+    });
+  }
 
   return {
     weekLabel,
@@ -900,5 +1012,6 @@ export function generateDraftWeeklyPlan(
     configurationIssues,
     generatedAt: new Date().toISOString(),
     restViolationsPrevented: [...flexibleRestDropped, ...specializedRestConflicts],
+    hardCapExclusions,
   };
 }

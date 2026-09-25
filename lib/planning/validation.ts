@@ -53,7 +53,15 @@ export type PlanIssueType =
   | "weekly_hours_violation"
   | "consecutive_off_violation"
   | "cross_week_continuity_uncertain"
-  | "separated_off_days";
+  | "separated_off_days"
+  // HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1): a
+  // NON-BLOCKING informational note — never a violation. Emitted once per
+  // plan by generate-draft-plan.ts when some generation-driven employee's
+  // consecutive-work-day history before this week is unknown (no
+  // predecessor plan), so the hard 5-consecutive-work-day cap had to start
+  // their count at 0 this week (see consecutive-days-continuity.ts's
+  // incomingStreakForHardCap for the policy and its tradeoff).
+  | "consecutive_work_history_unknown";
 
 export interface PlanIssue {
   type: PlanIssueType;

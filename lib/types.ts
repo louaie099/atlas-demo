@@ -396,6 +396,41 @@ export interface Config {
   // same LaborRuleSource "don't invent a coefficient" convention as
   // lib/labor-rules.ts, even though it isn't itself a LaborRules entry.
   fairness_weights: import("./fairness-config").FairnessWeights;
+  // HARD, SINGLE-DISPLAYED-WEEK HOURS CEILING (2026-09-25, hard-constraints
+  // milestone phase 1). The most hours a GENERATION-DRIVEN employee
+  // (flexible General T1 pool incl. its Stage-6.5 top-up, Profiling/Mesure,
+  // every foreign-company team) may be scheduled for across ONE displayed
+  // Monday-Sunday WeeklyPlan window (sum of getShiftDurationHours over that
+  // window's worked days). Enforced exactly like the 15h rest rule: as a
+  // pre-scoring eligibility FILTER at every generation gate
+  // (lib/planning/hard-work-caps.ts's wouldExceedHardWeeklyHoursCap) — a
+  // candidate shift that would push the week past this number is never
+  // scored, never assigned; a shortfall that results is reported honestly
+  // (unfilled_duty / BLOCKING DemandConflict), never filled illegally.
+  // Fixed-cycle teams (Transit/Leaders/Duty Officers, lib/fixed-cycle-
+  // rotation.ts) and other static teams are EXEMPT (never re-generated).
+  //
+  // DO NOT CONFLATE WITH maximum_average_weekly_working_hours ABOVE. That
+  // field is a confirmed AVERAGE over a still-unconfirmed multi-week
+  // reference period and is deliberately NOT a per-week ceiling: a hard
+  // Monday-Sunday 42h gate built on it used to exist in this pipeline and
+  // was REMOVED on purpose (see generate-draft-plan.ts's "IMPORTANT — no
+  // calendar-week 42h gate" doc comment; tests/labor-rule-invariants.test.ts
+  // keeps that distinction honest). This field is a SEPARATE, newly
+  // introduced management rule that happens to default to the same number
+  // (42) — the two must stay independently configurable: changing the
+  // average's number must never move this cap, and nothing may read the
+  // average as a per-week gate. Average-hours reporting
+  // (lib/planning/average-hours.ts) never reads this field.
+  hard_weekly_hours_cap: number;
+  // HARD CAP on CONSECUTIVE calendar work days for the same generation-
+  // driven populations (2026-09-25, hard-constraints milestone phase 1).
+  // An employee may never be assigned a work day that would make it their
+  // (max_consecutive_work_days + 1)th consecutive calendar work day,
+  // counted continuously across week boundaries from real predecessor-plan
+  // history (lib/planning/consecutive-days-continuity.ts). Same filter-gate
+  // mechanism and same exemption as hard_weekly_hours_cap above.
+  max_consecutive_work_days: number;
 }
 
 /**

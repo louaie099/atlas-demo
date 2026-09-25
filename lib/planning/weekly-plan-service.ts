@@ -16,6 +16,7 @@ import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
 import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
+import { deriveIncomingConsecutiveWorkDays, ConsecutiveDaysSeedInput } from "./consecutive-days-continuity";
 import { CheckinZoneId } from "../checkin-zones";
 
 /**
@@ -198,6 +199,14 @@ export interface BuildDraftPlanBundleInput {
   // comment): it is never correct to silently skip the Sunday->Monday
   // rest check just because no prior PLAN row happens to exist yet.
   priorWeekBoundaryContext?: PriorDayShiftMap;
+  // HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1): the
+  // immediately preceding persisted plan's FULL roster, when one exists
+  // (lookupPriorWeekBoundaryContext fetches it anyway), so each employee's
+  // real incoming consecutive-work-day streak can be counted
+  // (consecutive-days-continuity.ts). Omitted = no predecessor: the static
+  // fallback applies, which is "unknown" for every generation-driven
+  // employee and is disclosed on the plan as such.
+  priorPlanRosterEntries?: WeeklyPlanRosterEntry[];
 }
 
 /**
@@ -218,6 +227,12 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
   // supplied context is, per this input's own contract, a real persisted
   // predecessor plan's roster; otherwise it is the static fallback.
   const priorWeekBoundaryProvenance = input.priorWeekBoundaryContext ? "prior_plan" : "fallback_static_baseline";
+  // Incoming consecutive-work-day streaks for the hard cap — the same
+  // three-way provenance as the boundary context above.
+  const consecutiveSeedInput: ConsecutiveDaysSeedInput = input.priorPlanRosterEntries
+    ? { kind: "prior_plan", priorPlanRosterEntries: input.priorPlanRosterEntries, weekStart, daysOrder }
+    : { kind: "fallback_static_baseline", weekStart, daysOrder };
+  const incomingConsecutiveWorkDays = new Map(employees.map((e) => [e.id, deriveIncomingConsecutiveWorkDays(e, consecutiveSeedInput)]));
   const draft = generateDraftWeeklyPlan(
     flights,
     employees,
@@ -227,7 +242,8 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     weekLabel,
     weekStart,
     priorWeekBoundaryContext,
-    priorWeekBoundaryProvenance
+    priorWeekBoundaryProvenance,
+    { incomingConsecutiveWorkDays }
   );
 
   const plan: WeeklyPlan = {
@@ -569,7 +585,7 @@ export async function generateDraftPlan(
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
 
-  const priorWeekBoundaryContext = await lookupPriorWeekBoundaryContext(
+  const prior = await lookupPriorWeekBoundaryContext(
     supabase,
     weekStart,
     daysOrder,
@@ -587,7 +603,8 @@ export async function generateDraftPlan(
     employees: employees as Employee[],
     config,
     daysOrder,
-    priorWeekBoundaryContext,
+    priorWeekBoundaryContext: prior?.context,
+    priorPlanRosterEntries: prior?.priorRosterEntries,
   });
   await persistDraftPlanBundle(supabase, bundle);
 
@@ -607,14 +624,16 @@ export async function generateDraftPlan(
  * This deliberately only looks ONE week back -- exactly the "minimum
  * state that must persist between weeks" the audit asked for, not a full
  * historical rotation-anchor system. A plan more than one week old is
- * never consulted.
+ * never consulted. Also returns that plan's full roster rows (2026-09-25)
+ * so the hard consecutive-work-day cap can count each employee's real
+ * incoming streak (consecutive-days-continuity.ts).
  */
 async function lookupPriorWeekBoundaryContext(
   supabase: SupabaseClient,
   weekStart: string,
   daysOrder: string[],
   employees: Employee[]
-): Promise<PriorDayShiftMap | undefined> {
+): Promise<{ context: PriorDayShiftMap; priorRosterEntries: WeeklyPlanRosterEntry[] } | undefined> {
   const priorWeekId = planIdForWeek(previousWeekStart(weekStart));
   const { data: priorPlanRows, error: priorPlanErr } = await supabase
     .from("weekly_plans")
@@ -625,7 +644,7 @@ async function lookupPriorWeekBoundaryContext(
 
   const priorRosterEntries = await fetchAllRosterEntriesForPlan(supabase, priorWeekId);
   const priorLastDay = daysOrder[daysOrder.length - 1];
-  return deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay, previousWeekStart(weekStart));
+  return { context: deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay, previousWeekStart(weekStart)), priorRosterEntries };
 }
 
 /**
@@ -666,7 +685,7 @@ export async function regenerateDraftPlan(
   ]);
   if (flightsErr || empErr) throw new Error((flightsErr || empErr)!.message);
 
-  const priorWeekBoundaryContext = await lookupPriorWeekBoundaryContext(
+  const prior = await lookupPriorWeekBoundaryContext(
     supabase,
     existing.week_start,
     daysOrder,
@@ -707,7 +726,8 @@ export async function regenerateDraftPlan(
     employees: employees as Employee[],
     config,
     daysOrder,
-    priorWeekBoundaryContext,
+    priorWeekBoundaryContext: prior?.context,
+    priorPlanRosterEntries: prior?.priorRosterEntries,
   });
 
   const { error: updateErr } = await supabase

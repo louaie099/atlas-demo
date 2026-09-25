@@ -43,8 +43,21 @@ import { flightDateFor } from "../lib/flight-date";
 import { getShiftTimesAs } from "../lib/shift-templates";
 import { isFlexibleGeneralPool } from "../lib/planning/workforce-pools";
 import { CONFIGURED_COMPANIES, getCompanyRequiredAgents } from "../lib/company-config";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG as SEED_CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
 import { Employee, Flight } from "../lib/types";
+
+// HARD-CAPS FIXTURE ADJUSTMENT (2026-09-25, hard-constraints milestone
+// phase 1): this file's (e)/(f) checks compare full-pipeline output against
+// fingerprints/regime patterns recorded BEFORE the new hard caps existed,
+// to prove the fatigue wiring alone changes nothing at its default. With
+// the new defaults (5 consecutive work days, 42h hard weekly cap) the
+// pipeline intentionally changes (e.g. youssef-el-amrani's documented
+// 7-day/63h week is now capped), which says nothing about fatigue. Both
+// caps are pinned non-binding HERE ONLY so these tests keep isolating the
+// fatigue wiring; tests/hard-work-caps.test.ts proves the caps set this way
+// reproduce the pre-caps pipeline byte-for-byte, and tests the caps
+// themselves at their real defaults.
+const CONFIG = { ...SEED_CONFIG, hard_weekly_hours_cap: 999, max_consecutive_work_days: 999 };
 
 /**
  * Fatigue-aware roster planning milestone, PART 2 (2026-09-24): the
@@ -609,7 +622,18 @@ function fingerprints(mode: FingerprintMode): Record<string, string> {
       ? generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "W", ws, new Map(), "unknown", { fatigue: { config: DEFAULT_FATIGUE_CONFIG } })
       : generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "W", ws);
     void generatedAt;
-    out[`plan:${ws}`] = h(rest);
+    // HARD-CAPS ADJUSTMENT (2026-09-25): the pre-wiring fingerprint predates
+    // the hard-caps phase's two purely ADDITIVE draft outputs — the
+    // `hardCapExclusions` transparency list (always [] with the caps
+    // non-binding, see CONFIG above) and the informational
+    // `consecutive_work_history_unknown` plan note (emitted because these
+    // calls pass no incoming streak seeds). Both are stripped so the hash
+    // still covers every pre-existing field byte-for-byte.
+    // (Overwriting `issues` in a spread keeps its original key position, so
+    // the JSON — and the hash — of every pre-existing field is unchanged.)
+    const { hardCapExclusions, ...pre } = rest;
+    expect(hardCapExclusions).toEqual([]);
+    out[`plan:${ws}`] = h({ ...pre, issues: pre.issues.filter((i) => i.type !== "consecutive_work_history_unknown") });
     const reqs = computeWeeklyStaffingRequirements(FLIGHTS, CONFIG);
     const day = DAYS_WITH_DATA[0];
     const demand = aggregateDailyDemand(day, FLIGHTS, reqs, CONFIG.checkin_demand_policy);

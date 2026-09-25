@@ -12,6 +12,7 @@ import { flightDateFor, weekLabelFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 import { DEFAULT_ZONE_CHECKIN_DEMAND_POLICY } from "./planning/checkin-zone-demand";
 import { DEFAULT_FAIRNESS_WEIGHTS } from "./fairness-config";
+import { DEFAULT_HARD_WEEKLY_HOURS_CAP, DEFAULT_MAX_CONSECUTIVE_WORK_DAYS } from "./planning/hard-work-caps";
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
 // from lib/labor-rules.ts, not hand-picked here — 15h rest is confirmed
@@ -39,6 +40,14 @@ export const CONFIG: Config = {
   normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
   max_consecutive_off_days: DEFAULT_RULES.maxConsecutiveOffDays,
   renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,
+  // HARD caps (2026-09-25, hard-constraints milestone phase 1) — see
+  // lib/types.ts's Config doc comments and lib/planning/hard-work-caps.ts.
+  // hard_weekly_hours_cap deliberately uses its OWN constant (42), NOT
+  // DEFAULT_RULES.maximumAverageWeeklyWorkingHours: same number today, but a
+  // structurally separate single-displayed-week hard rule, never derived from
+  // (or allowed to drift with) the confirmed 42h AVERAGE.
+  hard_weekly_hours_cap: DEFAULT_HARD_WEEKLY_HOURS_CAP,
+  max_consecutive_work_days: DEFAULT_MAX_CONSECUTIVE_WORK_DAYS,
 };
 
 // Multi-week Flight Program: many weeks can now have real, distinct data

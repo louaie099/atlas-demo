@@ -25,8 +25,21 @@ import { checkSeparatedOffDays } from "../lib/planning/validation";
 import { maxConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
 import { isFlexibleGeneralPool } from "../lib/planning/workforce-pools";
 import { usesFixedCycleRotation } from "../lib/teams";
-import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
+import { EMPLOYEES, FLIGHTS, CONFIG as SEED_CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement } from "../lib/types";
+
+// HARD-CAPS FIXTURE ADJUSTMENT (2026-09-25, hard-constraints milestone
+// phase 1): these tests pin the OFF/OFF structure mechanism under the
+// confirmed "5 WORK + 2 OFF" target. The new hard_weekly_hours_cap
+// defaults to 42h, and 5 x the shortest catalog code (NR01, 8.75h/9h) =
+// 43.75h/45h > 42h — so with the default cap a 5-work-day week is
+// arithmetically impossible for ANY generation-driven employee and these
+// tests could no longer observe the mechanism they exist for. The hours cap
+// is pinned non-binding HERE ONLY; the 5-consecutive-work-day cap stays at
+// its real default (compatible with 5 WORK + 2 OFF). The caps' own
+// behaviour, and their interaction with this target (reported as a
+// structural finding), is tested in tests/hard-work-caps.test.ts.
+const CONFIG = { ...SEED_CONFIG, hard_weekly_hours_cap: 999 };
 
 /**
  * OFF/OFF milestone part A (2026-09-24): Stage 6 used to have zero

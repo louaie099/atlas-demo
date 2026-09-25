@@ -1,6 +1,6 @@
 import { Employee } from "../types";
 import { DailyDemand } from "./demand-aggregation";
-import { getShiftTimesAs, shiftCatalogForDate } from "../shift-templates";
+import { getShiftTimesAs, shiftCatalogForDate, getShiftDurationHours } from "../shift-templates";
 import { flightDateFor } from "../flight-date";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { restHoursBetween } from "../roster-generation";
@@ -9,6 +9,24 @@ import { stage6CandidateScore, fatigueScoreSteps } from "./stage6-score-tiers";
 import { Stage6OffWindowContext, startForcesPreviousDayOff, endForcesNextDayOff, countOffWindowStructureConflicts } from "./off-window";
 import { Stage6FatigueContext, FatigueCandidateProjection, projectFatigueForShift, explainFatigueChoice } from "./fatigue-planning";
 import { unknownFatigueState } from "./fatigue-model";
+import { HardWorkCaps, HardCapExclusion, wouldExceedConsecutiveDayCap, wouldExceedHardWeeklyHoursCap } from "./hard-work-caps";
+
+/**
+ * HARD WORK CAPS for one Stage-6 day (2026-09-25, hard-constraints
+ * milestone phase 1 — see hard-work-caps.ts). `streakEnteringDay` is each
+ * employee's always-on consecutive-work-day streak ENTERING this day (the
+ * caller advances it day by day with nextConsecutiveWorkDayStreak, seeded
+ * from consecutive-days-continuity.ts); a missing employee reads as 0. The
+ * weekly hours side reuses this function's own `hoursSoFarThisWeek`
+ * parameter (its soft tie-break role is unchanged). `exclusionsOut`, when
+ * given, receives every employee a cap removed from today's candidate set
+ * despite having a rest-legal code.
+ */
+export interface FlexiblePoolHardCaps {
+  caps: HardWorkCaps;
+  streakEnteringDay: ReadonlyMap<string, number>;
+  exclusionsOut?: HardCapExclusion[];
+}
 
 /** An employee's effective shift on the immediately preceding day, or null if they were OFF/unrostered — undefined (not in the map) means "no prior-day data available" (e.g. the first day of the week), which is never treated as a rest violation. */
 export type PriorDayShiftMap = Map<string, { shift_start: string; shift_end: string } | null>;
@@ -254,6 +272,18 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * once per day — within a day an employee's state cannot change. When
  * active, each assignment carries `fatigueReason` (explainFatigueFactors
  * labels vs the pick fatigue displaced, [] when it changed nothing).
+ *
+ * HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1 — see
+ * hard-work-caps.ts): the optional trailing `hardCaps` adds two exclusion
+ * conditions to the per-employee legality filter (legalCodesByEmployee),
+ * right next to the 15h rest check: an employee whose streak entering today
+ * already equals max_consecutive_work_days gets no legal code at all today,
+ * and any code that would push hoursSoFarThisWeek past
+ * hard_weekly_hours_cap is dropped like a rest-illegal one. Excluded
+ * candidates are never scored. If that leaves demand uncovered, it stays
+ * uncovered and surfaces through Stage 9's ordinary `unfilled_duty` — the
+ * same honest-gap path a rest-driven shortfall already takes. No
+ * cross-employee reallocation is attempted (phase 2).
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
@@ -310,7 +340,13 @@ export function generateFlexiblePoolShifts(
   // advances a FatigueLedger day by day). Optional; omitted, or a config
   // with `enabled: false` (FATIGUE_MODEL_ENABLED's default), = no fatigue
   // term and no fatigueReason, exact prior behaviour byte-for-byte.
-  fatigueContext?: Stage6FatigueContext
+  fatigueContext?: Stage6FatigueContext,
+  // HARD WORK CAPS (2026-09-25, phase 1) — see FlexiblePoolHardCaps. Two
+  // extra exclusion conditions evaluated in the SAME legality filter as the
+  // 15h rest rule below (legalCodesByEmployee), never a separate pass.
+  // Omitted = no cap filtering (direct unit callers); the real pipeline
+  // (generate-draft-plan.ts) always supplies it.
+  hardCaps?: FlexiblePoolHardCaps
 ): GeneratedShiftAssignment[] {
   // Every ACTIVE flexible-pool employee is a candidate today — no more
   // "already off per static weekly_shifts" pre-filter. Availability is
@@ -419,7 +455,22 @@ export function generateFlexiblePoolShifts(
       }
       return true;
     });
-    if (legal.length > 0) legalCodesByEmployee.set(employee.id, legal);
+    // HARD WORK CAPS — additional exclusion conditions at this SAME gate
+    // (see FlexiblePoolHardCaps): a 6th consecutive work day removes the
+    // employee outright; a code that would push this displayed week past
+    // the hard hours cap is removed like a rest-illegal one. Never scored.
+    let capped = legal;
+    if (hardCaps && legal.length > 0) {
+      if (wouldExceedConsecutiveDayCap(hardCaps.streakEnteringDay.get(employee.id) ?? 0, true, hardCaps.caps.maxConsecutiveWorkDays)) {
+        capped = [];
+        hardCaps.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek, population: "flexible_pool", reason: "consecutive_work_days" });
+      } else {
+        const hoursSoFar = hoursSoFarThisWeek.get(employee.id) ?? 0;
+        capped = legal.filter((c) => !wouldExceedHardWeeklyHoursCap(hoursSoFar, getShiftDurationHours(c.code, date), hardCaps.caps.hardWeeklyHoursCap));
+        if (capped.length === 0) hardCaps.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek, population: "flexible_pool", reason: "hard_weekly_hours" });
+      }
+    }
+    if (capped.length > 0) legalCodesByEmployee.set(employee.id, capped);
   }
 
   // Tier-4 fatigue projections, per (employee, legal code), computed ONCE:

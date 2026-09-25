@@ -11,6 +11,36 @@ import { FatigueConfig } from "../fatigue-config";
 import { FatigueStateOrUnknown } from "./fatigue-model";
 import { createFatigueLedger, advanceFatigueLedger, projectFatigueForShift, explainFatigueChoice, FatigueCandidateProjection } from "./fatigue-planning";
 import { fatigueScoreSteps } from "./stage6-score-tiers";
+import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
+
+/**
+ * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
+ * (2026-09-25, hard-constraints milestone phase 1 — see hard-work-caps.ts).
+ * `incomingStreakByEmployee`: each employee's consecutive-work-day streak
+ * entering the window (consecutive-days-continuity.ts's
+ * incomingStreakForHardCap; missing = 0 — the caller discloses unknown
+ * history). Both functions keep their own always-on running streak from it
+ * and reuse their existing `usageHours` running totals for the hours side.
+ * Omitted = no cap filtering (direct unit callers); generate-draft-plan.ts
+ * always supplies it.
+ */
+export interface SpecializedHardCaps {
+  caps: HardWorkCaps;
+  incomingStreakByEmployee: ReadonlyMap<string, number>;
+  exclusionsOut?: HardCapExclusion[];
+}
+
+/** Per-day cap state handed to assignPoolToWindow (the running values, read-only). */
+interface PoolDayHardCaps {
+  caps: HardWorkCaps;
+  streakEnteringDay: ReadonlyMap<string, number>;
+  hoursSoFar: ReadonlyMap<string, number>;
+}
+
+/** The streak map entering the next day: +1 for each pool member who worked today, 0 otherwise. */
+function advanceStreaks(pool: Employee[], streaks: Map<string, number>, workedIds: ReadonlySet<string>): void {
+  for (const e of pool) streaks.set(e.id, nextConsecutiveWorkDayStreak(streaks.get(e.id) ?? 0, workedIds.has(e.id)));
+}
 
 /**
  * FATIGUE-AWARE FOREIGN-COMPANY DISTRIBUTION (2026-09-24, fatigue
@@ -113,6 +143,13 @@ export interface DemandConflict {
   window: { start: string; end: string };
   needed: number;
   covered: number;
+  /**
+   * HARD WORK CAPS (2026-09-25, phase 1): team members who were rest-legal
+   * with a compatible code for this window but were excluded by a hard cap
+   * — present only when at least one such member existed, so a purely
+   * rest/catalog-driven conflict is reported exactly as before.
+   */
+  capExcluded?: { employeeId: string; reason: HardCapExclusionReason }[];
 }
 
 /**
@@ -138,9 +175,13 @@ function assignPoolToWindow(
   preferExtended = false,
   // The real calendar date this window is being planned for — resolves
   // the shift regime effective on that day (see lib/shift-templates.ts).
-  date: string = LEGACY_BASELINE_DATE
-): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
+  date: string = LEGACY_BASELINE_DATE,
+  // HARD WORK CAPS (2026-09-25, phase 1) — passed straight into
+  // selectCompatibleShiftCodes' filter step (same gate as the rest check).
+  hardCaps?: PoolDayHardCaps
+): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number; capExcluded: { employeeId: string; reason: HardCapExclusionReason }[] } {
   const assigned: { employeeId: string; shiftCode: string }[] = [];
+  const capExcluded: { employeeId: string; reason: HardCapExclusionReason }[] = [];
   for (const employee of pool) {
     if (assigned.length >= headcount) break;
     const prior = priorDayShift.get(employee.id) ?? null;
@@ -158,13 +199,29 @@ function assignPoolToWindow(
       minimumRestHours,
       true,
       preferExtended,
-      date
+      date,
+      hardCaps
+        ? {
+            consecutiveWorkDaysBeforeToday: hardCaps.streakEnteringDay.get(employee.id) ?? 0,
+            maxConsecutiveWorkDays: hardCaps.caps.maxConsecutiveWorkDays,
+            hoursSoFarThisWeek: hardCaps.hoursSoFar.get(employee.id) ?? 0,
+            hardWeeklyHoursCap: hardCaps.caps.hardWeeklyHoursCap,
+          }
+        : undefined
     );
     if (candidates.length > 0) {
       assigned.push({ employeeId: employee.id, shiftCode: candidates[0].code });
+    } else if (hardCaps) {
+      // Transparency only (the decision is already made above): was this
+      // member rest-legal with a compatible code, i.e. excluded by a cap?
+      const restOnly = selectCompatibleShiftCodes(window.start, window.end, prior?.shift_start ?? null, prior?.shift_end ?? null, minimumRestHours, true, preferExtended, date);
+      if (restOnly.length > 0) {
+        const streak = hardCaps.streakEnteringDay.get(employee.id) ?? 0;
+        capExcluded.push({ employeeId: employee.id, reason: streak + 1 > hardCaps.caps.maxConsecutiveWorkDays ? "consecutive_work_days" : "hard_weekly_hours" });
+      }
     }
   }
-  return { assigned, shortfall: Math.max(0, headcount - assigned.length) };
+  return { assigned, shortfall: Math.max(0, headcount - assigned.length), capExcluded };
 }
 
 /**
@@ -202,17 +259,19 @@ function assignPoolToWindowWithRoles(
   priorDayShift: PriorDayShiftMap,
   minimumRestHours: number,
   preferExtended = false,
-  date: string = LEGACY_BASELINE_DATE
-): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number } {
+  date: string = LEGACY_BASELINE_DATE,
+  hardCaps?: PoolDayHardCaps
+): { assigned: { employeeId: string; shiftCode: string }[]; shortfall: number; capExcluded: { employeeId: string; reason: HardCapExclusionReason }[] } {
   if (!roleConfig) {
-    return assignPoolToWindow(pool, window, headcount, priorDayShift, minimumRestHours, preferExtended, date);
+    return assignPoolToWindow(pool, window, headcount, priorDayShift, minimumRestHours, preferExtended, date, hardCaps);
   }
   const { aces, leaders } = partitionPoolByRole(pool, roleConfig);
-  const aceResult = assignPoolToWindow(aces, window, roleConfig.aceCount, priorDayShift, minimumRestHours, preferExtended, date);
-  const leaderResult = assignPoolToWindow(leaders, window, roleConfig.leaderCount, priorDayShift, minimumRestHours, preferExtended, date);
+  const aceResult = assignPoolToWindow(aces, window, roleConfig.aceCount, priorDayShift, minimumRestHours, preferExtended, date, hardCaps);
+  const leaderResult = assignPoolToWindow(leaders, window, roleConfig.leaderCount, priorDayShift, minimumRestHours, preferExtended, date, hardCaps);
   return {
     assigned: [...aceResult.assigned, ...leaderResult.assigned],
     shortfall: aceResult.shortfall + leaderResult.shortfall,
+    capExcluded: [...aceResult.capExcluded, ...leaderResult.capExcluded],
   };
 }
 
@@ -235,7 +294,9 @@ export function generateProfilingMesureShifts(
   // shift regime effective on each real calendar day (see
   // lib/shift-templates.ts).
   weekStart: string,
-  priorWeekBoundaryContext: PriorDayShiftMap = new Map()
+  priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
+  // HARD WORK CAPS (2026-09-25, phase 1) — see SpecializedHardCaps.
+  hardCaps?: SpecializedHardCaps
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
@@ -247,6 +308,10 @@ export function generateProfilingMesureShifts(
     // See sortByLeastUsedFirst's doc comment: spreads work across the
     // whole team instead of always favoring the same first N in `pool`.
     const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
+    // Always-on consecutive-work-day streak (hard-work-caps.ts), advanced
+    // once per day right alongside priorDayShift/usageHours below.
+    const streaks = new Map<string, number>(pool.map((e) => [e.id, hardCaps?.incomingStreakByEmployee.get(e.id) ?? 0]));
+    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks, hoursSoFar: usageHours } : undefined;
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
@@ -255,10 +320,11 @@ export function generateProfilingMesureShifts(
       let remainingPool = sortByLeastUsedFirst(pool, usageHours);
 
       for (const cluster of clusters) {
-        const { assigned, shortfall } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended, date);
+        const { assigned, shortfall, capExcluded } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
         dayAssignments.push(...assigned);
         const assignedIds = new Set(assigned.map((a) => a.employeeId));
         remainingPool = remainingPool.filter((e) => !assignedIds.has(e.id));
+        for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "profiling_mesure", reason: x.reason });
         if (shortfall > 0) {
           conflicts.push({
             team,
@@ -266,6 +332,7 @@ export function generateProfilingMesureShifts(
             window: { start: cluster.start, end: cluster.end },
             needed: cluster.peak,
             covered: cluster.peak - shortfall,
+            ...(capExcluded.length > 0 ? { capExcluded } : {}),
           });
         }
       }
@@ -282,6 +349,7 @@ export function generateProfilingMesureShifts(
         nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode, date) : null);
       }
       priorDayShift = nextPriorDayShift;
+      advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
     }
   }
 
@@ -355,11 +423,15 @@ export function generateForeignCompanyShifts(
   // cares about the flight-driven roster keeps working byte-for-byte
   // unchanged (the top-up is a strict, additive no-op without a config to
   // read `normal_weekly_off_days` from).
-  config?: Pick<Config, "normal_weekly_off_days">,
+  config?: Pick<Config, "normal_weekly_off_days"> & Partial<Pick<Config, "max_consecutive_off_days">>,
   // FATIGUE-AWARE DISTRIBUTION (2026-09-24, part 2) — see
   // ForeignFatigueOptions and the "FATIGUE" paragraph of this function's
   // doc comment. Optional; omitted or disabled = exact prior behaviour.
-  fatigue?: ForeignFatigueOptions
+  fatigue?: ForeignFatigueOptions,
+  // HARD WORK CAPS (2026-09-25, phase 1) — see SpecializedHardCaps. Applied
+  // to flight days (selectCompatibleShiftCodes' filter) AND to the normal
+  // RAM roster top-up (computeEmployeeDayCountTopUp's legalCodesAt).
+  hardCaps?: SpecializedHardCaps
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
@@ -377,6 +449,10 @@ export function generateForeignCompanyShifts(
     // `pool` (the bug that left Tarik Idrissi/Widad Idrissi permanently
     // OFF while Fadwa/Khalid/Marouane Idrissi took every Air France duty).
     const usageHours = new Map<string, number>(pool.map((e) => [e.id, 0]));
+    // Always-on consecutive-work-day streak (hard-work-caps.ts), advanced
+    // once per day right alongside priorDayShift/usageHours below.
+    const streaks = new Map<string, number>(pool.map((e) => [e.id, hardCaps?.incomingStreakByEmployee.get(e.id) ?? 0]));
+    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks, hoursSoFar: usageHours } : undefined;
     // Running fatigue state for this company's team (see fatigue-planning.ts's
     // FatigueLedger), advanced once per day. Only when fatigue is enabled.
     const ledger = fatigueActive
@@ -416,7 +492,7 @@ export function generateForeignCompanyShifts(
             .sort((a, b) => a.s - b.s || a.k - b.k)
             .map((x) => x.e);
         }
-        const { assigned, shortfall } = assignPoolToWindowWithRoles(
+        const { assigned, shortfall, capExcluded } = assignPoolToWindowWithRoles(
           orderedPool,
           plan.combinedWindow,
           headcount,
@@ -424,11 +500,20 @@ export function generateForeignCompanyShifts(
           priorDayShift,
           minimumRestHours,
           preferExtended,
-          date
+          date,
+          dayCaps
         );
         dayAssignments = assigned;
+        for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "foreign_company", reason: x.reason });
         if (shortfall > 0) {
-          conflicts.push({ team: company, dayOfWeek: day, window: plan.combinedWindow, needed: headcount, covered: headcount - shortfall });
+          conflicts.push({
+            team: company,
+            dayOfWeek: day,
+            window: plan.combinedWindow,
+            needed: headcount,
+            covered: headcount - shortfall,
+            ...(capExcluded.length > 0 ? { capExcluded } : {}),
+          });
         }
         if (ledger && plan.shiftCode) {
           // Explainability: re-run the SAME (pure) walk with the pre-fatigue
@@ -436,7 +521,7 @@ export function generateForeignCompanyShifts(
           // in is explained against a displaced member (in order); a member
           // selected either way gets [] (fatigue did not change that pick).
           const withoutFatigue = assignPoolToWindowWithRoles(
-            sortByLeastUsedFirst(pool, usageHours), plan.combinedWindow, headcount, roleConfig, priorDayShift, minimumRestHours, preferExtended, date
+            sortByLeastUsedFirst(pool, usageHours), plan.combinedWindow, headcount, roleConfig, priorDayShift, minimumRestHours, preferExtended, date, dayCaps
           ).assigned.map((a) => a.employeeId);
           const selectedIds = new Set(assigned.map((a) => a.employeeId));
           const displaced = withoutFatigue.filter((id) => !selectedIds.has(id));
@@ -473,6 +558,7 @@ export function generateForeignCompanyShifts(
         nextPriorDayShift.set(employee.id, a ? getShiftTimesAs(a.shiftCode, date) : null);
       }
       priorDayShift = nextPriorDayShift;
+      advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
     }
 
     // NORMAL RAM ROSTER TOP-UP — see this function's doc comment. Runs
@@ -492,13 +578,21 @@ export function generateForeignCompanyShifts(
         );
         const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
         const topUpReasons = fatigueActive ? new Map<string, string[]>() : undefined;
+        const capShortfall: { day: string; reason: HardCapExclusionReason }[] = [];
 
         const additions = computeEmployeeDayCountTopUp(
           employee.id,
           daysOrder,
           weekStart,
           scheduledDays,
-          0, // hours objective never chased here — see doc comment
+          // The employee's REAL flight-day hours so far (usageHours — the same
+          // running total the fairness ordering uses). Only read by the hard
+          // weekly-hours cap: the hours OBJECTIVE is never chased here
+          // (targetHoursThisWindow below is always null, so this value never
+          // creates an hours shortfall) — see doc comment. Was a literal 0
+          // before the hard caps existed, which is equivalent for that
+          // objective.
+          hardCaps ? usageHours.get(employee.id) ?? 0 : 0,
           getExistingShift,
           priorWeekBoundaryContext,
           minimumRestHours,
@@ -507,8 +601,14 @@ export function generateForeignCompanyShifts(
           null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
           undefined,
           undefined,
-          topUpReasons ? { config: fatigue!.config, reasonsOut: topUpReasons } : undefined
+          topUpReasons ? { config: fatigue!.config, reasonsOut: topUpReasons } : undefined,
+          hardCaps
+            ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employee.id) ?? 0, shortfallOut: capShortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }
+            : undefined
         );
+        for (const { day, reason } of capShortfall) {
+          hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "foreign_company_top_up", reason });
+        }
 
         for (const [day, shiftCode] of additions) {
           if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
