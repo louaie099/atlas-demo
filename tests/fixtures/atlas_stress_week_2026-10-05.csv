@@ -1,0 +1,155 @@
+flight_number,airline,origin,destination,flight_date,scheduled_departure,aircraft,scheduled_arrival,booking_pressure,terminal
+AT2101,Royal Air Maroc,CMN,MAD,2026-10-05,06:30,Airbus A320,08:10,normal,T1
+AT2102,Royal Air Maroc,CMN,MAD,2026-10-05,13:15,Airbus A320,14:55,normal,T1
+AT2103,Royal Air Maroc,CMN,MAD,2026-10-05,19:40,Boeing 737-800,21:20,normal,T1
+AT9104,Royal Air Maroc,CMN,CDG,2026-10-05,07:00,Airbus A321,09:45,normal,T1
+AT9105,Royal Air Maroc,CMN,CDG,2026-10-05,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9106,Royal Air Maroc,CMN,CDG,2026-10-05,21:15,Airbus A320,23:55,normal,T1
+AT9107,Royal Air Maroc,CMN,ORY,2026-10-05,08:45,Airbus A321,11:30,normal,T1
+AT9108,Royal Air Maroc,CMN,ORY,2026-10-05,16:10,Airbus A320,18:55,normal,T1
+AT9109,Royal Air Maroc,CMN,ORY,2026-10-05,20:10,Boeing 737 MAX 8,22:55,normal,T1
+AT4110,Royal Air Maroc,CMN,RAK,2026-10-05,09:00,Embraer E190,09:45,normal,T1
+AT4111,Royal Air Maroc,CMN,RAK,2026-10-05,14:20,Embraer E190,15:05,normal,T1
+AT4112,Royal Air Maroc,CMN,RAK,2026-10-05,19:00,Embraer E190,19:45,normal,T1
+AT4113,Royal Air Maroc,CMN,FEZ,2026-10-05,11:00,Embraer E190,11:40,normal,T1
+AT4114,Royal Air Maroc,CMN,FEZ,2026-10-05,17:30,Embraer E190,18:10,normal,T1
+AT2115,Royal Air Maroc,CMN,DKR,2026-10-05,07:15,Boeing 737-800,10:45,normal,T1
+AT2116,Royal Air Maroc,CMN,DKR,2026-10-05,20:30,Boeing 737-800,00:00,normal,T1
+AT3117,Royal Air Maroc,CMN,LHR,2026-10-05,09:15,Boeing 787-9,13:20,normal,T1
+AT3118,Royal Air Maroc,CMN,LHR,2026-10-05,20:00,Airbus A321,00:05,normal,T1
+AT3119,Royal Air Maroc,CMN,YUL,2026-10-05,12:00,Boeing 787-9,15:50,normal,T1
+GF105,Gulf Air,CMN,BAH,2026-10-05,09:00,Airbus A320,14:15,normal,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-05,16:40,Boeing 787-8,22:30,normal,T1
+EK750,Emirates,CMN,DXB,2026-10-05,15:30,Boeing 777-300,23:50,normal,T1
+AF1980,Air France,CMN,ORY,2026-10-05,12:10,Airbus A319,15:00,normal,T1
+AT2120,Royal Air Maroc,CMN,MAD,2026-10-06,06:30,Airbus A320,08:10,normal,T1
+AT2121,Royal Air Maroc,CMN,MAD,2026-10-06,13:15,Airbus A320,14:55,normal,T1
+AT2122,Royal Air Maroc,CMN,MAD,2026-10-06,19:40,Boeing 737-800,21:20,normal,T1
+AT9123,Royal Air Maroc,CMN,CDG,2026-10-06,07:00,Airbus A321,09:45,normal,T1
+AT9124,Royal Air Maroc,CMN,CDG,2026-10-06,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9125,Royal Air Maroc,CMN,CDG,2026-10-06,21:15,Airbus A320,23:55,normal,T1
+AT9126,Royal Air Maroc,CMN,ORY,2026-10-06,08:45,Airbus A321,11:30,normal,T1
+AT9127,Royal Air Maroc,CMN,ORY,2026-10-06,16:10,Airbus A320,18:55,normal,T1
+AT9128,Royal Air Maroc,CMN,ORY,2026-10-06,20:10,Boeing 737 MAX 8,22:55,normal,T1
+AT4129,Royal Air Maroc,CMN,RAK,2026-10-06,09:00,Embraer E190,09:45,normal,T1
+AT4130,Royal Air Maroc,CMN,RAK,2026-10-06,14:20,Embraer E190,15:05,normal,T1
+AT4131,Royal Air Maroc,CMN,RAK,2026-10-06,19:00,Embraer E190,19:45,normal,T1
+AT4132,Royal Air Maroc,CMN,FEZ,2026-10-06,11:00,Embraer E190,11:40,normal,T1
+AT4133,Royal Air Maroc,CMN,FEZ,2026-10-06,17:30,Embraer E190,18:10,normal,T1
+AT2134,Royal Air Maroc,CMN,DKR,2026-10-06,07:15,Boeing 737-800,10:45,normal,T1
+AT2135,Royal Air Maroc,CMN,DKR,2026-10-06,20:30,Boeing 737-800,00:00,normal,T1
+AT3136,Royal Air Maroc,CMN,LHR,2026-10-06,09:15,Airbus A320,13:25,normal,T1
+AT3137,Royal Air Maroc,CMN,LHR,2026-10-06,20:00,Airbus A321,00:05,normal,T1
+AT3138,Royal Air Maroc,CMN,YUL,2026-10-06,12:00,Boeing 787-9,15:50,normal,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-06,16:40,Boeing 787-8,22:30,normal,T1
+EY400,Etihad,CMN,AUH,2026-10-06,13:20,Boeing 787-9,22:40,normal,T1
+AT2139,Royal Air Maroc,CMN,MAD,2026-10-07,06:30,Airbus A320,08:10,normal,T1
+AT2140,Royal Air Maroc,CMN,MAD,2026-10-07,13:15,Airbus A320,14:55,normal,T1
+AT2141,Royal Air Maroc,CMN,MAD,2026-10-07,19:40,Boeing 737-800,21:20,normal,T1
+AT9142,Royal Air Maroc,CMN,CDG,2026-10-07,07:00,Airbus A321,09:45,normal,T1
+AT9143,Royal Air Maroc,CMN,CDG,2026-10-07,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9144,Royal Air Maroc,CMN,CDG,2026-10-07,21:15,Airbus A320,23:55,normal,T1
+AT9145,Royal Air Maroc,CMN,ORY,2026-10-07,08:45,Airbus A321,11:30,normal,T1
+AT9146,Royal Air Maroc,CMN,ORY,2026-10-07,16:10,Airbus A320,18:55,normal,T1
+AT9147,Royal Air Maroc,CMN,ORY,2026-10-07,20:10,Boeing 737 MAX 8,22:55,normal,T1
+AT4148,Royal Air Maroc,CMN,RAK,2026-10-07,09:00,Embraer E190,09:45,normal,T1
+AT4149,Royal Air Maroc,CMN,RAK,2026-10-07,14:20,Embraer E190,15:05,normal,T1
+AT4150,Royal Air Maroc,CMN,RAK,2026-10-07,19:00,Embraer E190,19:45,normal,T1
+AT4151,Royal Air Maroc,CMN,FEZ,2026-10-07,11:00,Embraer E190,11:40,normal,T1
+AT4152,Royal Air Maroc,CMN,FEZ,2026-10-07,17:30,Embraer E190,18:10,normal,T1
+AT2153,Royal Air Maroc,CMN,DKR,2026-10-07,07:15,Boeing 737-800,10:45,normal,T1
+AT2154,Royal Air Maroc,CMN,DKR,2026-10-07,20:30,Boeing 737-800,00:00,normal,T1
+AT3155,Royal Air Maroc,CMN,LHR,2026-10-07,09:15,Boeing 787-9,13:20,normal,T1
+AT3156,Royal Air Maroc,CMN,LHR,2026-10-07,20:00,Airbus A321,00:05,normal,T1
+EK750,Emirates,CMN,DXB,2026-10-07,15:30,Boeing 777-300,23:50,normal,T1
+AF1980,Air France,CMN,ORY,2026-10-07,12:10,Airbus A319,15:00,normal,T1
+AT2157,Royal Air Maroc,CMN,MAD,2026-10-08,06:30,Airbus A320,08:10,normal,T1
+AT2158,Royal Air Maroc,CMN,MAD,2026-10-08,13:15,Airbus A320,14:55,normal,T1
+AT2159,Royal Air Maroc,CMN,MAD,2026-10-08,19:40,Boeing 737-800,21:20,normal,T1
+AT9160,Royal Air Maroc,CMN,CDG,2026-10-08,07:00,Airbus A321,09:45,normal,T1
+AT9161,Royal Air Maroc,CMN,CDG,2026-10-08,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9162,Royal Air Maroc,CMN,CDG,2026-10-08,21:15,Airbus A320,23:55,normal,T1
+AT9163,Royal Air Maroc,CMN,ORY,2026-10-08,08:45,Airbus A321,11:30,normal,T1
+AT9164,Royal Air Maroc,CMN,ORY,2026-10-08,16:10,Airbus A320,18:55,normal,T1
+AT9165,Royal Air Maroc,CMN,ORY,2026-10-08,20:10,Boeing 737 MAX 8,22:55,normal,T1
+AT4166,Royal Air Maroc,CMN,RAK,2026-10-08,09:00,Embraer E190,09:45,normal,T1
+AT4167,Royal Air Maroc,CMN,RAK,2026-10-08,14:20,Embraer E190,15:05,normal,T1
+AT4168,Royal Air Maroc,CMN,RAK,2026-10-08,19:00,Embraer E190,19:45,normal,T1
+AT4169,Royal Air Maroc,CMN,FEZ,2026-10-08,11:00,Embraer E190,11:40,normal,T1
+AT4170,Royal Air Maroc,CMN,FEZ,2026-10-08,17:30,Embraer E190,18:10,normal,T1
+AT2171,Royal Air Maroc,CMN,DKR,2026-10-08,07:15,Boeing 737-800,10:45,normal,T1
+AT2172,Royal Air Maroc,CMN,DKR,2026-10-08,20:30,Boeing 737-800,00:00,normal,T1
+AT3173,Royal Air Maroc,CMN,LHR,2026-10-08,09:15,Airbus A320,13:25,normal,T1
+AT3174,Royal Air Maroc,CMN,LHR,2026-10-08,20:00,Airbus A321,00:05,normal,T1
+AT3175,Royal Air Maroc,CMN,YUL,2026-10-08,12:00,Boeing 787-9,15:50,normal,T1
+GF105,Gulf Air,CMN,BAH,2026-10-08,09:00,Airbus A320,14:15,normal,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-08,16:40,Boeing 787-8,22:30,normal,T1
+EY400,Etihad,CMN,AUH,2026-10-08,13:20,Boeing 787-9,22:40,normal,T1
+AF1980,Air France,CMN,ORY,2026-10-08,12:10,Airbus A319,15:00,normal,T1
+AT2176,Royal Air Maroc,CMN,MAD,2026-10-09,06:30,Airbus A320,08:10,elevated,T1
+AT2177,Royal Air Maroc,CMN,MAD,2026-10-09,13:15,Airbus A320,14:55,normal,T1
+AT2178,Royal Air Maroc,CMN,MAD,2026-10-09,19:40,Boeing 737-800,21:20,elevated,T1
+AT9179,Royal Air Maroc,CMN,CDG,2026-10-09,07:00,Airbus A321,09:45,normal,T1
+AT9180,Royal Air Maroc,CMN,CDG,2026-10-09,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9181,Royal Air Maroc,CMN,CDG,2026-10-09,21:15,Airbus A320,23:55,elevated,T1
+AT9182,Royal Air Maroc,CMN,ORY,2026-10-09,08:45,Airbus A321,11:30,normal,T1
+AT9183,Royal Air Maroc,CMN,ORY,2026-10-09,16:10,Airbus A320,18:55,normal,T1
+AT9184,Royal Air Maroc,CMN,ORY,2026-10-09,20:10,Boeing 737 MAX 8,22:55,elevated,T1
+AT4185,Royal Air Maroc,CMN,RAK,2026-10-09,09:00,Embraer E190,09:45,normal,T1
+AT4186,Royal Air Maroc,CMN,RAK,2026-10-09,14:20,Embraer E190,15:05,normal,T1
+AT4187,Royal Air Maroc,CMN,RAK,2026-10-09,19:00,Embraer E190,19:45,normal,T1
+AT4188,Royal Air Maroc,CMN,FEZ,2026-10-09,11:00,Embraer E190,11:40,normal,T1
+AT4189,Royal Air Maroc,CMN,FEZ,2026-10-09,17:30,Embraer E190,18:10,normal,T1
+AT2190,Royal Air Maroc,CMN,DKR,2026-10-09,07:15,Boeing 737-800,10:45,normal,T1
+AT2191,Royal Air Maroc,CMN,DKR,2026-10-09,20:30,Boeing 737-800,00:00,elevated,T1
+AT3192,Royal Air Maroc,CMN,LHR,2026-10-09,09:15,Boeing 787-9,13:20,normal,T1
+AT3193,Royal Air Maroc,CMN,LHR,2026-10-09,20:00,Airbus A321,00:05,normal,T1
+AT3194,Royal Air Maroc,CMN,YUL,2026-10-09,12:00,Boeing 787-9,15:50,elevated,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-09,16:40,Boeing 787-8,22:30,elevated,T1
+EK750,Emirates,CMN,DXB,2026-10-09,15:30,Boeing 777-300,23:50,normal,T1
+AF1980,Air France,CMN,ORY,2026-10-09,12:10,Airbus A319,15:00,normal,T1
+AT2195,Royal Air Maroc,CMN,MAD,2026-10-10,06:30,Airbus A320,08:10,elevated,T1
+AT2196,Royal Air Maroc,CMN,MAD,2026-10-10,13:15,Airbus A320,14:55,normal,T1
+AT2197,Royal Air Maroc,CMN,MAD,2026-10-10,19:40,Boeing 737-800,21:20,elevated,T1
+AT9198,Royal Air Maroc,CMN,CDG,2026-10-10,07:00,Airbus A321,09:45,normal,T1
+AT9199,Royal Air Maroc,CMN,CDG,2026-10-10,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9200,Royal Air Maroc,CMN,CDG,2026-10-10,21:15,Airbus A320,23:55,elevated,T1
+AT9201,Royal Air Maroc,CMN,ORY,2026-10-10,08:45,Airbus A321,11:30,normal,T1
+AT9202,Royal Air Maroc,CMN,ORY,2026-10-10,16:10,Airbus A320,18:55,normal,T1
+AT9203,Royal Air Maroc,CMN,ORY,2026-10-10,20:10,Boeing 737 MAX 8,22:55,elevated,T1
+AT4204,Royal Air Maroc,CMN,RAK,2026-10-10,09:00,Embraer E190,09:45,normal,T1
+AT4205,Royal Air Maroc,CMN,RAK,2026-10-10,14:20,Embraer E190,15:05,normal,T1
+AT4206,Royal Air Maroc,CMN,RAK,2026-10-10,19:00,Embraer E190,19:45,normal,T1
+AT4207,Royal Air Maroc,CMN,FEZ,2026-10-10,11:00,Embraer E190,11:40,normal,T1
+AT4208,Royal Air Maroc,CMN,FEZ,2026-10-10,17:30,Embraer E190,18:10,normal,T1
+AT2209,Royal Air Maroc,CMN,DKR,2026-10-10,07:15,Boeing 737-800,10:45,normal,T1
+AT2210,Royal Air Maroc,CMN,DKR,2026-10-10,20:30,Boeing 737-800,00:00,elevated,T1
+AT3211,Royal Air Maroc,CMN,LHR,2026-10-10,09:15,Airbus A320,13:25,normal,T1
+AT3212,Royal Air Maroc,CMN,LHR,2026-10-10,20:00,Airbus A321,00:05,normal,T1
+AT3213,Royal Air Maroc,CMN,YUL,2026-10-10,12:00,Boeing 787-9,15:50,elevated,T1
+GF105,Gulf Air,CMN,BAH,2026-10-10,09:00,Airbus A320,14:15,normal,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-10,16:40,Boeing 787-8,22:30,elevated,T1
+EY400,Etihad,CMN,AUH,2026-10-10,13:20,Boeing 787-9,22:40,normal,T1
+AF1980,Air France,CMN,CDG,2026-10-10,12:10,Airbus A319,15:00,normal,T1
+AT2214,Royal Air Maroc,CMN,MAD,2026-10-11,06:30,Airbus A320,08:10,normal,T1
+AT2215,Royal Air Maroc,CMN,MAD,2026-10-11,13:15,Airbus A320,14:55,normal,T1
+AT2216,Royal Air Maroc,CMN,MAD,2026-10-11,19:40,Boeing 737-800,21:20,normal,T1
+AT9217,Royal Air Maroc,CMN,CDG,2026-10-11,07:00,Airbus A321,09:45,normal,T1
+AT9218,Royal Air Maroc,CMN,CDG,2026-10-11,14:30,Boeing 737 MAX 8,17:15,normal,T1
+AT9219,Royal Air Maroc,CMN,CDG,2026-10-11,21:15,Airbus A320,23:55,normal,T1
+AT9220,Royal Air Maroc,CMN,ORY,2026-10-11,08:45,Airbus A321,11:30,normal,T1
+AT9221,Royal Air Maroc,CMN,ORY,2026-10-11,16:10,Airbus A320,18:55,normal,T1
+AT9222,Royal Air Maroc,CMN,ORY,2026-10-11,20:10,Boeing 737 MAX 8,22:55,normal,T1
+AT4223,Royal Air Maroc,CMN,RAK,2026-10-11,09:00,Embraer E190,09:45,normal,T1
+AT4224,Royal Air Maroc,CMN,RAK,2026-10-11,14:20,Embraer E190,15:05,normal,T1
+AT4225,Royal Air Maroc,CMN,RAK,2026-10-11,19:00,Embraer E190,19:45,normal,T1
+AT4226,Royal Air Maroc,CMN,FEZ,2026-10-11,11:00,Embraer E190,11:40,normal,T1
+AT4227,Royal Air Maroc,CMN,FEZ,2026-10-11,17:30,Embraer E190,18:10,normal,T1
+AT2228,Royal Air Maroc,CMN,DKR,2026-10-11,07:15,Boeing 737-800,10:45,normal,T1
+AT2229,Royal Air Maroc,CMN,DKR,2026-10-11,20:30,Boeing 737-800,00:00,normal,T1
+AT3230,Royal Air Maroc,CMN,LHR,2026-10-11,09:15,Boeing 787-9,13:20,normal,T1
+AT3231,Royal Air Maroc,CMN,LHR,2026-10-11,20:00,Airbus A321,00:05,normal,T1
+AT3232,Royal Air Maroc,CMN,YUL,2026-10-11,12:00,Boeing 787-9,15:50,normal,T1
+QR1020,Qatar Airways,CMN,DOH,2026-10-11,16:40,Boeing 787-8,22:30,normal,T1
+EK750,Emirates,CMN,DXB,2026-10-11,15:30,Boeing 777-300,23:50,normal,T1
+AF1980,Air France,CMN,CDG,2026-10-11,12:10,Airbus A319,15:00,normal,T1
