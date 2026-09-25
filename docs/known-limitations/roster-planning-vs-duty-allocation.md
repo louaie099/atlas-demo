@@ -1661,3 +1661,258 @@ SCENARIOS":
 Phase 2's job is to repair these using cross-employee swaps and
 reallocation while keeping every hard rule: 15h rest, both new caps and
 the OFF-day rules. It must not relax any of them.
+
+## 2026-09-25 addendum: hard-constraints milestone, PHASE 2 of 3 — cap-aware roster target and bounded cross-employee repair
+
+> **Phase 2 has landed.** The "Phase 2 is still required" warning at the top
+> of the phase-1 section above is kept as the historical record. The
+> cross-employee repair pass it asked for now exists, together with the
+> product owner's resolution of the 42h-vs-5-days conflict. It is a
+> **bounded, one-hand-off repair, not a universal solver**. Structural
+> shortfalls such as Gulf Air's are still reported as honest BLOCKING gaps
+> (see "What it cannot do" below).
+
+### Part A — the cap-aware per-employee roster target
+
+**Resolution (product owner).** The 42h hard weekly cap stands. A "normal"
+week now means as many work days as legally fit, up to 5, under both hard
+caps and given the employee's real shift codes. If the hours cap forces a
+week down to 4 work days and 3 OFF, that week is **normal**. It is not an
+anomaly.
+
+**Heuristic** (`lib/planning/roster-target.ts`, `computeCapAwareTargetWorkDays`).
+It is deterministic and documented, but it is not a global optimum.
+
+- Start with the employee's **committed** days: Stage-6 days for the
+  flexible pool, flight days for a foreign-company member. Count them with
+  their real, date-resolved hours.
+- Add free days one at a time, cheapest first. Each free day costs the
+  shortest non-overnight catalog code effective on its real date
+  (`shiftCatalogForDate`). That is 9h after 2026-09-20 and 8.75h before.
+  Stop when the next day would break the cap or the normal target is
+  reached.
+- If the cap never binds, the target is the normal 5, exactly the old fixed
+  number. Caps-off plans are therefore unchanged.
+
+Known simplifications:
+
+- A committed demand code counts at its real length, even when it is long.
+  Stage 6 spending hours on a long demand code is treated as
+  demand-justified, not as an artifact.
+- The target models hours only. It ignores the consecutive-day cap, 15h
+  rest and qualifications for top-up days.
+
+**Where the target is used:**
+
+- **Stage-6.5 and foreign top-ups** now aim at each employee's own target
+  instead of `daysOrder.length - normal_weekly_off_days`
+  (`computeFlexibleEmployeeTopUp`, `generateForeignCompanyShifts`).
+- **Top-up search.** With a lowered target, the week has more OFF days than
+  `max_consecutive_off_days` can hold in one block. The bounded search
+  therefore prefers a target-reaching assignment whose OFF blocks respect
+  that rule. If needed it runs a second search that also uses the reserved
+  OFF pair, with a fresh budget of 500 nodes. With the normal target this
+  never changes anything: two OFF days always fit the rule.
+- **Preferred OFF window length** (`preferredOffWindowLength`). This is
+  still 2 with today's confirmed 2 / 2 rules, but it is now derived from
+  the target rather than assumed.
+- **Validation** (`lib/planning/validation.ts`):
+  - If a week meets its own lowered target, `checkSeparatedOffDays` does
+    not apply. Where 3 OFF days fall is largely set by committed days, and
+    they cannot form one block legally.
+  - The phase-1 `hard-cap-roster-top-up-shortfall` note now counts only
+    employees below their **own** target. On both seed weeks it no longer
+    fires.
+  - There is a new non-blocking **`roster_target_shortfall`**. It fires when
+    an employee is rostered fewer days than their own target **and** a hard
+    cap closed a free day the hours arithmetic had room for. A shortfall
+    with no cap involvement (15h rest) predates this milestone and is not
+    re-flagged, so caps-off plans get no new warning.
+- **Transparency:** `DraftWeeklyPlan.rosterTargets` lists each target with
+  its arithmetic (`committedHours`, `assumedFreeDayHours`, `capLimited`,
+  `capClosedFreeDays`).
+
+**Normal versus flagged.** This distinction is the crux of Part A.
+
+- *4 worked, target 4* (the cap cannot fit a 5th day): normal. Nothing is
+  flagged.
+- *4 worked, target 5, and a cap closed a day* (for example the
+  consecutive-day cap closed a day the hours cap allowed): flagged as
+  `roster_target_shortfall`.
+
+Both cases are pinned in `tests/hard-work-caps.test.ts`, under "PHASE 2,
+part A".
+
+### Part B — the bounded cross-employee repair pass
+
+`lib/planning/hard-cap-repair.ts` runs **after** each population's greedy
+generation and **before** its shortfalls are finalized:
+
+- **Flexible pool:** runs on Stage 6's rest-enforced result, before the
+  top-up (`repairFlexiblePoolWeek`).
+- **Profiling/Mesure:** runs per team, after the day loop.
+- **Foreign company:** runs per company on the flight-day roster, before
+  the roster top-up.
+
+It runs only when the greedy recorded a hard-cap exclusion **and** left
+something to repair. Otherwise nothing is called, and the output is
+byte-identical to phase 1's.
+
+**The move: a one-step hand-off.** Employee X is blocked by a hard cap, not
+by rest or qualification, from covering a need on day u. X works some other
+day d. An eligible employee Y who is OFF on d takes X's day-d work, which
+frees X to cover day u. Day d's coverage is unchanged because Y fills the
+same slot. Day u gains a person. Nobody else's roster changes.
+
+**Flexible pool specifics:**
+
+- Gaps are measured by replaying Stage 6's own coverage accounting
+  (`replayStage6HardCoverage`).
+- Y must hold every role X's shift was counted for. After the move, no
+  (bucket, role) unit may be less covered than before.
+- **OFF-run dead-ends**, such as the youssef case, get two moves, tried in
+  this order:
+  - **(a) Shift own day.** X moves one of their own Stage-6 days to a free
+    day. Nobody else is touched.
+  - **(b) Hand-off with a re-simulated top-up.** The top-up is re-run using
+    the exact same function.
+  - Either move is kept only if X's OFF blocks then respect
+    `max_consecutive_off_days`, nobody newly breaks that rule, and nobody
+    loses a rostered day.
+- **The one coverage relaxation.** Stage 6 also counts Profiling/Mesure
+  demand, which the dedicated team generates independently. A Profiling or
+  Mesure unit on a day that team fully covers (no BLOCKING conflict that
+  day) is not treated as a real gap. A move may leave such a unit to the
+  dedicated team. This is why Profiling/Mesure generation now runs before
+  the flexible repair. It never depended on Stage 6, and its exclusions and
+  repairs are still listed in their original population order.
+
+**Hard constraints are never relaxed.** Every candidate move is checked on
+the **whole resulting week** of both X and Y:
+
+- 15h rest against both neighbours of each changed day. This includes the
+  real prior-week boundary on day 1 and the same-week Sunday↔Monday wrap
+  for a 7-day window.
+- The consecutive-day cap, counted from the real incoming streak.
+- The weekly hours cap.
+- The need's own qualification, role split and window compatibility. The
+  greedy's own `selectCompatibleShiftCodes` ranking and Stage-6 skill rules
+  are reused.
+
+Fixed-cycle and static employees are never in any population the pass
+receives.
+
+**Determinism.** Every choice iterates an explicitly sorted list:
+
+- gaps by day index, then need order;
+- blocked employees X by id;
+- X's days by day index;
+- stand-ins Y by hours already rostered, then id;
+- codes by the generator's own ranking.
+
+No decision depends on Map or Set iteration order. A test feeds the same
+pre-repair week with the pool listed in two different orders and gets
+byte-identical output.
+
+**Bound.** `HARD_CAP_REPAIR_ATTEMPT_BUDGET = 2000` candidate evaluations per
+population, per team, per week. This mirrors
+`TOP_UP_SEARCH_NODE_BUDGET = 500`. Termination holds on two counts:
+
+- Failed evaluations are capped by the budget.
+- Every *applied* move strictly reduces the total shortfall, or removes one
+  OFF-rule breach while creating none. The number of applied moves is
+  therefore finite too.
+
+Moves are applied atomically after full verification. An exhausted budget
+leaves the last fully legal state, never a half-applied move. The remaining
+gap is then reported as in phase 1.
+
+A pathological test illustrates the budget. It has 41 blocked members,
+5 hand-off days each and 40 stand-ins who all fail at the last check. An
+unbounded search would make 8,405 evaluations and find nothing. The test
+stops at 2,000 with `budgetExhausted: true` and unchanged output.
+
+**Explainability.**
+
+- `DraftWeeklyPlan.hardCapRepairs` lists every applied move: kind, the two
+  days, who gave and who took, codes, the cap involved, and a plain-language
+  explanation.
+- The same text is set as `hardCapRepairReason` on each affected
+  assignment. The key is absent everywhere else.
+- `hardCapExclusions` remains the record of what the greedy filters
+  excluded at generation time.
+- An unresolved cap-involved conflict carries `capRepair`: attempts used,
+  budget, and whether it was exhausted. Its BLOCKING text now says the
+  bounded repair pass ran and found no legal reallocation. Before, it said
+  "not implemented yet".
+
+### Results
+
+**The three phase-1 scenarios** (`tests/hard-work-caps.test.ts`, "PHASE 2,
+part B"):
+
+1. **Profiling.** Monday moves from `p-tired` to `p-fresh`, and `p-tired`
+   covers Tuesday. Coverage is full and neither cap is broken.
+2. **Air France.** Monday moves from `af-1` to `af-4`, and `af-1` covers
+   Tuesday. Every flight day has 3 people and nobody works more than
+   5 days in a row. **Honest finding:** the exact phase-1 fixture is
+   *infeasible* under the full 42h default. Every code covering the
+   07:40–12:10 window is 9h, so each member can work at most 4 days, and
+   5 × 4 = 20 is less than the 21 slots needed. The consecutive-day
+   ordering gap that the scenario pins is therefore shown with the hours cap
+   non-binding. Under the full default caps the repair searches, finds no
+   legal move and leaves the Tuesday gap reported. That is correct.
+3. **youssef-el-amrani (real demo data).** His Monday moves to Saturday by
+   move (a). He goes from Mon–Thu worked with Fri–Sun OFF to Tue, Wed, Thu
+   and Sat worked. He still works 4 days and 36h, and he no longer has a
+   `consecutive_off_violation`. Monday's Profiling demand is still covered
+   by the dedicated Profiling team, with no BLOCKING conflict and no
+   unfilled duty.
+
+A new flexible-pool Stage-6 gap scenario is also pinned and resolved. Two
+tired ACEs hand Monday to two fresh ones and cover Tuesday's Gate and
+Boarding.
+
+**Gulf Air** is still unresolved, correctly. The whole 8-person team is
+needed on each of its 4 flight days, and 3 × 11.25h + 11.25h exceeds 42h
+for everyone. No member is OFF on any flight day, so no hand-off exists.
+Sunday remains BLOCKING, naming all 8 members. This is covered by a
+fixture test and by the real 2026-09-21 week.
+
+**Seed data** (default caps, measured after phase 2):
+
+| Seed week | Configuration | Generation-driven work days | `unfilled_duty` | BLOCKING | `consecutive_off_violation` | `separated_off_days` | `roster_target_shortfall` | repairs |
+|---|---|---|---|---|---|---|---|---|
+| 2026-08-31 | caps non-binding | 817 | 0 | 0 | 16 | 3 | 0 | 0 |
+| 2026-08-31 | default, repair off (Part A only) | 669 | 0 | 0 | 17 | 0 | 0 | 0 |
+| 2026-08-31 | default | 669 | 0 | 0 | **16** | 0 | 0 | 1 |
+| 2026-09-21 | caps non-binding | 817 | 0 | 0 | 16 | 2 | 0 | 0 |
+| 2026-09-21 | default | 661 | 1 | 1 (Gulf Air Sunday) | **16** | 0 | 0 | 1 |
+
+With the default caps, the plan no longer adds a single
+`consecutive_off_violation` over the caps-off baseline. Phase 1 added 3.
+The same 16 pre-existing violations (Chafik employees) remain. Draft
+generation on the seed week still takes well under a second.
+
+### What it cannot do (known limitations, stated plainly)
+
+- **Only one hand-off per move.** Y cannot, in turn, hand one of their own
+  days to a Z. A gap that needs a longer chain is reported as before.
+- **No moves across populations.** For example, a foreign-company member
+  never takes a flexible-pool day.
+- **No new capacity.** When the team is too small, or its commitments too
+  long for the cap, the gap is structural. Gulf Air and the full-caps Air
+  France fixture are examples.
+- **Flexible gap detection uses Stage 6's own accounting**, replayed, not
+  Stage 9's final duty assignment. It targets exactly the units Stage 6
+  left uncovered. The final `unfilled_duty` from Stage 9 remains the
+  authority.
+- **OFF-run repair covers the flexible pool only.** Profiling/Mesure have no
+  roster target, and foreign-company OFF shapes are dictated by flight
+  days.
+- **The roster target models hours only.** See Part A above.
+- **The roster target of a flexible employee is fixed after Stage 6.** It
+  treats the employee's Stage-6 codes as committed, even when a shorter
+  demand code might have left room for another day.
+
+**Phase 3** of the milestone is not part of this change.
