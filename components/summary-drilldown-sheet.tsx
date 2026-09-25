@@ -16,6 +16,7 @@ const WARNING_LABELS: Partial<Record<PlanIssueType, string>> = {
   cross_week_continuity_uncertain: "Cross-week continuity uncertain",
   separated_off_days: "Separated OFF days (recommendation)",
   consecutive_work_history_unknown: "Consecutive-day history unknown (info)",
+  roster_target_shortfall: "Below own roster target (recommendation)",
 };
 
 function issueTone(type: PlanIssueType): "bad" | "warn" {
@@ -74,6 +75,7 @@ export function SummaryDrilldownSheet({
     "cross_week_continuity_uncertain",
     "separated_off_days",
     "consecutive_work_history_unknown",
+    "roster_target_shortfall",
   ];
   const planWarnings = useMemo(() => issues.filter((i) => planWarningTypes.includes(i.type)), [issues]);
   const filteredWarnings = useMemo(

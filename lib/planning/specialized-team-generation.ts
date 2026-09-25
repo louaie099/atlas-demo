@@ -12,6 +12,8 @@ import { FatigueStateOrUnknown } from "./fatigue-model";
 import { createFatigueLedger, advanceFatigueLedger, projectFatigueForShift, explainFatigueChoice, FatigueCandidateProjection } from "./fatigue-planning";
 import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
+import { CapAwareRosterTarget, computeCapAwareTargetWorkDays, preferredOffWindowLength } from "./roster-target";
+import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
 
 /**
  * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
@@ -28,6 +30,12 @@ export interface SpecializedHardCaps {
   caps: HardWorkCaps;
   incomingStreakByEmployee: ReadonlyMap<string, number>;
   exclusionsOut?: HardCapExclusion[];
+  /** PART A (phase 2): receives each foreign-company member's cap-aware roster target (top-up population only). */
+  targetsOut?: Map<string, CapAwareRosterTarget>;
+  /** PART B (phase 2): receives every reallocation the bounded cross-employee repair pass applied. */
+  repairsOut?: HardCapRepair[];
+  /** PART B (phase 2): false disables the repair pass (tests compare with/without). Default true. */
+  repair?: boolean;
 }
 
 /** Per-day cap state handed to assignPoolToWindow (the running values, read-only). */
@@ -150,6 +158,13 @@ export interface DemandConflict {
    * rest/catalog-driven conflict is reported exactly as before.
    */
   capExcluded?: { employeeId: string; reason: HardCapExclusionReason }[];
+  /**
+   * HARD-CAP REPAIR (2026-09-25, phase 2): present only on a cap-involved
+   * conflict that the bounded cross-employee repair pass
+   * (hard-cap-repair.ts) searched and could not resolve — how many candidate
+   * moves it evaluated and whether its budget ran out.
+   */
+  capRepair?: HardCapRepairSearch;
 }
 
 /**
@@ -276,6 +291,49 @@ function assignPoolToWindowWithRoles(
 }
 
 /**
+ * HARD-CAP REPAIR bookkeeping (phase 2): the greedy's conflicts, re-derived
+ * against the repaired assignments. A group now fully covered drops its
+ * conflict; a still-short one keeps its original shape with `covered`
+ * updated, `capExcluded` narrowed to members still not working that day,
+ * and `capRepair` recording that the bounded repair search ran (so the
+ * BLOCKING wording can say so). Conflicts without cap involvement are left
+ * byte-for-byte as they were.
+ */
+function recomputeSlotConflicts(
+  original: { conflict: DemandConflict; groupKey: string | string[] }[],
+  assignmentsByDay: Record<string, RepairSlotAssignment[]>,
+  search: HardCapRepairSearch
+): DemandConflict[] {
+  const out: DemandConflict[] = [];
+  for (const { conflict, groupKey } of original) {
+    const keys = Array.isArray(groupKey) ? groupKey : [groupKey];
+    const day = assignmentsByDay[conflict.dayOfWeek] ?? [];
+    const covered = day.filter((a) => keys.includes(a.groupKey)).length;
+    if (covered >= conflict.needed) continue;
+    if (!conflict.capExcluded) {
+      out.push(conflict);
+      continue;
+    }
+    const working = new Set(day.map((a) => a.employeeId));
+    const capExcluded = conflict.capExcluded.filter((x) => !working.has(x.employeeId));
+    const { capExcluded: _drop, ...rest } = conflict;
+    void _drop;
+    out.push({ ...rest, covered, ...(capExcluded.length > 0 ? { capExcluded } : {}), capRepair: search });
+  }
+  return out;
+}
+
+/** The explanation of the repair that placed `employeeId` on `day` for `team`, if any. */
+function repairReasonFor(repairs: readonly HardCapRepair[] | undefined, team: string, employeeId: string, day: string): string | undefined {
+  if (!repairs) return undefined;
+  for (const r of repairs) {
+    if (r.team !== team) continue;
+    if ((r.toEmployeeId === employeeId && r.reassignedDay === day) || (r.filledByEmployeeId === employeeId && r.targetDay === day && r.kind !== "reallocate_for_off_run")) return r.explanation;
+  }
+  return undefined;
+}
+
+/**
  * Profiling and Mesure: demand comes from the SAME weekly demand
  * aggregation Stage 6 already computes for the whole week
  * (aggregateDailyDemand, called once in generate-draft-plan.ts) — this
@@ -312,34 +370,47 @@ export function generateProfilingMesureShifts(
     // once per day right alongside priorDayShift/usageHours below.
     const streaks = new Map<string, number>(pool.map((e) => [e.id, hardCaps?.incomingStreakByEmployee.get(e.id) ?? 0]));
     const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks, hoursSoFar: usageHours } : undefined;
+    // Team-local results, merged into generatedShiftsByDay/conflicts once the
+    // (optional) hard-cap repair pass below has run. Same order as before.
+    const teamAssignmentsByDay: Record<string, RepairSlotAssignment[]> = {};
+    const teamGroupsByDay: Record<string, RepairSlotGroup[]> = {};
+    const teamConflicts: { conflict: DemandConflict; groupKey: string }[] = [];
+    let teamCapExclusionSeen = false;
+    const poolIds = new Set(pool.map((e) => e.id));
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
       const clusters = demandClustersForRole(demandByDay[day], team);
-      const dayAssignments: { employeeId: string; shiftCode: string }[] = [];
+      const dayAssignments: RepairSlotAssignment[] = [];
       let remainingPool = sortByLeastUsedFirst(pool, usageHours);
+      teamGroupsByDay[day] = [];
 
-      for (const cluster of clusters) {
+      clusters.forEach((cluster, clusterIndex) => {
+        const groupKey = `${team}-${day}-${clusterIndex}`;
+        teamGroupsByDay[day].push({ key: groupKey, window: { start: cluster.start, end: cluster.end }, needed: cluster.peak, eligibleIds: poolIds });
         const { assigned, shortfall, capExcluded } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
-        dayAssignments.push(...assigned);
+        dayAssignments.push(...assigned.map((a) => ({ ...a, groupKey })));
         const assignedIds = new Set(assigned.map((a) => a.employeeId));
         remainingPool = remainingPool.filter((e) => !assignedIds.has(e.id));
         for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "profiling_mesure", reason: x.reason });
+        if (capExcluded.length > 0) teamCapExclusionSeen = true;
         if (shortfall > 0) {
-          conflicts.push({
-            team,
-            dayOfWeek: day,
-            window: { start: cluster.start, end: cluster.end },
-            needed: cluster.peak,
-            covered: cluster.peak - shortfall,
-            ...(capExcluded.length > 0 ? { capExcluded } : {}),
+          teamConflicts.push({
+            groupKey,
+            conflict: {
+              team,
+              dayOfWeek: day,
+              window: { start: cluster.start, end: cluster.end },
+              needed: cluster.peak,
+              covered: cluster.peak - shortfall,
+              ...(capExcluded.length > 0 ? { capExcluded } : {}),
+            },
           });
         }
-      }
+      });
 
-      if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
+      teamAssignmentsByDay[day] = dayAssignments;
       for (const a of dayAssignments) {
-        generatedShiftsByDay[day].push({ employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [team] });
         usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode, date));
       }
 
@@ -351,6 +422,40 @@ export function generateProfilingMesureShifts(
       priorDayShift = nextPriorDayShift;
       advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
     }
+
+    // HARD-CAP REPAIR (2026-09-25, phase 2 part B — hard-cap-repair.ts): only
+    // when a hard cap excluded someone in this team AND a real shortfall
+    // remains. Otherwise nothing below runs and the output is byte-identical.
+    let finalAssignmentsByDay = teamAssignmentsByDay;
+    let finalConflicts = teamConflicts.map((c) => c.conflict);
+    let teamRepairs: HardCapRepair[] = [];
+    if (hardCaps && hardCaps.repair !== false && teamCapExclusionSeen && teamConflicts.length > 0) {
+      const result = repairSlotPopulationGaps({
+        population: "profiling_mesure",
+        team,
+        ctx: { daysOrder, weekStart, minimumRestHours, caps: hardCaps.caps, incomingStreakByEmployee: hardCaps.incomingStreakByEmployee, priorWeekBoundaryContext },
+        preferExtended,
+        poolIds: pool.map((e) => e.id),
+        names: new Map(pool.map((e) => [e.id, e.name])),
+        groupsByDay: teamGroupsByDay,
+        assignmentsByDay: teamAssignmentsByDay,
+      });
+      teamRepairs = result.repairs;
+      hardCaps.repairsOut?.push(...result.repairs);
+      finalAssignmentsByDay = result.assignmentsByDay;
+      finalConflicts = recomputeSlotConflicts(teamConflicts, finalAssignmentsByDay, result.search);
+    }
+
+    for (const day of daysOrder) {
+      if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
+      for (const a of finalAssignmentsByDay[day] ?? []) {
+        const g: GeneratedShiftAssignment = { employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [team] };
+        const reason = repairReasonFor(teamRepairs, team, a.employeeId, day);
+        if (reason) g.hardCapRepairReason = reason;
+        generatedShiftsByDay[day].push(g);
+      }
+    }
+    conflicts.push(...finalConflicts);
   }
 
   return { generatedShiftsByDay, conflicts };
@@ -464,10 +569,29 @@ export function generateForeignCompanyShifts(
           previousCalendarDate(flightDateFor(weekStart, daysOrder[0]))
         )
       : null;
+    // HARD-CAP REPAIR bookkeeping (phase 2): this company's needs per day as
+    // slot groups (one group, or ACE + Leader groups for a confirmed role
+    // split), its conflicts, and whether any hard-cap exclusion happened.
+    const companyGroupsByDay: Record<string, RepairSlotGroup[]> = {};
+    const companyConflicts: { conflict: DemandConflict; groupKey: string[] }[] = [];
+    let companyCapExclusionSeen = false;
+    const { aces: aceMembers, leaders: leaderMembers } = partitionPoolByRole(pool, roleConfig);
+    const aceIds = new Set(aceMembers.map((e) => e.id));
+    const leaderIds = new Set(leaderMembers.map((e) => e.id));
+    const groupKeyFor = (day: string, employeeId: string) => (roleConfig ? `${company}-${day}-${leaderIds.has(employeeId) ? "leader" : "ace"}` : `${company}-${day}`);
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
       const plan = planForeignCompanyDay(company, day, flights, undefined, undefined, undefined, date);
+      companyGroupsByDay[day] = [];
+      if (plan && headcount !== undefined) {
+        companyGroupsByDay[day] = roleConfig
+          ? [
+              { key: `${company}-${day}-ace`, window: plan.combinedWindow, needed: roleConfig.aceCount, eligibleIds: aceIds },
+              { key: `${company}-${day}-leader`, window: plan.combinedWindow, needed: roleConfig.leaderCount, eligibleIds: leaderIds },
+            ]
+          : [{ key: `${company}-${day}`, window: plan.combinedWindow, needed: headcount, eligibleIds: new Set(pool.map((e) => e.id)) }];
+      }
       let dayAssignments: { employeeId: string; shiftCode: string }[] = [];
       const fatigueReasons = new Map<string, string[]>();
 
@@ -505,14 +629,18 @@ export function generateForeignCompanyShifts(
         );
         dayAssignments = assigned;
         for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "foreign_company", reason: x.reason });
+        if (capExcluded.length > 0) companyCapExclusionSeen = true;
         if (shortfall > 0) {
-          conflicts.push({
-            team: company,
-            dayOfWeek: day,
-            window: plan.combinedWindow,
-            needed: headcount,
-            covered: headcount - shortfall,
-            ...(capExcluded.length > 0 ? { capExcluded } : {}),
+          companyConflicts.push({
+            groupKey: companyGroupsByDay[day].map((g) => g.key),
+            conflict: {
+              team: company,
+              dayOfWeek: day,
+              window: plan.combinedWindow,
+              needed: headcount,
+              covered: headcount - shortfall,
+              ...(capExcluded.length > 0 ? { capExcluded } : {}),
+            },
           });
         }
         if (ledger && plan.shiftCode) {
@@ -561,6 +689,57 @@ export function generateForeignCompanyShifts(
       advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
     }
 
+    // HARD-CAP REPAIR (2026-09-25, phase 2 part B — hard-cap-repair.ts): on
+    // the flight-day roster, BEFORE the roster top-up, only when a hard cap
+    // excluded a member of this company AND a flight day is still short.
+    // Otherwise nothing here runs and the output is byte-identical.
+    if (hardCaps && hardCaps.repair !== false && companyCapExclusionSeen && companyConflicts.length > 0) {
+      const poolIdSet = new Set(pool.map((e) => e.id));
+      const assignmentsByDay: Record<string, RepairSlotAssignment[]> = {};
+      for (const day of daysOrder) {
+        assignmentsByDay[day] = (generatedShiftsByDay[day] ?? []).filter((g) => poolIdSet.has(g.employeeId)).map((g) => ({ employeeId: g.employeeId, shiftCode: g.shiftCode, groupKey: groupKeyFor(day, g.employeeId) }));
+      }
+      const result = repairSlotPopulationGaps({
+        population: "foreign_company",
+        team: company,
+        ctx: { daysOrder, weekStart, minimumRestHours, caps: hardCaps.caps, incomingStreakByEmployee: hardCaps.incomingStreakByEmployee, priorWeekBoundaryContext },
+        preferExtended,
+        poolIds: pool.map((e) => e.id),
+        names: new Map(pool.map((e) => [e.id, e.name])),
+        groupsByDay: companyGroupsByDay,
+        assignmentsByDay,
+      });
+      hardCaps.repairsOut?.push(...result.repairs);
+      if (result.assignmentsByDay !== assignmentsByDay) {
+        for (const day of daysOrder) {
+          const kept = (generatedShiftsByDay[day] ?? []).filter((g) => !poolIdSet.has(g.employeeId));
+          const originals = new Map((generatedShiftsByDay[day] ?? []).filter((g) => poolIdSet.has(g.employeeId)).map((g) => [g.employeeId, g]));
+          generatedShiftsByDay[day] = [
+            ...kept,
+            ...result.assignmentsByDay[day].map((a) => {
+              const original = originals.get(a.employeeId);
+              if (original && original.shiftCode === a.shiftCode) return original;
+              const g: GeneratedShiftAssignment = { employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [company] };
+              if (ledger) g.fatigueReason = [];
+              const reason = repairReasonFor(result.repairs, company, a.employeeId, day);
+              if (reason) g.hardCapRepairReason = reason;
+              return g;
+            }),
+          ];
+        }
+        // The top-up below reads each member's real flight-day hours.
+        for (const e of pool) usageHours.set(e.id, 0);
+        for (const day of daysOrder) {
+          for (const g of generatedShiftsByDay[day]) {
+            if (poolIdSet.has(g.employeeId)) usageHours.set(g.employeeId, (usageHours.get(g.employeeId) ?? 0) + getShiftDurationHours(g.shiftCode, flightDateFor(weekStart, day)));
+          }
+        }
+      }
+      conflicts.push(...recomputeSlotConflicts(companyConflicts, result.assignmentsByDay, result.search));
+    } else {
+      conflicts.push(...companyConflicts.map((c) => c.conflict));
+    }
+
     // NORMAL RAM ROSTER TOP-UP — see this function's doc comment. Runs
     // once per company, per employee, over the whole window, exactly the
     // same shape as roster-generation.ts's own flexible-pool loop: reach
@@ -571,11 +750,29 @@ export function generateForeignCompanyShifts(
     // consecutive-OFF soft preference and forward rest lookahead against
     // whatever real company-flight-day shift already exists.
     if (config) {
-      const targetWorkingDaysThisWindow = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
+      const normalTargetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
       for (const employee of pool) {
         const scheduledDays = new Set<string>(
           daysOrder.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === employee.id))
         );
+        // PART A (2026-09-25, hard-constraints phase 2): with hard caps, the
+        // target is this member's own CAP-AWARE target (roster-target.ts) from
+        // their real flight-day hours plus the real shortest code per free
+        // day — the same rule as the flexible pool's top-up. Without hard
+        // caps, the fixed normal target, byte-for-byte as before.
+        let targetWorkingDaysThisWindow = normalTargetWorkDays;
+        let offWindowLength = config.normal_weekly_off_days;
+        if (hardCaps) {
+          const committedHoursByDay = new Map<string, number>();
+          for (const d of daysOrder) {
+            const g = (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
+            if (g) committedHoursByDay.set(d, getShiftDurationHours(g.shiftCode, flightDateFor(weekStart, d)));
+          }
+          const target = computeCapAwareTargetWorkDays({ daysOrder, weekStart, normalTargetWorkDays, hardWeeklyHoursCap: hardCaps.caps.hardWeeklyHoursCap, committedHoursByDay });
+          hardCaps.targetsOut?.set(employee.id, target);
+          targetWorkingDaysThisWindow = target.targetWorkDays;
+          offWindowLength = preferredOffWindowLength(daysOrder.length, targetWorkingDaysThisWindow, config.normal_weekly_off_days, config.max_consecutive_off_days ?? config.normal_weekly_off_days);
+        }
         const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
         const topUpReasons = fatigueActive ? new Map<string, string[]>() : undefined;
         const capShortfall: { day: string; reason: HardCapExclusionReason }[] = [];
@@ -597,7 +794,7 @@ export function generateForeignCompanyShifts(
           priorWeekBoundaryContext,
           minimumRestHours,
           targetWorkingDaysThisWindow,
-          config.normal_weekly_off_days,
+          offWindowLength,
           null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
           undefined,
           undefined,

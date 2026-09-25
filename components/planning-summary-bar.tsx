@@ -87,7 +87,8 @@ export function PlanningSummaryBar({
       i.type === "consecutive_off_violation" ||
       i.type === "cross_week_continuity_uncertain" ||
       i.type === "separated_off_days" ||
-      i.type === "consecutive_work_history_unknown"
+      i.type === "consecutive_work_history_unknown" ||
+      i.type === "roster_target_shortfall"
   ).length;
 
   // Ordered by draft-plan priority, not raw category: Flights sets the

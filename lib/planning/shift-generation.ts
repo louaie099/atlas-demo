@@ -47,6 +47,16 @@ export interface GeneratedShiftAssignment {
    * off, so default output is byte-identical to before.
    */
   fatigueReason?: string[];
+  /**
+   * HARD-CAP REPAIR EXPLAINABILITY (2026-09-25, hard-constraints milestone
+   * phase 2 — hard-cap-repair.ts): present ONLY on an assignment the bounded
+   * cross-employee repair pass created or moved, in plain words (e.g.
+   * "Monday reassigned from X to Y so X could cover Tuesday within the
+   * 5-consecutive-work-day cap"). Absent (not even the key) on every
+   * assignment the greedy generation produced unchanged, so output with no
+   * repair is byte-identical to before.
+   */
+  hardCapRepairReason?: string;
 }
 
 function timeToMinutes(t: string): number {
@@ -283,7 +293,9 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * candidates are never scored. If that leaves demand uncovered, it stays
  * uncovered and surfaces through Stage 9's ordinary `unfilled_duty` — the
  * same honest-gap path a rest-driven shortfall already takes. No
- * cross-employee reallocation is attempted (phase 2).
+ * cross-employee reallocation is attempted HERE: since phase 2
+ * (2026-09-25), generate-draft-plan.ts runs hard-cap-repair.ts's bounded
+ * repairFlexiblePoolWeek on this function's whole-week result afterwards.
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
@@ -670,6 +682,72 @@ export function generateFlexiblePoolShifts(
   }
 
   return Array.from(assignments.values());
+}
+
+/**
+ * REPLAY of Stage 6's own hard-coverage accounting (2026-09-25,
+ * hard-constraints phase 2 — used by hard-cap-repair.ts to measure a day's
+ * still-uncovered hard (bucket, role) demand after a candidate
+ * reallocation). Walks `assignments` IN ORDER and, exactly like
+ * generateFlexiblePoolShifts' greedy loop, lets each assigned shift claim at
+ * most ONE role per bucket it genuinely covers (same asymmetric
+ * bucketsCoveredBy rule), choosing the scarcest still-unmet role among the
+ * employee's skills. For Stage 6's own output (in pick order) this
+ * reproduces the greedy's remaining demand exactly. Returns the remaining
+ * units per bucket per role, their total, and the roles each assignment
+ * actually claimed. Pure; the soft T1 aggregate signal is not replayed
+ * (it never creates an unfilled duty).
+ */
+export function replayStage6HardCoverage(
+  demand: DailyDemand,
+  assignments: { employeeId: string; shiftCode: string }[],
+  skillsByEmployee: ReadonlyMap<string, readonly string[]>,
+  date: string,
+  rolesToConsider: string[] = STAGE6_DEFAULT_ROLES
+): { remaining: Map<string, number>[]; totalRemaining: number; claimedRoles: string[][] } {
+  const remaining: Map<string, number>[] = demand.buckets.map((bucket) => {
+    const m = new Map<string, number>();
+    for (const role of rolesToConsider) {
+      const need = bucket.demandByRole[role] ?? 0;
+      if (need > 0) m.set(role, need);
+    }
+    return m;
+  });
+  const catalog = shiftCatalogForDate(date);
+  const claimedRoles: string[][] = [];
+  for (const a of assignments) {
+    const times = catalog[a.shiftCode];
+    const claimed = new Set<string>();
+    if (times) {
+      const entreeMin = timeToMinutes(times.entree);
+      const sortieMin = timeToMinutes(times.sortie);
+      const skills = skillsByEmployee.get(a.employeeId) ?? [];
+      if (sortieMin > entreeMin) {
+        for (let i = 0; i < remaining.length && i < BUCKETS_PER_DAY; i++) {
+          const bucketEnd = (i + 1) * BUCKET_MINUTES;
+          if (!(entreeMin < bucketEnd && sortieMin >= bucketEnd)) continue;
+          let pickedRole: string | null = null;
+          let pickedRemaining = Number.POSITIVE_INFINITY;
+          for (const role of rolesToConsider) {
+            if (!skills.includes(role)) continue;
+            const r = remaining[i].get(role) ?? 0;
+            if (r > 0 && r < pickedRemaining) {
+              pickedRole = role;
+              pickedRemaining = r;
+            }
+          }
+          if (pickedRole) {
+            remaining[i].set(pickedRole, pickedRemaining - 1);
+            claimed.add(pickedRole);
+          }
+        }
+      }
+    }
+    claimedRoles.push([...claimed]);
+  }
+  let totalRemaining = 0;
+  for (const m of remaining) for (const v of m.values()) totalRemaining += Math.max(0, v);
+  return { remaining, totalRemaining, claimedRoles };
 }
 
 export interface DroppedShiftForRest {

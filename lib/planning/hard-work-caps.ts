@@ -34,6 +34,13 @@ import type { Config } from "../types";
  * cross-employee repair pass is PHASE 2. See
  * docs/known-limitations/roster-planning-vs-duty-allocation.md.
  *
+ * PHASE 2 (2026-09-25) has landed on top of — not instead of — these
+ * filters: hard-cap-repair.ts runs a bounded, deterministic cross-employee
+ * repair AFTER each population's greedy generation (only when a cap
+ * excluded someone), and roster-target.ts replaces the fixed 5-work-day
+ * roster target with a per-employee cap-aware one. The filters here are
+ * unchanged and every repaired week is re-checked against them.
+ *
  * RUNNING STATE is always-on and independent of the (disabled-by-default)
  * fatigue subsystem: callers keep their own per-employee consecutive-work-
  * day streak (nextConsecutiveWorkDayStreak — same increment/reset semantics

@@ -5,6 +5,7 @@ import { restHoursBetween } from "../roster-generation";
 import { evaluateAverageWorkingHours } from "./average-hours";
 import { usesFixedCycleRotation } from "../teams";
 import { checkConsecutiveOffCyclic, checkOffDaysSeparated } from "./consecutive-off";
+import { CapAwareRosterTarget } from "./roster-target";
 // JR_NT_OFF_OFF_CYCLE is imported directly (not looked up per-team) because
 // every fixed-cycle team today shares this one confirmed cycle definition
 // (see lib/teams.ts's FIXED_CYCLE_TEAMS and lib/employee-generator.ts's
@@ -61,7 +62,15 @@ export type PlanIssueType =
   // predecessor plan), so the hard 5-consecutive-work-day cap had to start
   // their count at 0 this week (see consecutive-days-continuity.ts's
   // incomingStreakForHardCap for the policy and its tradeoff).
-  | "consecutive_work_history_unknown";
+  | "consecutive_work_history_unknown"
+  // CAP-AWARE ROSTER TARGET (2026-09-25, hard-constraints milestone phase 2
+  // part A — roster-target.ts): a NON-BLOCKING finding for a flexible-pool /
+  // foreign-company employee rostered FEWER days than their own cap-aware
+  // target — i.e. fewer than the hard weekly hours cap left room for at
+  // their real shift codes. A week the cap itself limits (e.g. 4 x 9h, a 5th
+  // day would exceed 42h) meets its target and is NOT flagged: it is that
+  // employee's normal week.
+  | "roster_target_shortfall";
 
 export interface PlanIssue {
   type: PlanIssueType;
@@ -389,14 +398,66 @@ export function checkConsecutiveOff(employee: Employee, config: Config): PlanIss
  * Never returns anything for an employee outside the confirmed
  * normal-OFF-day count (see checkOffDaysSeparated's own doc comment).
  */
-export function checkSeparatedOffDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue | null {
+export function checkSeparatedOffDays(employee: Employee, daysOrder: string[], config: Config, rosterTarget?: CapAwareRosterTarget): PlanIssue | null {
   if (usesFixedCycleRotation(employee.assignment)) return null;
+  // PART A (phase 2): a week whose target the hard hours cap lowered
+  // (roster-target.ts — e.g. 4 work days, so 3 OFF) is that employee's
+  // NORMAL week. Its OFF days cannot form one block without breaking the
+  // hard max_consecutive_off_days rule (3 > 2), and where they fall is
+  // largely dictated by the committed demand days — so the "one consecutive
+  // block" preference does not apply and nothing is flagged here. A genuine
+  // over-long OFF block is still the hard consecutive_off_violation, and a
+  // week short of its own target is roster_target_shortfall (below).
+  if (rosterTarget && rosterTarget.targetWorkDays < rosterTarget.normalTargetWorkDays) return null;
   const finding = checkOffDaysSeparated(employee, daysOrder, config.normal_weekly_off_days);
   if (!finding) return null;
   return {
     type: "separated_off_days",
     employeeId: employee.id,
     description: `${employee.name}: OFF days (${finding.offDays.join(", ")}) are legal but separated rather than one consecutive block — consecutive OFF days are preferred where operationally possible, though a separated pattern remains fully valid.`,
+  };
+}
+
+/**
+ * PART A (2026-09-25, hard-constraints milestone phase 2): the "normal
+ * roster structure" check, now per employee. `rosterTarget` is the
+ * employee's CAP-AWARE target (roster-target.ts): the normal
+ * daysOrder.length - normal_weekly_off_days, or fewer when the hard weekly
+ * hours cap cannot fit that many of their real codes.
+ *
+ * THE DISTINCTION THIS ENCODES (the crux of part A):
+ *   - worked days == target (even when target < 5): NORMAL. A 4-work /
+ *     3-OFF week forced by the 42h cap is not an anomaly and is not flagged.
+ *   - worked days < target AND a hard cap closed a free day
+ *     (rosterTarget.capClosedFreeDays): the hours arithmetic left room for
+ *     more days than were rostered — a genuinely avoidable shortfall (an
+ *     ordering artifact, e.g. the consecutive-work-day cap closing a day the
+ *     hours cap allowed). Flagged, non-blocking.
+ * No target (static/fixed-cycle/Profiling-Mesure employees, or a caller that
+ * supplies none) = nothing to check.
+ */
+export function checkRosterTargetShortfall(employee: Employee, daysOrder: string[], rosterTarget?: CapAwareRosterTarget): PlanIssue | null {
+  if (!rosterTarget || usesFixedCycleRotation(employee.assignment)) return null;
+  // Only a HARD-CAP-attributable shortfall is flagged here (a free day the
+  // arithmetic left room for was closed by a cap — typically the
+  // consecutive-work-day cap, or an hours cap reached early by the greedy's
+  // order). A shortfall with no cap involvement (15h rest left no legal code
+  // on a free day) predates this milestone, is unaffected by it, and keeps
+  // being surfaced exactly as before (e.g. consecutive_off_violation) — so a
+  // plan whose caps never bind gets no new warning from this check.
+  if ((rosterTarget.capClosedFreeDays?.length ?? 0) === 0) return null;
+  const worked = daysOrder.filter((day) => {
+    const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
+    return entry?.status === "working" && Boolean(entry.shift_code);
+  }).length;
+  if (worked >= rosterTarget.targetWorkDays) return null;
+  const basis = rosterTarget.capLimited
+    ? `their cap-aware target is ${rosterTarget.targetWorkDays} (the ${rosterTarget.hardWeeklyHoursCap}h hard weekly hours cap cannot fit the normal ${rosterTarget.normalTargetWorkDays} at their real shift codes)`
+    : `their target is the normal ${rosterTarget.targetWorkDays}, which the ${rosterTarget.hardWeeklyHoursCap}h hard weekly hours cap leaves room for`;
+  return {
+    type: "roster_target_shortfall",
+    employeeId: employee.id,
+    description: `${employee.name}: rostered ${worked} work day(s) this week but ${basis} — ${rosterTarget.targetWorkDays - worked} achievable day(s) were not rostered because a hard cap closed ${rosterTarget.capClosedFreeDays!.join(", ")}. Non-blocking.`,
   };
 }
 
@@ -414,7 +475,11 @@ export function validateWeeklyPlan(
   employees: Employee[],
   daysOrder: string[],
   config: Config,
-  weekStart: string
+  weekStart: string,
+  // PART A (phase 2): each flexible-pool / foreign-company employee's
+  // cap-aware roster target (generate-draft-plan.ts). Optional; omitted =
+  // the pre-phase checks exactly.
+  rosterTargets?: ReadonlyMap<string, CapAwareRosterTarget>
 ): PlanIssue[] {
   const issues: PlanIssue[] = [];
 
@@ -439,8 +504,10 @@ export function validateWeeklyPlan(
     if (hoursIssue) issues.push(hoursIssue);
     const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);
-    const separatedOffIssue = checkSeparatedOffDays(employee, daysOrder, config);
+    const separatedOffIssue = checkSeparatedOffDays(employee, daysOrder, config, rosterTargets?.get(employee.id));
     if (separatedOffIssue) issues.push(separatedOffIssue);
+    const targetIssue = checkRosterTargetShortfall(employee, daysOrder, rosterTargets?.get(employee.id));
+    if (targetIssue) issues.push(targetIssue);
   }
 
   return issues;
