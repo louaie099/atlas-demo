@@ -204,7 +204,18 @@ describe("E1 — no generation path ever assigns a 6th consecutive work day; the
       expect(workPattern(on, id)).toEqual([true, true, true, true, true, false, true]);
     }
     expect(unfilledDays(on, "Gate")).toEqual(["Saturday"]);
-    expect(unfilledDays(on, "Boarding")).toEqual(["Saturday"]);
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): Stage 6's roster
+    // above is unchanged, but Saturday's Boarding duty is no longer unfilled:
+    // the Air France team is no longer forced OFF all together on Saturday
+    // (see the foreign-company test below), so an on-shift Air France member
+    // is available and Stage 9 redeploys their slack to it (the existing
+    // preferExtended/redeployment rule). Before the fix the whole workforce
+    // was OFF on Saturday, which is the only reason Boarding was unfilled.
+    expect(unfilledDays(on, "Boarding")).toEqual([]);
+    const reqRole = new Map(on.requirements.map((r) => [r.id, r.role]));
+    const satBoarding = on.dutiesByDay["Saturday"].filter((d) => reqRole.get(d.requirementId) === "Boarding");
+    expect(satBoarding.length).toBeGreaterThan(0);
+    expect(satBoarding.every((d) => d.employeeId.startsWith("af-"))).toBe(true);
     const excluded = on.hardCapExclusions.filter((x) => x.population === "flexible_pool");
     expect(excluded.map((x) => `${x.employeeId}|${x.dayOfWeek}|${x.reason}`).sort()).toEqual([
       "flex-a|Saturday|consecutive_work_days",
@@ -212,24 +223,47 @@ describe("E1 — no generation path ever assigns a 6th consecutive work day; the
     ]);
   });
 
-  it("Profiling/Mesure: capped at 5, Saturday reported as a BLOCKING demand conflict naming the cap", () => {
-    expect(workPattern(on, "prof-1")).toEqual([true, true, true, true, true, false, true]);
+  it("Profiling/Mesure: capped at 5, the one lost day reported as a BLOCKING demand conflict naming the cap-paced rest", () => {
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): prof-1 can legally
+    // work 6 of the 7 demand days; the planner places the forced rest day
+    // mid-week (evenly spread) instead of wherever the greedy ran into the
+    // cap. Same invariant: never a 6th consecutive day, exactly one day lost.
+    const worked = workPattern(on, "prof-1");
+    expect(maxRun(worked)).toBeLessThanOrEqual(5);
+    expect(worked.filter(Boolean).length).toBe(6);
+    const offDay = DAYS[worked.indexOf(false)];
     const conflicts = blocking(on, "Profiling");
-    expect(conflicts.map((c) => c.day)).toEqual(["Saturday"]);
+    expect(conflicts.map((c) => c.day)).toEqual([offDay]);
     for (const c of conflicts) {
       expect(c.description.startsWith("BLOCKING: ")).toBe(true);
-      expect(c.description).toContain("Prof One (would be a 6th consecutive work day)");
+      expect(c.description).toContain("within the hard work caps");
+      expect(c.description).toContain("5 consecutive work days");
+      expect(c.description).toContain("cap-paced rest planning");
+      expect(c.description).toContain("rested today to keep their remaining hard-cap capacity for their other planned days: Prof One.");
       expect(c.description).toContain("phase 2");
     }
   });
 
-  it("foreign company: capped at 5, Saturday reported as a BLOCKING demand conflict naming each excluded member", () => {
-    for (const id of ["af-1", "af-2", "af-3"]) expect(workPattern(on, id)).toEqual([true, true, true, true, true, false, true]);
+  it("foreign company: capped at 5, the lost days reported as BLOCKING demand conflicts — spread, never the whole team OFF on the same day", () => {
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): before, all three
+    // members worked Mon-Fri and ALL hit the consecutive cap together, so
+    // Saturday had 0/3 Air France coverage. Now each member's forced rest
+    // day is staggered: same 18 person-days, but no day falls to zero.
+    let total = 0;
+    for (const id of ["af-1", "af-2", "af-3"]) {
+      const worked = workPattern(on, id);
+      expect(maxRun(worked), id).toBeLessThanOrEqual(5);
+      expect(worked.filter(Boolean).length, id).toBe(6);
+      total += worked.filter(Boolean).length;
+    }
+    expect(total).toBe(18);
+    for (const day of DAYS) expect(on.generatedShiftsByDay[day].filter((g) => g.coversRoles.includes("Air France")).length, day).toBeGreaterThanOrEqual(2);
     const conflicts = blocking(on, "Air France");
-    expect(conflicts.map((c) => c.day)).toEqual(["Saturday"]);
+    expect(conflicts).toHaveLength(3);
     for (const c of conflicts) {
-      expect(c.description.startsWith("BLOCKING: ")).toBe(true);
-      expect(c.description).toContain("3 otherwise rested, compatible team member(s) were excluded by a HARD cap");
+      expect(c.description.startsWith("BLOCKING: Air France needed 3 staff member(s)")).toBe(true);
+      expect(c.description).toContain("but only 2 could be legally covered within the hard work caps");
+      expect(c.description).toContain("cap-paced rest planning");
     }
   });
 
@@ -254,8 +288,15 @@ describe("E2 — never over hard_weekly_hours_cap for the displayed week", () =>
       expect(weekHours(on, e.id, WEEK)).toBeLessThanOrEqual(42);
     }
     expect(unfilledDays(on, "Gate").length).toBeGreaterThan(0);
-    expect(blocking(on, "Profiling").some((c) => c.description.includes("would exceed the 42h hard weekly hours cap"))).toBe(true);
-    expect(blocking(on, "Air France").some((c) => c.description.includes("would exceed the 42h hard weekly hours cap"))).toBe(true);
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): Profiling/Air France
+    // no longer run into the hours cap at the end of the week (which named
+    // "would exceed the 42h ..." for the members excluded there) — their
+    // capacity is spread up front, and the lost days are reported as
+    // cap-paced shortfalls naming the 42h cap and who rested.
+    for (const team of ["Profiling", "Air France"]) {
+      expect(blocking(on, team).length, team).toBeGreaterThan(0);
+      expect(blocking(on, team).every((c) => c.description.includes("under the hard caps (42h weekly hours") && c.description.includes("cap-paced rest planning")), team).toBe(true);
+    }
   });
 
   it("the Stage-6.5 top-up never adds a day past the cap either — and (phase 2, part A) the resulting 4-day week is that employee's normal, cap-aware target, not a reported shortfall", () => {
@@ -362,9 +403,16 @@ describe("E5 — cross-week continuity of the consecutive-work-day count", () =>
     const p = plan(CONSECUTIVE_ONLY, employees, seeds);
     for (const e of employees) {
       const worked = workPattern(p, e.id);
-      expect(worked.slice(0, 3), e.id).toEqual([true, true, false]); // Mon, Tue, then OFF Wednesday (would be day 6)
+      // Mon, Tue, Wed can never all be worked (Wednesday would be day 6).
+      expect(worked.slice(0, 3).every(Boolean), e.id).toBe(false);
       expect(maxRun(worked, 3), e.id).toBeLessThanOrEqual(5);
     }
+    // Flexible and Profiling: Mon, Tue, then OFF Wednesday. Air France is a
+    // 3-person team needed in full every day, so CAP-PACED REST PLANNING
+    // (2026-09-25 lockstep fix) staggers one member's rest to Tuesday rather
+    // than leaving the whole team OFF together on Wednesday.
+    for (const id of ["flex-a", "flex-b", "prof-1"]) expect(workPattern(p, id).slice(0, 3), id).toEqual([true, true, false]);
+    expect(workPattern(p, "af-1").slice(0, 3).filter(Boolean).length + workPattern(p, "af-2").slice(0, 3).filter(Boolean).length + workPattern(p, "af-3").slice(0, 3).filter(Boolean).length).toBe(6);
     expect(unfilledDays(p, "Gate")).toContain("Wednesday");
     expect(blocking(p, "Profiling").map((c) => c.day)).toContain("Wednesday");
     expect(blocking(p, "Air France").map((c) => c.day)).toContain("Wednesday");
@@ -378,15 +426,26 @@ describe("E5 — cross-week continuity of the consecutive-work-day count", () =>
       priorWeekBoundaryContext: new Map(employees.map((e) => [e.id, { shift_start: "08:00", shift_end: "17:00" }])),
       priorPlanRosterEntries: employees.flatMap((e) => workedFriSatSun(e.id)),
     });
-    const wed = bundle.rosterEntries.filter((r) => r.day_of_week === "Wednesday");
+    // Nobody works all of Mon-Wed (Wednesday would be day 6 of the real
+    // streak). Flexible/Profiling are OFF Wednesday; Air France's rest is
+    // staggered by CAP-PACED REST PLANNING (2026-09-25 lockstep fix).
+    for (const e of employees) {
+      const firstThree = ["Monday", "Tuesday", "Wednesday"].map((d) => bundle.rosterEntries.find((r) => r.employee_id === e.id && r.day_of_week === d)?.status === "working");
+      expect(firstThree.every(Boolean), e.id).toBe(false);
+    }
+    const wed = bundle.rosterEntries.filter((r) => r.day_of_week === "Wednesday" && ["flex-a", "flex-b", "prof-1"].includes(r.employee_id));
     expect(wed.every((r) => r.status === "off")).toBe(true);
     expect(bundle.plan.issues.some((i) => i.type === "consecutive_work_history_unknown")).toBe(false);
   });
 
   it("a MISSING predecessor is the documented 'unknown' policy: the count starts at 0 (5 days allowed) AND the plan carries a visible, non-blocking note — never a silent 'definitely day 0'", () => {
     const p = plan(CONSECUTIVE_ONLY); // no seeds at all
-    expect(maxRun(workPattern(p, "prof-1"))).toBe(5);
-    expect(workPattern(p, "prof-1").slice(0, 5)).toEqual([true, true, true, true, true]);
+    // Observed on the flexible pool (prof-1's forced rest day is now placed
+    // mid-week by CAP-PACED REST PLANNING, 2026-09-25, so it no longer
+    // demonstrates a full 5-day run); a fresh-5 count is the same property.
+    expect(maxRun(workPattern(p, "flex-a"))).toBe(5);
+    expect(workPattern(p, "flex-a").slice(0, 5)).toEqual([true, true, true, true, true]);
+    expect(maxRun(workPattern(p, "prof-1"))).toBeLessThanOrEqual(5);
     const notes = p.issues.filter((i) => i.type === "consecutive_work_history_unknown");
     expect(notes).toHaveLength(1);
     expect(notes[0].description).toContain("unknown for 6 generation-driven employee(s)");
@@ -642,11 +701,17 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     const { result, repairsOut, pattern, team } = airFranceScenario(CONFIG);
     for (const e of team) expect(patternHoursOf(pattern(e.id), WEEK), e.id).toBeLessThanOrEqual(42);
     expect(team.reduce((n, e) => n + pattern(e.id).filter(Boolean).length, 0)).toBe(20); // the hours cap's hard ceiling
-    expect(repairsOut).toEqual([]);
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): the team's 20
+    // person-days are planned across the week up front; the repair pass
+    // still runs (and may legally reallocate a day, e.g. for af-1's incoming
+    // streak), but the hours ceiling means exactly one day stays one short.
     expect(result.conflicts).toHaveLength(1);
-    expect(result.conflicts[0]).toMatchObject({ dayOfWeek: "Tuesday", needed: 3, covered: 2 });
+    expect(result.conflicts[0]).toMatchObject({ needed: 3, covered: 2 });
+    expect(result.conflicts[0].capPacing).toMatchObject({ teamCapacityDays: 20, weekDemandDays: 21 });
     expect(result.conflicts[0].capRepair).toMatchObject({ budget: HARD_CAP_REPAIR_ATTEMPT_BUDGET, budgetExhausted: false });
     expect(result.conflicts[0].capRepair!.attemptsUsed).toBeGreaterThan(0);
+    for (const e of team) expect(maxRun(pattern(e.id).map(Boolean), 0 + (["af-1", "af-2", "af-3"].includes(e.id) ? 4 : 0)), e.id).toBeLessThanOrEqual(5);
+    for (const r of repairsOut) expect(r.population).toBe("foreign_company");
   });
 
   it("youssef-el-amrani (real demo data): his Monday moves to Saturday — no more 3-day OFF block, still 4 days / 36h, no cap broken, no new unfilled duty, explanation names the move", () => {
@@ -734,27 +799,42 @@ describe("PHASE 2, part B — Gulf Air's structural shortfall stays an honest, u
       makeFlight({ id: `gf-${day}`, flight_number: "GF105", airline: "Gulf Air", route: "CMN → BAH", destination: "BAH", aircraft: "Airbus A320", scheduled_departure: "09:00", day_of_week: day, flight_date: flightDateFor(WEEK, day), operator_type: "self_managed" })
     );
 
-  it("the whole 8-person team is needed on each of 4 flight days, every covering code is >= 11.25h, 3 x 11.25 + 11.25 > 42h: nobody is OFF on any day to take over, so no move exists and Sunday stays BLOCKING", () => {
+  it("the whole 8-person team is needed on each of 4 flight days, every covering code is >= 11.25h, 3 x 11.25 + 11.25 > 42h: the 24 legal person-days are spread 6/6/6/6 (not 8/8/8/0), every flight day stays an honest BLOCKING gap", () => {
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): this fixture used to
+    // pin the lockstep itself — Mon/Wed/Fri fully crewed, then the WHOLE team
+    // over the cap together and Sunday at 0/8. The capacity is unchanged
+    // (8 x 3 = 24 < 32 needed) and still structurally short, but it is now
+    // spread over the four flight days, and no flight day is left unhandled.
     const repairsOut: import("../lib/planning/hard-cap-repair").HardCapRepair[] = [];
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(DAYS, gulfTeam(), gulfFlights(), ["Gulf Air"], 15, WEEK, new Map(), undefined, undefined, {
       caps: resolveHardWorkCaps(CONFIG), incomingStreakByEmployee: new Map(), repairsOut,
     });
-    for (const day of ["Monday", "Wednesday", "Friday"]) expect(generatedShiftsByDay[day]).toHaveLength(8);
+    const flightDays = ["Monday", "Wednesday", "Friday", "Sunday"];
+    for (const day of flightDays) expect(generatedShiftsByDay[day], day).toHaveLength(6);
+    expect(flightDays.reduce((n, d) => n + generatedShiftsByDay[d].length, 0)).toBe(24);
     for (const g of generatedShiftsByDay["Monday"]) expect(getShiftDurationHours(g.shiftCode, flightDateFor(WEEK, "Monday"))).toBeGreaterThanOrEqual(11.25);
-    expect(generatedShiftsByDay["Sunday"]).toEqual([]);
+    for (const e of gulfTeam()) expect(patternHoursOf(DAYS.map((d) => generatedShiftsByDay[d].find((g) => g.employeeId === e.id)?.shiftCode ?? null), WEEK), e.id).toBeLessThanOrEqual(42);
+    // Role split still enforced: the single leader works 3 of the 4 days, never replaced by an ACE.
+    expect(flightDays.filter((d) => generatedShiftsByDay[d].some((g) => g.employeeId === "gf-leader")).length).toBe(3);
     expect(repairsOut).toEqual([]);
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0]).toMatchObject({ team: "Gulf Air", dayOfWeek: "Sunday", needed: 8, covered: 0 });
-    expect(conflicts[0].capExcluded).toHaveLength(8);
-    expect(conflicts[0].capExcluded!.every((x) => x.reason === "hard_weekly_hours")).toBe(true);
-    expect(conflicts[0].capRepair).toMatchObject({ budgetExhausted: false });
+    expect(conflicts.map((c) => c.dayOfWeek)).toEqual(flightDays);
+    for (const c of conflicts) {
+      expect(c).toMatchObject({ team: "Gulf Air", needed: 8, covered: 6 });
+      expect(c.capPacing).toMatchObject({ teamCapacityDays: 24, weekDemandDays: 32 });
+      expect(c.capPacing!.heldBack).toHaveLength(2);
+      expect(c.capRepair).toMatchObject({ budgetExhausted: false });
+    }
   });
 
   it("through the full pipeline the BLOCKING issue says the bounded repair ran and found no legal reallocation", () => {
     const p = generateDraftWeeklyPlan(gulfFlights(), gulfTeam(), [], CONFIG, DAYS, "W", WEEK);
     const sunday = p.configurationIssues.find((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")!;
     expect(sunday.description.startsWith("BLOCKING: Gulf Air needed 8 staff member(s) for its Sunday operation")).toBe(true);
-    expect(sunday.description).toContain("8 otherwise rested, compatible team member(s) were excluded by a HARD cap");
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): 6 of 8 covered (see
+    // the test above), worded as a cap-paced shortfall naming who rested.
+    expect(sunday.description).toContain("but only 6 could be legally covered within the hard work caps");
+    expect(sunday.description).toContain("about 24 person-day(s) this week under the hard caps (42h weekly hours, 5 consecutive work days) against 32 person-day(s) of real demand");
+    expect(sunday.description).toContain("2 team member(s) rested today");
     expect(sunday.description).toMatch(/The bounded cross-employee repair pass \(hard-constraints milestone phase 2\) evaluated \d+ candidate move\(s\) and found no legal reallocation/);
     expect(p.hardCapRepairs).toEqual([]);
   });

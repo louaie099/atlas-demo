@@ -14,6 +14,7 @@ import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { CapAwareRosterTarget, computeCapAwareTargetWorkDays, preferredOffWindowLength } from "./roster-target";
 import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
+import { CapPacedRestPlan, allocateProportionally, planAllowsDrawIn, planCapPacedRestDays } from "./cap-paced-rest";
 
 /**
  * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
@@ -36,6 +37,15 @@ export interface SpecializedHardCaps {
   repairsOut?: HardCapRepair[];
   /** PART B (phase 2): false disables the repair pass (tests compare with/without). Default true. */
   repair?: boolean;
+  /**
+   * CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
+   * false disables it (tests compare before/after). Default true. Inert —
+   * byte-identical output — for any team whose estimated capacity under the
+   * hard caps covers the week's demand.
+   */
+  capPacing?: boolean;
+  /** Soft shaping for the cap-paced rest planner (Config.max_consecutive_off_days). Omitted = no shaping. */
+  maxConsecutiveOffDays?: number;
 }
 
 /** Per-day cap state handed to assignPoolToWindow (the running values, read-only). */
@@ -165,6 +175,16 @@ export interface DemandConflict {
    * moves it evaluated and whether its budget ran out.
    */
   capRepair?: HardCapRepairSearch;
+  /**
+   * CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
+   * present only when this team's week was capacity-constrained under the
+   * hard caps, so its capacity was deliberately spread across the week and
+   * this day carries its proportional share of the unavoidable shortfall.
+   * Only attached when at least one member was actually held back to rest
+   * that day (`heldBack`, team order) — a day short for any other reason
+   * (e.g. a team smaller than its headcount) keeps its original shape.
+   */
+  capPacing?: { teamCapacityDays: number; weekDemandDays: number; heldBack: string[] };
 }
 
 /**
@@ -310,12 +330,12 @@ function recomputeSlotConflicts(
     const day = assignmentsByDay[conflict.dayOfWeek] ?? [];
     const covered = day.filter((a) => keys.includes(a.groupKey)).length;
     if (covered >= conflict.needed) continue;
-    if (!conflict.capExcluded) {
+    if (!conflict.capExcluded && !conflict.capPacing) {
       out.push(conflict);
       continue;
     }
     const working = new Set(day.map((a) => a.employeeId));
-    const capExcluded = conflict.capExcluded.filter((x) => !working.has(x.employeeId));
+    const capExcluded = (conflict.capExcluded ?? []).filter((x) => !working.has(x.employeeId));
     const { capExcluded: _drop, ...rest } = conflict;
     void _drop;
     out.push({ ...rest, covered, ...(capExcluded.length > 0 ? { capExcluded } : {}), capRepair: search });
@@ -331,6 +351,100 @@ function repairReasonFor(repairs: readonly HardCapRepair[] | undefined, team: st
     if ((r.toEmployeeId === employeeId && r.reassignedDay === day) || (r.filledByEmployeeId === employeeId && r.targetDay === day && r.kind !== "reallocate_for_off_run")) return r.explanation;
   }
   return undefined;
+}
+
+/**
+ * Estimated hours of one covering shift on a Profiling/Mesure day, for the
+ * cap-paced rest planner: the peak-weighted mean duration of each demand
+ * cluster's top-ranked compatible catalog code (no prior-day constraint).
+ * 0 when no cluster has any compatible code (nobody could cover that day).
+ */
+function estimateClusterShiftHours(clusters: { start: string; end: string; peak: number }[], minimumRestHours: number, preferExtended: boolean, date: string): number {
+  let weight = 0;
+  let sum = 0;
+  for (const c of clusters) {
+    const top = selectCompatibleShiftCodes(c.start, c.end, null, null, minimumRestHours, true, preferExtended, date)[0];
+    if (!top) continue;
+    sum += c.peak * getShiftDurationHours(top.code, date);
+    weight += c.peak;
+  }
+  return weight > 0 ? sum / weight : 0;
+}
+
+/** The cap-paced rest plan for one Profiling/Mesure team (see cap-paced-rest.ts). */
+function planProfilingMesurePacing(
+  pool: Employee[],
+  team: string,
+  daysOrder: string[],
+  demandByDay: Record<string, DailyDemand>,
+  weekStart: string,
+  minimumRestHours: number,
+  preferExtended: boolean,
+  hardCaps: SpecializedHardCaps
+): CapPacedRestPlan {
+  const demand: number[] = [];
+  const hours: number[] = [];
+  for (const day of daysOrder) {
+    const clusters = demandClustersForRole(demandByDay[day], team);
+    const est = estimateClusterShiftHours(clusters, minimumRestHours, preferExtended, flightDateFor(weekStart, day));
+    // One member covers one cluster per day, so a day needs Σ peaks distinct people.
+    demand.push(est > 0 ? clusters.reduce((n, c) => n + c.peak, 0) : 0);
+    hours.push(est);
+  }
+  return planCapPacedRestDays({
+    memberIds: pool.map((e) => e.id),
+    daysOrder,
+    demandByDay: demand,
+    estimatedShiftHoursByDay: hours,
+    caps: hardCaps.caps,
+    incomingStreakByEmployee: hardCaps.incomingStreakByEmployee,
+    maxConsecutiveOffDays: hardCaps.maxConsecutiveOffDays,
+  });
+}
+
+/**
+ * One cap-paced Profiling/Mesure day (see the call site). Returns, per
+ * cluster (index-aligned), who was assigned and who was cap-excluded while
+ * walking for it. Only ORDER and the held-back set come from the plan:
+ * every assignment is made by the unchanged assignPoolToWindow.
+ */
+function assignPacedProfilingMesureDay(
+  pool: Employee[],
+  clusters: { start: string; end: string; peak: number }[],
+  day: string,
+  dayIndex: number,
+  pacing: CapPacedRestPlan,
+  usageHours: Map<string, number>,
+  streaks: Map<string, number>,
+  priorDayShift: PriorDayShiftMap,
+  minimumRestHours: number,
+  preferExtended: boolean,
+  date: string,
+  dayCaps: PoolDayHardCaps
+): { perCluster: { assigned: { employeeId: string; shiftCode: string }[]; capExcluded: { employeeId: string; reason: HardCapExclusionReason }[] }[]; heldBack: string[] } {
+  const preferred = pool.filter((e) => pacing.preferredWorkDays.get(e.id)?.has(day));
+  const preferredIds = new Set(preferred.map((e) => e.id));
+  let preferredLeft = sortByLeastUsedFirst(preferred, usageHours);
+  let drawInLeft = sortByLeastUsedFirst(
+    pool.filter((e) => !preferredIds.has(e.id) && planAllowsDrawIn(pacing, e.id, dayIndex, usageHours.get(e.id) ?? 0, streaks.get(e.id) ?? 0)),
+    usageHours
+  );
+  const offered = new Set([...preferredLeft, ...drawInLeft].map((e) => e.id));
+  const out = clusters.map(() => ({ assigned: [] as { employeeId: string; shiftCode: string }[], capExcluded: [] as { employeeId: string; reason: HardCapExclusionReason }[] }));
+  const walk = (clusterIndex: number, from: Employee[], headcount: number) => {
+    if (headcount <= 0 || from.length === 0) return;
+    const r = assignPoolToWindow(from, clusters[clusterIndex], headcount, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
+    const taken = new Set(r.assigned.map((a) => a.employeeId));
+    out[clusterIndex].assigned.push(...r.assigned);
+    for (const x of r.capExcluded) if (!out[clusterIndex].capExcluded.some((y) => y.employeeId === x.employeeId)) out[clusterIndex].capExcluded.push(x);
+    preferredLeft = preferredLeft.filter((e) => !taken.has(e.id));
+    drawInLeft = drawInLeft.filter((e) => !taken.has(e.id));
+  };
+  // Ties rotate with the day so no single cluster always gets the spare unit.
+  const shares = allocateProportionally(preferred.length, clusters.map((c) => c.peak), clusters.map((c) => c.peak), dayIndex);
+  clusters.forEach((_, k) => walk(k, preferredLeft, shares[k]));
+  clusters.forEach((c, k) => walk(k, [...preferredLeft, ...drawInLeft], c.peak - out[k].assigned.length));
+  return { perCluster: out, heldBack: pool.filter((e) => !offered.has(e.id)).map((e) => e.id) };
 }
 
 /**
@@ -377,15 +491,53 @@ export function generateProfilingMesureShifts(
     const teamConflicts: { conflict: DemandConflict; groupKey: string }[] = [];
     let teamCapExclusionSeen = false;
     const poolIds = new Set(pool.map((e) => e.id));
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
+    // decided up front from this team's real weekly demand. Inactive (and
+    // the day loop below takes its original branch, byte-identical) unless
+    // the team's capacity under the hard caps is below the week's demand.
+    const pacing = hardCaps && hardCaps.capPacing !== false
+      ? planProfilingMesurePacing(pool, team, daysOrder, demandByDay, weekStart, minimumRestHours, preferExtended, hardCaps)
+      : null;
 
-    for (const day of daysOrder) {
+    daysOrder.forEach((day, dayIndex) => {
       const date = flightDateFor(weekStart, day);
       const clusters = demandClustersForRole(demandByDay[day], team);
       const dayAssignments: RepairSlotAssignment[] = [];
       let remainingPool = sortByLeastUsedFirst(pool, usageHours);
       teamGroupsByDay[day] = [];
 
-      clusters.forEach((cluster, clusterIndex) => {
+      if (pacing?.active) {
+        // Preferred workers first (least-used among them), shared across the
+        // day's clusters in proportion to each cluster's peak; then every
+        // cluster's remaining need from any preferred worker left over and
+        // the members the plan lets be drawn in. Members held back to rest
+        // are never offered today's work. Every walk is the unchanged
+        // assignPoolToWindow — the same rest/hard-cap filter as always.
+        const paced = assignPacedProfilingMesureDay(pool, clusters, day, dayIndex, pacing, usageHours, streaks, priorDayShift, minimumRestHours, preferExtended, date, dayCaps!);
+        clusters.forEach((cluster, clusterIndex) => {
+          const groupKey = `${team}-${day}-${clusterIndex}`;
+          teamGroupsByDay[day].push({ key: groupKey, window: { start: cluster.start, end: cluster.end }, needed: cluster.peak, eligibleIds: poolIds });
+          const { assigned, capExcluded } = paced.perCluster[clusterIndex];
+          dayAssignments.push(...assigned.map((a) => ({ ...a, groupKey })));
+          for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "profiling_mesure", reason: x.reason });
+          if (capExcluded.length > 0) teamCapExclusionSeen = true;
+          const shortfall = Math.max(0, cluster.peak - assigned.length);
+          if (shortfall > 0) {
+            teamConflicts.push({
+              groupKey,
+              conflict: {
+                team,
+                dayOfWeek: day,
+                window: { start: cluster.start, end: cluster.end },
+                needed: cluster.peak,
+                covered: cluster.peak - shortfall,
+                ...(capExcluded.length > 0 ? { capExcluded } : {}),
+                ...(paced.heldBack.length > 0 ? { capPacing: { teamCapacityDays: pacing.capacityDays, weekDemandDays: pacing.demandDays, heldBack: paced.heldBack } } : {}),
+              },
+            });
+          }
+        });
+      } else clusters.forEach((cluster, clusterIndex) => {
         const groupKey = `${team}-${day}-${clusterIndex}`;
         teamGroupsByDay[day].push({ key: groupKey, window: { start: cluster.start, end: cluster.end }, needed: cluster.peak, eligibleIds: poolIds });
         const { assigned, shortfall, capExcluded } = assignPoolToWindow(remainingPool, cluster, cluster.peak, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
@@ -421,15 +573,16 @@ export function generateProfilingMesureShifts(
       }
       priorDayShift = nextPriorDayShift;
       advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
-    }
+    });
 
     // HARD-CAP REPAIR (2026-09-25, phase 2 part B — hard-cap-repair.ts): only
-    // when a hard cap excluded someone in this team AND a real shortfall
-    // remains. Otherwise nothing below runs and the output is byte-identical.
+    // when a hard cap excluded someone in this team (or the week was
+    // cap-paced, i.e. capacity-constrained) AND a real shortfall remains.
+    // Otherwise nothing below runs and the output is byte-identical.
     let finalAssignmentsByDay = teamAssignmentsByDay;
     let finalConflicts = teamConflicts.map((c) => c.conflict);
     let teamRepairs: HardCapRepair[] = [];
-    if (hardCaps && hardCaps.repair !== false && teamCapExclusionSeen && teamConflicts.length > 0) {
+    if (hardCaps && hardCaps.repair !== false && (teamCapExclusionSeen || pacing?.active) && teamConflicts.length > 0) {
       const result = repairSlotPopulationGaps({
         population: "profiling_mesure",
         team,
@@ -459,6 +612,60 @@ export function generateProfilingMesureShifts(
   }
 
   return { generatedShiftsByDay, conflicts };
+}
+
+/**
+ * The cap-paced rest plan(s) for one foreign-company team (see
+ * cap-paced-rest.ts): one per confirmed role sub-team (ACE / Leader), or one
+ * for the whole team without a split. A day's demand is the sub-team's
+ * confirmed headcount on a real flight day; its estimated hours are the
+ * top-ranked compatible code for that day's protected window. `byMember`
+ * only holds members of an ACTIVE sub-plan — anyone else keeps the original
+ * least-used ordering.
+ */
+function planForeignCompanyPacing(
+  pool: Employee[],
+  roleConfig: TeamRoleConfig | null,
+  headcount: number,
+  daysOrder: string[],
+  dayPlans: Map<string, ReturnType<typeof planForeignCompanyDay>>,
+  weekStart: string,
+  minimumRestHours: number,
+  preferExtended: boolean,
+  hardCaps: SpecializedHardCaps
+): { active: boolean; byMember: Map<string, CapPacedRestPlan>; capacityDays: number; demandDays: number } {
+  const hours = daysOrder.map((day) => {
+    const plan = dayPlans.get(day);
+    if (!plan) return 0;
+    const date = flightDateFor(weekStart, day);
+    const top = selectCompatibleShiftCodes(plan.combinedWindow.start, plan.combinedWindow.end, null, null, minimumRestHours, true, preferExtended, date)[0];
+    return top ? getShiftDurationHours(top.code, date) : 0;
+  });
+  const { aces, leaders } = partitionPoolByRole(pool, roleConfig);
+  const subTeams = roleConfig ? [{ members: aces, need: roleConfig.aceCount }, { members: leaders, need: roleConfig.leaderCount }] : [{ members: pool, need: headcount }];
+  const byMember = new Map<string, CapPacedRestPlan>();
+  let capacityDays = 0;
+  let demandDays = 0;
+  // Planned (or, for an inactive sub-plan, full) coverage per day so far, as
+  // a ratio of the company's headcount — the next sub-team's tie-break.
+  const coveredSoFar = daysOrder.map(() => 0);
+  for (const { members, need } of subTeams) {
+    const sub = planCapPacedRestDays({
+      memberIds: members.map((e) => e.id),
+      daysOrder,
+      demandByDay: hours.map((h) => (h > 0 ? need : 0)),
+      estimatedShiftHoursByDay: hours,
+      caps: hardCaps.caps,
+      incomingStreakByEmployee: hardCaps.incomingStreakByEmployee,
+      maxConsecutiveOffDays: hardCaps.maxConsecutiveOffDays,
+      siblingCoverageByDay: coveredSoFar.map((c) => c / Math.max(1, headcount)),
+    });
+    hours.forEach((h, i) => (coveredSoFar[i] += h > 0 ? (sub.active ? sub.plannedWorkersByDay[i] : Math.min(need, members.length)) : 0));
+    capacityDays += sub.capacityDays;
+    demandDays += sub.demandDays;
+    if (sub.active) for (const e of members) byMember.set(e.id, sub);
+  }
+  return { active: byMember.size > 0, byMember, capacityDays, demandDays };
 }
 
 /**
@@ -579,10 +786,20 @@ export function generateForeignCompanyShifts(
     const aceIds = new Set(aceMembers.map((e) => e.id));
     const leaderIds = new Set(leaderMembers.map((e) => e.id));
     const groupKeyFor = (day: string, employeeId: string) => (roleConfig ? `${company}-${day}-${leaderIds.has(employeeId) ? "leader" : "ace"}` : `${company}-${day}`);
+    // Each day's real flight plan (pure; computed once, read by the pacing
+    // planner and the day loop).
+    const dayPlans = new Map(daysOrder.map((day) => [day, planForeignCompanyDay(company, day, flights, undefined, undefined, undefined, flightDateFor(weekStart, day))]));
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts),
+    // per role sub-team. Inactive (original ordering, byte-identical) unless
+    // a sub-team's capacity under the hard caps is below its flight-day demand.
+    const pacing = hardCaps && hardCaps.capPacing !== false && headcount !== undefined
+      ? planForeignCompanyPacing(pool, roleConfig, headcount, daysOrder, dayPlans, weekStart, minimumRestHours, preferExtended, hardCaps)
+      : null;
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
-      const plan = planForeignCompanyDay(company, day, flights, undefined, undefined, undefined, date);
+      const dayIndex = daysOrder.indexOf(day);
+      const plan = dayPlans.get(day) ?? null;
       companyGroupsByDay[day] = [];
       if (plan && headcount !== undefined) {
         companyGroupsByDay[day] = roleConfig
@@ -605,6 +822,25 @@ export function generateForeignCompanyShifts(
         // headcount is met, so whether the protected window is covered is
         // unchanged — fatigue can never cause, or hide, a shortfall.
         let orderedPool = sortByLeastUsedFirst(pool, usageHours);
+        // PACING: members on a preferred work day first, then members the
+        // plan lets be drawn in (least-used order kept within each segment);
+        // members held back to rest are not offered today's commitment.
+        let segmentOf: Map<string, number> | null = null;
+        let heldBack: string[] = [];
+        if (pacing?.active) {
+          const preferred: Employee[] = [];
+          const drawIn: Employee[] = [];
+          for (const e of orderedPool) {
+            const p = pacing.byMember.get(e.id);
+            if (!p || p.preferredWorkDays.get(e.id)?.has(day)) preferred.push(e);
+            else if (planAllowsDrawIn(p, e.id, dayIndex, usageHours.get(e.id) ?? 0, streaks.get(e.id) ?? 0)) drawIn.push(e);
+          }
+          orderedPool = [...preferred, ...drawIn];
+          const offered = new Set(orderedPool.map((e) => e.id));
+          heldBack = pool.filter((e) => !offered.has(e.id)).map((e) => e.id);
+          segmentOf = new Map<string, number>([...preferred.map((e) => [e.id, 0] as [string, number]), ...drawIn.map((e) => [e.id, 1] as [string, number])]);
+        }
+        const baseOrder = orderedPool;
         const projections = new Map<string, FatigueCandidateProjection>();
         if (ledger && plan.shiftCode) {
           for (const e of pool) {
@@ -612,8 +848,8 @@ export function generateForeignCompanyShifts(
           }
           const steps = (id: string) => fatigueScoreSteps(projections.get(id)!.after.accumulatedBurden);
           orderedPool = orderedPool
-            .map((e, k) => ({ e, k, s: steps(e.id) }))
-            .sort((a, b) => a.s - b.s || a.k - b.k)
+            .map((e, k) => ({ e, k, s: steps(e.id), seg: segmentOf?.get(e.id) ?? 0 }))
+            .sort((a, b) => a.seg - b.seg || a.s - b.s || a.k - b.k)
             .map((x) => x.e);
         }
         const { assigned, shortfall, capExcluded } = assignPoolToWindowWithRoles(
@@ -640,6 +876,7 @@ export function generateForeignCompanyShifts(
               needed: headcount,
               covered: headcount - shortfall,
               ...(capExcluded.length > 0 ? { capExcluded } : {}),
+              ...(pacing?.active && heldBack.length > 0 ? { capPacing: { teamCapacityDays: pacing.capacityDays, weekDemandDays: pacing.demandDays, heldBack } } : {}),
             },
           });
         }
@@ -649,7 +886,7 @@ export function generateForeignCompanyShifts(
           // in is explained against a displaced member (in order); a member
           // selected either way gets [] (fatigue did not change that pick).
           const withoutFatigue = assignPoolToWindowWithRoles(
-            sortByLeastUsedFirst(pool, usageHours), plan.combinedWindow, headcount, roleConfig, priorDayShift, minimumRestHours, preferExtended, date, dayCaps
+            baseOrder, plan.combinedWindow, headcount, roleConfig, priorDayShift, minimumRestHours, preferExtended, date, dayCaps
           ).assigned.map((a) => a.employeeId);
           const selectedIds = new Set(assigned.map((a) => a.employeeId));
           const displaced = withoutFatigue.filter((id) => !selectedIds.has(id));
@@ -693,7 +930,7 @@ export function generateForeignCompanyShifts(
     // the flight-day roster, BEFORE the roster top-up, only when a hard cap
     // excluded a member of this company AND a flight day is still short.
     // Otherwise nothing here runs and the output is byte-identical.
-    if (hardCaps && hardCaps.repair !== false && companyCapExclusionSeen && companyConflicts.length > 0) {
+    if (hardCaps && hardCaps.repair !== false && (companyCapExclusionSeen || pacing?.active) && companyConflicts.length > 0) {
       const poolIdSet = new Set(pool.map((e) => e.id));
       const assignmentsByDay: Record<string, RepairSlotAssignment[]> = {};
       for (const day of daysOrder) {

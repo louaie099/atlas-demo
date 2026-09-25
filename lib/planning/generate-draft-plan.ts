@@ -508,6 +508,13 @@ export function generateDraftWeeklyPlan(
     // false reproduces the phase-1 greedy-only output (used by tests to
     // compare with/without). A no-op whenever no hard cap excluded anyone.
     hardCapRepair?: boolean;
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
+    // Profiling/Mesure and foreign-company teams whose capacity under the
+    // hard caps is below the week's demand spread that capacity across the
+    // week instead of exhausting the whole team early. Defaults to true;
+    // false reproduces the pre-fix output (tests compare before/after). The
+    // flexible pool (Stage 6) never reads it.
+    specializedCapPacing?: boolean;
   } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
@@ -529,6 +536,7 @@ export function generateDraftWeeklyPlan(
   const hardCapExclusions: HardCapExclusion[] = [];
   const stageHardCaps = { caps: hardWorkCaps, incomingStreakByEmployee };
   const hardCapRepairEnabled = planningOptions.hardCapRepair !== false;
+  const specializedPacing = { capPacing: planningOptions.specializedCapPacing !== false, maxConsecutiveOffDays: config.max_consecutive_off_days };
   const hardCapRepairs: HardCapRepair[] = [];
   const rosterTargetsById = new Map<string, CapAwareRosterTarget>();
   // PART A (phase 2): the plan-level cap-aware target — how many work days
@@ -680,7 +688,7 @@ export function generateDraftWeeklyPlan(
     config.minimum_rest_hours,
     weekStart,
     priorWeekBoundaryContext,
-    { ...stageHardCaps, exclusionsOut: profilingMesureExclusions, repairsOut: profilingMesureRepairs, repair: hardCapRepairEnabled }
+    { ...stageHardCaps, ...specializedPacing, exclusionsOut: profilingMesureExclusions, repairsOut: profilingMesureRepairs, repair: hardCapRepairEnabled }
   );
   const dedicatedTeamShortDays = new Set(profilingMesureConflicts.map((c) => `${c.team}|${c.dayOfWeek}`));
   const dedicatedRoleCovered = (day: string, role: string) =>
@@ -751,7 +759,7 @@ export function generateDraftWeeklyPlan(
     // constrained (not replaced) by their company's real flight days.
     config,
     stageFatigue,
-    { ...stageHardCaps, exclusionsOut: hardCapExclusions, targetsOut: rosterTargetsById, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled }
+    { ...stageHardCaps, ...specializedPacing, exclusionsOut: hardCapExclusions, targetsOut: rosterTargetsById, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled }
   );
 
   // Every population whose day is decided by generation this run, merged
@@ -1021,17 +1029,28 @@ export function generateDraftWeeklyPlan(
   // says so explicitly (who, and which cap) — a conflict with no cap
   // involvement keeps its original wording byte-for-byte.
   const demandConflictIssues: ConfigurationIssue[] = [...profilingMesureConflicts, ...foreignDemandConflicts].map((c) => {
+    const repairNote = c.capRepair
+      ? c.capRepair.budgetExhausted
+        ? `The bounded cross-employee repair pass (hard-constraints milestone phase 2) exhausted its budget of ${c.capRepair.budget} candidate moves without finding a legal reallocation that frees one of them.`
+        : `The bounded cross-employee repair pass (hard-constraints milestone phase 2) evaluated ${c.capRepair.attemptsUsed} candidate move(s) and found no legal reallocation that frees one of them — no eligible colleague could take over one of their other days without breaking 15h rest or a hard cap themselves.`
+      : "The cross-employee repair pass (hard-constraints milestone phase 2) was not run for this plan.";
     const capNote = c.capExcluded && c.capExcluded.length > 0
       ? ` ${c.capExcluded.length} otherwise rested, compatible team member(s) were excluded by a HARD cap: ${c.capExcluded
           .map((x) => `${employeesById.get(x.employeeId)?.name ?? x.employeeId} (${x.reason === "consecutive_work_days" ? `would be a ${hardWorkCaps.maxConsecutiveWorkDays + 1}th consecutive work day` : `would exceed the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap`})`)
-          .join(", ")}. ${
-          c.capRepair
-            ? c.capRepair.budgetExhausted
-              ? `The bounded cross-employee repair pass (hard-constraints milestone phase 2) exhausted its budget of ${c.capRepair.budget} candidate moves without finding a legal reallocation that frees one of them.`
-              : `The bounded cross-employee repair pass (hard-constraints milestone phase 2) evaluated ${c.capRepair.attemptsUsed} candidate move(s) and found no legal reallocation that frees one of them — no eligible colleague could take over one of their other days without breaking 15h rest or a hard cap themselves.`
-            : "The cross-employee repair pass (hard-constraints milestone phase 2) was not run for this plan."
-        }`
+          .join(", ")}. ${repairNote}`
       : "";
+    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
+    // a paced day's shortfall is a deliberate, proportional share of the
+    // team's week-level capacity gap — so it must NOT claim that no other
+    // member was rested (some were held back to rest for later days). Its
+    // own wording says what actually happened. Unpaced conflicts keep their
+    // exact prior wording.
+    if (c.capPacing) {
+      return {
+        requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
+        description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered within the hard work caps. This team can legally work about ${c.capPacing.teamCapacityDays} person-day(s) this week under the hard caps (${hardWorkCaps.hardWeeklyHoursCap}h weekly hours, ${hardWorkCaps.maxConsecutiveWorkDays} consecutive work days) against ${c.capPacing.weekDemandDays} person-day(s) of real demand, so ATLAS spread that capacity across the week (cap-paced rest planning): each day carries a proportional share of the unavoidable shortfall, instead of the whole team reaching a cap together and leaving a later day with no coverage at all. ${c.capPacing.heldBack.length} team member(s) rested today to keep their remaining hard-cap capacity for their other planned days: ${c.capPacing.heldBack.map((id) => employeesById.get(id)?.name ?? id).join(", ")}.${capNote}${capNote ? "" : ` ${repairNote}`} The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+      };
+    }
     return {
       requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
       description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window${capNote ? " within the hard work caps" : ""}. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment.${capNote} Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
