@@ -631,8 +631,15 @@ function fingerprints(mode: FingerprintMode): Record<string, string> {
     // still covers every pre-existing field byte-for-byte.
     // (Overwriting `issues` in a spread keeps its original key position, so
     // the JSON — and the hash — of every pre-existing field is unchanged.)
-    const { hardCapExclusions, ...pre } = rest;
+    // HARD-CAPS PHASE 2 (2026-09-25): same treatment for phase 2's two
+    // purely additive transparency outputs — `hardCapRepairs` (always [] with
+    // the caps non-binding: the repair pass never runs without a cap
+    // exclusion) and `rosterTargets` (each flexible/foreign employee's
+    // cap-aware target — the normal 5 here, since the caps never bind).
+    const { hardCapExclusions, hardCapRepairs, rosterTargets, ...pre } = rest;
     expect(hardCapExclusions).toEqual([]);
+    expect(hardCapRepairs).toEqual([]);
+    expect(rosterTargets.every((t) => t.targetWorkDays === t.normalTargetWorkDays && !t.capLimited)).toBe(true);
     out[`plan:${ws}`] = h({ ...pre, issues: pre.issues.filter((i) => i.type !== "consecutive_work_history_unknown") });
     const reqs = computeWeeklyStaffingRequirements(FLIGHTS, CONFIG);
     const day = DAYS_WITH_DATA[0];
