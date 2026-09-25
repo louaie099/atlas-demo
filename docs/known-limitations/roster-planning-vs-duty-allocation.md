@@ -1459,3 +1459,205 @@ both with no fatigue argument and with fatigue arguments passed but
 disabled.
 
 Tests went from 494 to 527, all passing. `npm run build` is clean.
+
+## 2026-09-25 addendum: hard-constraints milestone, PHASE 1 of 3 — hard 5-consecutive-work-day cap and hard single-week hours cap
+
+> **This phase is NOT the complete milestone.** It makes two new rules
+> genuinely hard (never violated) using the same naive pre-scoring filter
+> the 15h rest rule already uses. That filter can — and on real data does —
+> leave coverage gaps and roster-shape problems that a smarter
+> cross-employee reallocation would avoid. **Phase 2 (a cross-employee
+> repair/reallocation pass) is still required** before these caps can be
+> considered production-quality; concrete scenarios for it are listed at
+> the end of this section.
+
+### The two new hard caps
+
+Both apply to every generation-driven population: the flexible General T1
+pool (Stage 6 and its Stage-6.5 top-up), Profiling/Mesure, and every
+foreign-company team (flight days and roster top-up).
+
+1. **No more than `Config.max_consecutive_work_days` (default 5)
+   consecutive calendar work days.** Counted continuously across the
+   Monday boundary from real predecessor-plan history (see continuity
+   below).
+2. **No more than `Config.hard_weekly_hours_cap` (default 42) scheduled
+   hours in one displayed Monday–Sunday window**, using the sum of
+   `getShiftDurationHours` over that window's worked days.
+
+The fixed JR→NT→OFF→OFF rotation (Transit/Leaders/Duty Officers) and every
+other static team (Caisse/BCB, ...) is **exempt and untouched**. The
+audited fixed cycle never exceeds 2 consecutive work days. Those teams
+never pass through a generation gate. `tests/hard-work-caps.test.ts`
+proves their roster is byte-identical to the pre-phase output.
+
+### Mechanism: the rest rule's own gates, not a new legality layer
+
+Each cap is an extra exclusion condition in the **same** filter that
+already removes rest-illegal candidates. An excluded candidate is never
+scored and never assigned. There is no post-hoc repair or drop pass, and
+no parallel legality mechanism.
+
+| Path | Gate | Running state |
+|---|---|---|
+| Stage 6 (`generateFlexiblePoolShifts`) | `legalCodesByEmployee` | streak from `runShiftGenerationPass`; hours = existing `hoursSoFarThisWeek` |
+| Stage-6.5 / foreign top-up (`computeEmployeeDayCountTopUp`) | `legalCodesAt` (so the walk, the backtracking search, the neighbour preference and pass 2 only see cap-legal codes) | run length through the day, joining both sides plus the incoming streak; hours = `initialScheduledHours` + days added |
+| Profiling/Mesure, foreign flight days (`assignPoolToWindow`) | `selectCompatibleShiftCodes` (new optional `hardCapFilter`) | per-team streak map; hours = existing `usageHours` |
+
+- Pure primitives live in `lib/planning/hard-work-caps.ts`:
+  `nextConsecutiveWorkDayStreak`, `wouldExceedConsecutiveDayCap`,
+  `wouldExceedHardWeeklyHoursCap`, `consecutiveRunLengthIfWorked` and
+  `resolveHardWorkCaps`.
+- The streak counter is **always on**. It uses the same semantics as
+  `FatigueState.consecutiveWorkDays`, but never routes through the fatigue
+  model or `FATIGUE_MODEL_ENABLED`.
+- The soft tie-break role of `hoursSoFarThisWeek` and `usageHours` is
+  unchanged. The hard comparison was added only at the filter stage.
+- `resolveHardWorkCaps` falls back to the defaults for an old
+  `config_snapshot` that lacks the new fields. It never silently disables
+  a cap.
+
+### The new config field, and why it is NOT `maximum_average_weekly_working_hours`
+
+`maximum_average_weekly_working_hours` (42) is a confirmed **average** over
+a reference period that is still unconfirmed (`null`). A hard single-week
+42h gate built on that field used to exist in this pipeline. It was
+**removed on purpose**; see `generate-draft-plan.ts`, "IMPORTANT — no
+calendar-week 42h gate". `hard_weekly_hours_cap` is a **separate, newly
+introduced management rule** that happens to default to the same number.
+
+The two fields stay structurally independent:
+
+- `hard_weekly_hours_cap` has its own constant
+  (`DEFAULT_HARD_WEEKLY_HOURS_CAP`). `lib/seed-data.ts` never derives it
+  from the labor-rule average.
+- Nothing in generation reads `maximum_average_weekly_working_hours`. A
+  test moves it to 10 and to 99 and checks that the demo roster does not
+  change.
+- `average-hours.ts` and `auditAverageWeeklyHoursFeasibility` never read
+  the hard cap. Both still report `not_evaluable` / no findings.
+  `tests/labor-rule-invariants.test.ts` is unchanged and passes.
+
+### Cross-week continuity of the consecutive-day count, and the honest "unknown"
+
+`lib/planning/consecutive-days-continuity.ts` mirrors
+`fatigue-continuity.ts`'s three-way split. It reads the same
+`rotation-context.ts` primitives rather than duplicating them.
+
+- **`prior_plan`**: the streak is counted backwards from the real
+  predecessor plan's roster. `lowerBound` is set if that whole week was
+  worked, because only one week back is read.
+- **`fallback_static_baseline`** (approximate): this applies only where a
+  static baseline is authoritative, i.e. static and fixed teams.
+- **`unknown`**: this covers three cases. There is no context at all, the
+  employee is absent from the predecessor plan, or the employee is
+  demand-driven and only a static baseline exists.
+
+`weekly-plan-service.ts` now fetches the predecessor plan's full roster.
+It already did this for the rest boundary. `buildDraftPlanBundle` derives
+a seed for every employee and passes it to `generateDraftWeeklyPlan` via
+`planningOptions.incomingConsecutiveWorkDays`.
+
+**Policy for `unknown`** (`incomingStreakForHardCap`): the count starts at
+0 at generation time. The plan then **must** carry one visible,
+non-blocking `consecutive_work_history_unknown` Plan Warning, which says
+the streak before this week cannot be seen. The warning is shown in the
+summary bar and drill-down as "Consecutive-day history unknown (info)".
+
+Tradeoff, stated plainly: 0 means "no work ATLAS knows of", not "rested".
+The more conservative alternatives were rejected:
+
+- Assuming the cap is already reached would forbid Monday for the whole
+  workforce on a first-ever week. That is a fabricated gap.
+- Assuming "this week wraps onto itself" is a hypothesis this codebase
+  already refuses to enforce as a hard rule for demand-driven staff (see
+  `cross_week_continuity_uncertain`).
+
+The uncertainty is therefore limited to the first days of a week with no
+predecessor. It is disclosed, and it disappears once the preceding plan
+exists. Within the displayed week the count is always exact.
+
+### How gaps are reported (existing mechanisms only)
+
+- **Stage 6**: an uncovered need stays uncovered. It surfaces as Stage 9's
+  ordinary `unfilled_duty`, the same path a rest-driven shortfall takes.
+- **Profiling/Mesure and foreign flight days**: these use the existing
+  `DemandConflict` and its `"BLOCKING: ..."` `ConfigurationIssue`. When a
+  cap excluded an otherwise rested, compatible member, the same issue
+  names them and the cap involved (new optional `DemandConflict.capExcluded`).
+  A conflict with no cap involvement keeps its original wording byte for
+  byte.
+- **Top-up (roster shape, not flight demand)**: one non-blocking
+  `hard-cap-roster-top-up-shortfall` configuration issue per run. When the
+  hours cap cannot hold the 5-day target at the shortest catalog code, the
+  issue states that arithmetic explicitly.
+- **Transparency**: `DraftWeeklyPlan.hardCapExclusions` lists every
+  employee-day a cap removed although a rest-legal code existed. This is
+  not a gap list.
+- **Top-up tie-break**: once a cap has actually bound, the top-up's bounded
+  search prefers, among equally large partial assignments, one that keeps
+  OFF blocks within `max_consecutive_off_days`. It is a pure tie-break,
+  inert when the caps do not bind. Without it, a cap-limited 4-work-day
+  week put all 3 OFF days together. On the seed week this cut the new
+  `consecutive_off_violation`s from +79 to +3.
+
+### Measured impact on the seed data (default caps)
+
+**The 42h default and the confirmed "5 WORK + 2 OFF" target are
+arithmetically incompatible.** The shortest non-overnight catalog code is
+NR01: 8.75h before 2026-09-20 and 9h after. Five of them come to 43.75h or
+45h, both above 42h. So with the default hard cap, **no generation-driven
+employee can be rostered 5 days in any week**. They get at most 4. This is
+reported on every run as the structural top-up-shortfall issue. It is a
+policy decision for RAM Handling, not something phase 2 can solve. Options
+include a different cap value, a shorter code, or accepting 4-day weeks.
+
+| Seed week | Caps | Generation-driven work days | `unfilled_duty` | BLOCKING | `consecutive_off_violation` | `separated_off_days` |
+|---|---|---|---|---|---|---|
+| 2026-08-31 | non-binding (999) | 817 | 0 | 0 | 16 | 3 |
+| 2026-08-31 | default | 669 | 0 | 0 | 19 | 0 |
+| 2026-09-21 regime | non-binding (999) | 817 | 0 | 0 | 16 | 2 |
+| 2026-09-21 regime | default | 661 | 1 | 1 | 17 | 0 |
+
+Additional results:
+
+- The 5-consecutive-day cap alone changes one employee-day on seed data:
+  `youssef-el-amrani`'s documented 7-day/63h week. The 42h cap drives the
+  rest of the change.
+- With both caps non-binding, the demo roster and every duty are
+  byte-identical to the pre-phase output (fixture
+  `tests/fixtures/pre-hard-caps-demo-plan.json`).
+- The new 2026-09-21 gap is **Gulf Air, Sunday**. Under the GMT regime the
+  only codes that cover its 04:30 window are MT02 (11.25h) and JR02 (13h).
+  The 8-person team is fully needed on each of its 4 flight days, and
+  3 × 11.25h = 33.75h leaves no room for a fourth 11.25h shift under 42h.
+  The whole team is excluded on Sunday, which produces a BLOCKING conflict
+  naming all 8 members plus an `unfilled_duty`. This gap is structural:
+  it is unavoidable within the week at 42h.
+
+### Concrete PHASE-2 scenarios (avoidable gaps the naive filter creates)
+
+All of these are pinned in `tests/hard-work-caps.test.ts` under "PHASE-2
+SCENARIOS":
+
+1. **Foreign company, streak-blind ordering.** Air France has 5 members and
+   headcount 3. `af-1`..`af-3` arrive on day 4 of a streak; `af-4` and
+   `af-5` arrive fresh. Least-used-first gives Monday to `af-1..3`. On
+   Tuesday all three are at the cap, so Tuesday is one person short
+   (BLOCKING, `capExcluded` = af-1..3). A streak-aware allocation (Monday:
+   af-4, af-5 and one of af-1..3) covers every day. The test checks this
+   by construction.
+2. **Profiling, the same front-loading.** `p-tired` arrives on day 4 and
+   `p-fresh` arrives fresh. Monday needs 1 and Tuesday needs 2. Monday's
+   tie goes to `p-tired` by pool order, so Tuesday is short. Giving Monday
+   to `p-fresh` covers both days.
+3. **Stage 6 front-loading, real demo data.** `youssef-el-amrani` is
+   rostered Monday–Thursday on MT01, 36h. The 42h cap then closes
+   Friday–Sunday. The result is a 3-day OFF block, flagged as a
+   `consecutive_off_violation`, which spreading the same 4 days would
+   avoid. The greedy has no lookahead for the week's remaining hours or
+   streak budget.
+
+Phase 2's job is to repair these using cross-employee swaps and
+reallocation while keeping every hard rule: 15h rest, both new caps and
+the OFF-day rules. It must not relax any of them.
