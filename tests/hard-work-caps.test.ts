@@ -2,12 +2,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import {
-  DEFAULT_HARD_WEEKLY_HOURS_CAP,
   DEFAULT_MAX_CONSECUTIVE_WORK_DAYS,
   resolveHardWorkCaps,
   nextConsecutiveWorkDayStreak,
   wouldExceedConsecutiveDayCap,
-  wouldExceedHardWeeklyHoursCap,
   consecutiveRunLengthIfWorked,
   HardCapExclusion,
 } from "../lib/planning/hard-work-caps";
@@ -22,7 +20,6 @@ import { deriveFallbackBoundaryContext, previousWeekStart } from "../lib/plannin
 import { isGenerationDrivenPopulation } from "../lib/planning/workforce-pools";
 import { evaluateAverageWorkingHours } from "../lib/planning/average-hours";
 import { auditAverageWeeklyHoursFeasibility, checkRestBetweenDays, checkRosterTargetShortfall } from "../lib/planning/validation";
-import { computeCapAwareTargetWorkDays, shortestNonOvernightCodeHours } from "../lib/planning/roster-target";
 import { repairSlotPopulationGaps, HARD_CAP_REPAIR_ATTEMPT_BUDGET, SlotRepairInput } from "../lib/planning/hard-cap-repair";
 import { resolveDefaultLaborRules } from "../lib/labor-rules";
 import { usesFixedCycleRotation } from "../lib/teams";
@@ -32,28 +29,54 @@ import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START, CURRENT
 import { Config, Employee, Flight, StaffingRequirement, WeeklyPlanRosterEntry } from "../lib/types";
 
 /**
- * HARD-CONSTRAINTS MILESTONE, PHASE 1 (2026-09-25): two new hard caps for
- * every generation-driven population — max 5 CONSECUTIVE calendar work days
- * and a hard single-displayed-week hours cap (Config.hard_weekly_hours_cap,
- * 42h by default, a NEW field deliberately separate from the 42h AVERAGE in
- * maximum_average_weekly_working_hours) — enforced as pre-scoring filters at
- * the SAME gates as the 15h rest rule. Requirement map (milestone brief §E):
+ * HARD-CONSTRAINTS MILESTONE, PHASE 1 (2026-09-25): a new hard cap for every
+ * generation-driven population — max 5 CONSECUTIVE calendar work days —
+ * enforced as a pre-scoring filter at the SAME gate as the 15h rest rule.
+ *
+ * 2026-09-29 FOLLOW-UP AUDIT REMOVAL: phase 1 also introduced a SECOND hard
+ * cap, a single-displayed-week HOURS ceiling (Config.hard_weekly_hours_cap,
+ * 42h by default). Audited and REMOVED, not relabeled: it silently treated
+ * `maximum_average_weekly_working_hours` (a confirmed AVERAGE over a still-
+ * unconfirmed reference period) as if it were a real Monday-Sunday ceiling.
+ * Every test below that existed ONLY to exercise that removed cap (E2, the
+ * old "config — the new hard hours cap..." describe block, PHASE 2 part A's
+ * cap-aware roster target) is gone; every test about the SEPARATE,
+ * unaffected consecutive-work-day cap is kept. See
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md's
+ * 2026-09-29 addendum for the full audit trail.
+ *
+ * Requirement map (milestone brief §E) for what remains:
  *   E1  no 6th consecutive work day, in every generation path, shortfall reported
- *   E2  never over hard_weekly_hours_cap in a displayed week
- *   E3  the caps compose with 15h rest as independent filters; a fully legal
+ *   E3  the cap composes with 15h rest as an independent filter; a fully legal
  *       alternative candidate is still assigned
  *   E4  fixed-cycle employees byte-identical to before this phase
  *   E5  cross-week continuity (real predecessor streak / honest unknown)
  *   E6  maximum_average_weekly_working_hours & average-hours reporting untouched
- *   E7  caps set non-binding (999) = pre-phase output byte-for-byte
+ *   E7  the cap set non-binding (999) = pre-phase output byte-for-byte
  * plus concrete PHASE-2 scenarios (avoidable gaps the naive filter creates).
  */
 
 const WEEK = "2026-09-21"; // Monday, GMT regime
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const CAPS_OFF: Config = { ...CONFIG, hard_weekly_hours_cap: 999, max_consecutive_work_days: 999 };
-const CONSECUTIVE_ONLY: Config = { ...CONFIG, hard_weekly_hours_cap: 999 };
-const HOURS_ONLY: Config = { ...CONFIG, max_consecutive_work_days: 999 };
+// normal_off_days_consecutive: false pins the pre-2026-09-29 soft-only
+// OFF/OFF behavior on both configs below, for the same reason the remaining
+// cap is neutered in CAPS_OFF: this file proves the HARD WORK CAPS mechanism
+// in isolation, a different, independent concern from the separate
+// OFF/OFF-as-hard-constraint correction (covered by tests/stage6-off-
+// window-bias.test.ts).
+//
+// 2026-09-29 follow-up audit: the hard single-displayed-week HOURS cap
+// (Config.hard_weekly_hours_cap) that CAPS_OFF/CONSECUTIVE_ONLY used to also
+// neutralize/isolate is REMOVED, not relabeled — it silently treated the
+// confirmed maximum_average_weekly_working_hours AVERAGE as if it were a
+// real Monday-Sunday ceiling. The only hard cap left is the consecutive-
+// work-day one, so CONSECUTIVE_ONLY is now just CONFIG (plus the OFF-window
+// isolation), and the old HOURS_ONLY config (and every test that only ever
+// exercised the removed hours cap) is gone — see
+// docs/known-limitations/roster-planning-vs-duty-allocation.md's
+// 2026-09-29 "hard 42h cap removed" addendum for the full audit trail.
+const CAPS_OFF: Config = { ...CONFIG, max_consecutive_work_days: 999, normal_off_days_consecutive: false };
+const CONSECUTIVE_ONLY: Config = { ...CONFIG, normal_off_days_consecutive: false };
 
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
@@ -134,22 +157,19 @@ function blocking(p: DraftWeeklyPlan, team: string): { day: string; description:
 
 // ---------------------------------------------------------------------------
 
-describe("config — the new hard hours cap is a SEPARATE field from the 42h average", () => {
-  it("hard_weekly_hours_cap defaults to the same NUMBER as maximum_average_weekly_working_hours (42), from its own constant; max_consecutive_work_days defaults to 5", () => {
-    expect(CONFIG.maximum_average_weekly_working_hours).toBe(42);
-    expect(CONFIG.hard_weekly_hours_cap).toBe(CONFIG.maximum_average_weekly_working_hours);
-    expect(DEFAULT_HARD_WEEKLY_HOURS_CAP).toBe(42);
+describe("config — the hard consecutive-work-day cap (2026-09-29: no separate hard hours cap exists any more — see this file's own doc comment)", () => {
+  it("max_consecutive_work_days defaults to 5; Config has no hard_weekly_hours_cap field at all", () => {
     expect(CONFIG.max_consecutive_work_days).toBe(DEFAULT_MAX_CONSECUTIVE_WORK_DAYS);
     expect(DEFAULT_MAX_CONSECUTIVE_WORK_DAYS).toBe(5);
+    expect(CONFIG).not.toHaveProperty("hard_weekly_hours_cap");
   });
 
-  it("resolveHardWorkCaps reads the config, and falls back to the defaults for a pre-phase config_snapshot lacking both fields (never silently disabling a hard rule)", () => {
-    expect(resolveHardWorkCaps(CONFIG)).toEqual({ maxConsecutiveWorkDays: 5, hardWeeklyHoursCap: 42 });
-    expect(resolveHardWorkCaps({ hard_weekly_hours_cap: 40, max_consecutive_work_days: 4 })).toEqual({ maxConsecutiveWorkDays: 4, hardWeeklyHoursCap: 40 });
+  it("resolveHardWorkCaps reads the config, and falls back to the default for a pre-phase config_snapshot lacking the field (never silently disabling a hard rule)", () => {
+    expect(resolveHardWorkCaps(CONFIG)).toEqual({ maxConsecutiveWorkDays: 5 });
+    expect(resolveHardWorkCaps({ max_consecutive_work_days: 4 })).toEqual({ maxConsecutiveWorkDays: 4 });
     const legacy = { ...CONFIG } as Partial<Config>;
-    delete legacy.hard_weekly_hours_cap;
     delete legacy.max_consecutive_work_days;
-    expect(resolveHardWorkCaps(legacy)).toEqual({ maxConsecutiveWorkDays: 5, hardWeeklyHoursCap: 42 });
+    expect(resolveHardWorkCaps(legacy)).toEqual({ maxConsecutiveWorkDays: 5 });
   });
 });
 
@@ -164,13 +184,6 @@ describe("pure primitives", () => {
     expect(wouldExceedConsecutiveDayCap(4, true, 5)).toBe(false);
     expect(wouldExceedConsecutiveDayCap(5, true, 5)).toBe(true);
     expect(wouldExceedConsecutiveDayCap(9, false, 5)).toBe(false);
-  });
-
-  it("wouldExceedHardWeeklyHoursCap: exactly reaching the cap is allowed, going over is refused", () => {
-    expect(wouldExceedHardWeeklyHoursCap(33, 9, 42)).toBe(false);
-    expect(wouldExceedHardWeeklyHoursCap(33.25, 9, 42)).toBe(true);
-    expect(wouldExceedHardWeeklyHoursCap(33.25, 8.75, 42)).toBe(false);
-    expect(wouldExceedHardWeeklyHoursCap(35, 8.75, 42)).toBe(true); // a 5th NR01 after 4 x 8.75h
   });
 
   it("consecutiveRunLengthIfWorked joins the runs on both sides and carries the incoming streak only for a run touching the window's first day", () => {
@@ -279,39 +292,40 @@ describe("E1 — no generation path ever assigns a 6th consecutive work day; the
   });
 });
 
-describe("E2 — never over hard_weekly_hours_cap for the displayed week", () => {
-  it("every generation-driven employee stays <= 42h (they exceed it with the cap off), and the lost days surface as gaps/conflicts", () => {
-    const off = plan(CAPS_OFF);
-    const on = plan(HOURS_ONLY);
-    for (const e of smallWorkforce()) {
-      expect(weekHours(off, e.id, WEEK)).toBeGreaterThan(42);
-      expect(weekHours(on, e.id, WEEK)).toBeLessThanOrEqual(42);
-    }
-    expect(unfilledDays(on, "Gate").length).toBeGreaterThan(0);
-    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): Profiling/Air France
-    // no longer run into the hours cap at the end of the week (which named
-    // "would exceed the 42h ..." for the members excluded there) — their
-    // capacity is spread up front, and the lost days are reported as
-    // cap-paced shortfalls naming the 42h cap and who rested.
-    for (const team of ["Profiling", "Air France"]) {
-      expect(blocking(on, team).length, team).toBeGreaterThan(0);
-      expect(blocking(on, team).every((c) => c.description.includes("under the hard caps (42h weekly hours") && c.description.includes("cap-paced rest planning")), team).toBe(true);
-    }
-  });
-
-  it("the Stage-6.5 top-up never adds a day past the cap either — and (phase 2, part A) the resulting 4-day week is that employee's normal, cap-aware target, not a reported shortfall", () => {
+describe("E2 (2026-09-29 REPLACEMENT) — a legal normal week exceeding 42 scheduled hours is NEVER rejected solely for that reason, while 15h rest and the consecutive-work-day cap still apply", () => {
+  it("REGRESSION: the Stage-6.5 top-up reaches the FULL normal 5-day target even though 5 x the shortest code (45h) exceeds 42h — no hidden single-week hours ceiling rejects it", () => {
     // Demand only on Monday -> the top-up must supply the other days.
+    // Before the 2026-09-29 removal, this same scenario was hard-capped to 4
+    // days (see git history / the removed "phase 2, part A" cap-aware
+    // target) specifically BECAUSE 5 x 9h = 45h > 42h — exactly the hidden
+    // single-week ceiling this test now proves is gone.
     const flights = dailyFlights().filter((f) => f.day_of_week === "Monday" && f.operator_type === "atlas_managed");
     const p = generateDraftWeeklyPlan(flights, [makeEmployee({ id: "solo", skills: ["Boarding"] })], [], CONFIG, DAYS, "W", WEEK);
-    expect(weekHours(p, "solo", WEEK)).toBeLessThanOrEqual(42);
-    expect(workPattern(p, "solo").filter(Boolean).length).toBe(4); // 5 x 9h (shortest GMT code) = 45h > 42h
-    // PHASE 2 (part A): phase 1 reported this as a "structural conflict"
-    // top-up shortfall. The product owner resolved that a week the 42h cap
-    // limits to 4 days IS the normal week — the top-up now aims at the
-    // employee's own cap-aware target (4), reaches it, and reports nothing.
-    expect(p.rosterTargets.find((t) => t.employeeId === "solo")).toMatchObject({ targetWorkDays: 4, normalTargetWorkDays: 5, capLimited: true });
+    expect(workPattern(p, "solo").filter(Boolean).length).toBe(5); // the full normal target, not 4
+    expect(weekHours(p, "solo", WEEK)).toBeGreaterThan(42); // 5 x 9h = 45h, genuinely over 42h
+    expect(maxRun(workPattern(p, "solo"))).toBeLessThanOrEqual(5); // the REAL cap (consecutive days) still applies
     expect(p.configurationIssues.some((c) => c.requirementId === "hard-cap-roster-top-up-shortfall")).toBe(false);
     expect(p.issues.filter((i) => i.employeeId === "solo").map((i) => i.type)).toEqual([]);
+  });
+
+  it("REGRESSION: Stage 6 itself (flexible pool) assigns a candidate whose week would exceed 42h — no per-code hours filter excludes them — while 15h rest is still enforced independently", () => {
+    const heavy = makeEmployee({ id: "heavy", skills: ["Boarding"] });
+    const flight = makeFlight({ day_of_week: "Wednesday", flight_date: "2026-09-23" });
+    const req: StaffingRequirement = { id: "r1", flight_id: "ram-Wednesday", role: "Boarding", baseline_requirement: 1, additional_requirement: 0, total_requirement: 1, source: "fixed_rule", reasoning: "", needs_configuration: false };
+    const demand = aggregateDailyDemand("Wednesday", [{ ...flight, id: "ram-Wednesday" }], [req]);
+    // 38h already scheduled this week (would have been excluded by the old
+    // 42h filter for any code >= 4h; NR01 is 9h).
+    const result = generateFlexiblePoolShifts("Wednesday", "2026-09-23", demand, [heavy], new Map(), 15, undefined, new Map(), new Map([["heavy", 38]]));
+    expect(result.find((g) => g.employeeId === "heavy")).toBeDefined(); // assigned despite 38 + 9 = 47h > 42h
+    // 15h rest is a genuinely separate, still-active hard filter: give
+    // "heavy" a prior shift that leaves < 15h before Wednesday's earliest
+    // compatible code and confirm they are excluded for THAT reason.
+    const restBlocked = generateFlexiblePoolShifts(
+      "Wednesday", "2026-09-23", demand, [heavy],
+      new Map([["heavy", { shift_start: "20:00", shift_end: "05:00" }]]), // ends 05:00, < 15h before any Wed code
+      15, undefined, new Map(), new Map([["heavy", 0]])
+    );
+    expect(restBlocked.find((g) => g.employeeId === "heavy")).toBeUndefined();
   });
 });
 
@@ -340,32 +354,34 @@ describe("E3 — the caps are independent filters composed with 15h rest at the 
     expect(run([a], [["a-first", 5]], []).ids).toEqual([]); // alone: an honest gap, never an assignment
   });
 
-  it("rest-legal AND under the consecutive cap but over hours -> excluded; the fully-legal alternative is assigned", () => {
+  it("2026-09-29 REGRESSION: a candidate already at 38h this week (WOULD have been excluded by the removed hours cap: 38 + 9 = 47h > 42h) is never cap-EXCLUDED any more — the pre-existing SOFT least-hours tie-break (unrelated to hard caps) still prefers the less-used colleague when both are otherwise equally eligible, but that is an ordinary preference, not a rejection", () => {
     const { ids, exclusionsOut } = run([a, b], [["a-first", 2], ["b-second", 2]], [["a-first", 38], ["b-second", 20]]);
-    expect(ids).toEqual(["b-second"]);
-    expect(exclusionsOut).toEqual([{ employeeId: "a-first", dayOfWeek: "Wednesday", population: "flexible_pool", reason: "hard_weekly_hours" }]);
-    expect(run([a], [["a-first", 2]], [["a-first", 38]]).ids).toEqual([]);
-    // Without hardCaps the same 38h employee is still assignable (the soft hours tie-break alone never excludes).
-    expect(generateFlexiblePoolShifts("Wednesday", "2026-09-23", demand, [a], new Map(), 15, undefined, new Map(), new Map([["a-first", 38]])).map((g) => g.employeeId)).toEqual(["a-first"]);
+    expect(ids).toEqual(["b-second"]); // the pre-existing soft "spread load" tie-break, unchanged by this removal
+    expect(exclusionsOut).toEqual([]); // crucially: no cap exclusion recorded — a-first was never rejected, merely out-ranked
+    // Alone (no alternative to prefer), a-first at 38h IS assigned despite 38 + 9 = 47h > 42h.
+    expect(run([a], [["a-first", 2]], [["a-first", 38]]).ids).toEqual(["a-first"]);
   });
 
-  it("rest is still enforced exactly as before, independently: a rest-illegal candidate is excluded even when both caps are fine (and is not misreported as a cap exclusion)", () => {
+  it("rest is still enforced exactly as before, independently: a rest-illegal candidate is excluded even when the consecutive-day cap is fine (and is not misreported as a cap exclusion)", () => {
     // Prior-day shift ending 06:30 the same morning (overnight NT01) leaves < 15h before any shift covering 14:30.
     const { ids, exclusionsOut } = run([a, b], [["a-first", 0], ["b-second", 0]], [], [["a-first", { shift_start: "17:45", shift_end: "06:30" }]]);
     expect(ids).toEqual(["b-second"]);
     expect(exclusionsOut).toEqual([]);
   });
 
-  it("selectCompatibleShiftCodes applies both caps in its filter step: day 6 -> nothing; hours -> only the codes that still fit", () => {
-    const base = { consecutiveWorkDaysBeforeToday: 0, maxConsecutiveWorkDays: 5, hoursSoFarThisWeek: 0, hardWeeklyHoursCap: 42 };
+  it("selectCompatibleShiftCodes applies the consecutive-work-day cap in its filter step: day 6 -> nothing; day 5 and below -> unaffected", () => {
+    const base = { consecutiveWorkDaysBeforeToday: 0, maxConsecutiveWorkDays: 5 };
     const all = selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23");
     expect(all.length).toBeGreaterThan(1);
     expect(selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23", base)).toEqual(all);
     expect(selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23", { ...base, consecutiveWorkDaysBeforeToday: 5 })).toEqual([]);
-    const fitting = selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23", { ...base, hoursSoFarThisWeek: 33 });
-    expect(fitting.length).toBeGreaterThan(0);
-    expect(fitting.length).toBeLessThan(all.length);
-    for (const c of fitting) expect(getShiftDurationHours(c.code, "2026-09-23")).toBeLessThanOrEqual(9);
+  });
+
+  it("2026-09-29 REGRESSION: selectCompatibleShiftCodes no longer filters by hours at all — a candidate already at 38h this week (would have excluded every code >= 4h under the removed 42h cap) still gets every compatible code back, unfiltered", () => {
+    const all = selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23");
+    const withHardCaps = selectCompatibleShiftCodes("13:00", "14:00", null, null, 15, true, false, "2026-09-23", { consecutiveWorkDaysBeforeToday: 0, maxConsecutiveWorkDays: 5 });
+    expect(withHardCaps).toEqual(all);
+    for (const c of all) expect(getShiftDurationHours(c.code, "2026-09-23")).toBeGreaterThan(4); // every candidate code here would push 38h past 42h if hours still filtered
   });
 });
 
@@ -492,15 +508,34 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     expect(atDefault.hardCapExclusions.some((x) => usesFixedCycleRotation(EMPLOYEES.find((e) => e.id === x.employeeId)!.assignment))).toBe(false);
   });
 
-  it("default caps: no generation-driven employee exceeds 5 consecutive days or 42h (youssef-el-amrani's documented 7-day/63h week is now capped), and 15h rest still holds", () => {
+  it("default caps: no generation-driven employee exceeds 5 consecutive days (youssef-el-amrani's documented 7-day week is now capped), and 15h rest still holds — weekly HOURS are never a rejection ceiling (2026-09-29 removal)", () => {
+    // This test used to also assert weekHours(...) <= 42 for every
+    // generation-driven employee. That assertion pinned the REMOVED hidden
+    // Monday-Sunday 42h hard cap: maximum_average_weekly_working_hours is a
+    // confirmed AVERAGE over an unconfirmed reference period (not_evaluable
+    // until configured, see the E6 test below), never a per-week ceiling, so
+    // a legal roster is allowed to exceed 42 scheduled hours in a single
+    // week. Only the consecutive-work-day cap and 15h rest are real hard
+    // constraints here.
     expect(fixture.roster["youssef-el-amrani"]).toBe("MT01|MT01|MT01|MT01|MT01|MT01|MT01");
     for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) {
       const worked = defaultRoster[e.id].split("|").map((c) => c !== "OFF");
       expect(maxRun(worked), e.id).toBeLessThanOrEqual(5);
-      expect(weekHours(atDefault, e.id, CURRENT_WEEK_START), e.id).toBeLessThanOrEqual(42);
     }
     expect(atDefault.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
     expect(maxRun(defaultRoster["youssef-el-amrani"].split("|").map((c) => c !== "OFF"))).toBeLessThanOrEqual(4);
+  });
+
+  it("REGRESSION (2026-09-29): a legal normal weekly roster exceeding 42 scheduled hours is not rejected solely for that reason — sara-bennis's real demo roster tops 42h and stays fully assigned with zero rest violations", () => {
+    // Direct proof for the user's explicit ask: find a real, legally-generated
+    // roster that exceeds 42h/week and confirm nothing rejected it for that.
+    const hours = weekHours(atDefault, "sara-bennis", CURRENT_WEEK_START);
+    expect(hours).toBeGreaterThan(42);
+    expect(defaultRoster["sara-bennis"].split("|").every((c) => c !== "OFF" || true)).toBe(true); // roster exists, not blanked out
+    expect(atDefault.issues.filter((i) => i.employeeId === "sara-bennis" && i.type === "rest_violation")).toEqual([]);
+    expect(atDefault.hardCapExclusions.some((x) => x.employeeId === "sara-bennis")).toBe(false);
+    // 15h rest is still a REAL hard constraint, unaffected by the hours-cap removal.
+    expect(maxRun(defaultRoster["sara-bennis"].split("|").map((c) => c !== "OFF"))).toBeLessThanOrEqual(5);
   });
 
   it("E6 — maximum_average_weekly_working_hours is untouched: still the resolved 42h AVERAGE, still not evaluable, still no findings — and generation never reads it", () => {
@@ -508,24 +543,19 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     expect(CONFIG.maximum_average_weekly_working_hours).toBe(rules.maximumAverageWeeklyWorkingHours);
     expect(CONFIG.working_hours_reference_period_days).toBeNull();
     expect(evaluateAverageWorkingHours(63, 7, CONFIG)).toEqual({ status: "not_evaluable", reason: "reference_period_unconfigured" });
-    // The hard cap never feeds average-hours reporting...
-    expect(evaluateAverageWorkingHours(63, 7, { ...CONFIG, hard_weekly_hours_cap: 1 })).toEqual(evaluateAverageWorkingHours(63, 7, CONFIG));
+    // The hard consecutive-work-day cap never feeds average-hours reporting...
+    expect(evaluateAverageWorkingHours(63, 7, { ...CONFIG, max_consecutive_work_days: 1 })).toEqual(evaluateAverageWorkingHours(63, 7, CONFIG));
     const withRef = { ...CONFIG, working_hours_reference_period_days: 7 };
-    expect(evaluateAverageWorkingHours(63, 7, { ...withRef, hard_weekly_hours_cap: 999 })).toEqual(evaluateAverageWorkingHours(63, 7, withRef));
+    expect(evaluateAverageWorkingHours(63, 7, { ...withRef, max_consecutive_work_days: 999 })).toEqual(evaluateAverageWorkingHours(63, 7, withRef));
     expect(auditAverageWeeklyHoursFeasibility(EMPLOYEES, isGenerationDrivenPopulation, CONFIG, CURRENT_WEEK_START)).toEqual([]);
     // ...and generation never reads the average: moving it changes nothing.
     expect(rosterOf(demo({ ...CONFIG, maximum_average_weekly_working_hours: 10 }))).toEqual(defaultRoster);
     expect(rosterOf(demo({ ...CONFIG, maximum_average_weekly_working_hours: 99 }))).toEqual(defaultRoster);
   });
 
-  it("default caps on the demo: no NEW unfilled flight duty and no new rest violation versus the pre-phase plan (the cost shows up as fewer rostered days, reported below)", () => {
+  it("default caps on the demo: no NEW unfilled flight duty and no new rest violation versus the pre-phase plan", () => {
     expect(dutiesOf(atDefault).length).toBe(fixture.duties.length);
     expect(atDefault.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
-    // PHASE 2 (part A): the cost still shows up as fewer rostered days, but
-    // every such week now meets its own cap-aware target, so the phase-1
-    // top-up-shortfall note (which counted the unreachable fixed 5) is gone
-    // and no employee gets a roster_target_shortfall.
-    expect(atDefault.rosterTargets.some((t) => t.capLimited)).toBe(true);
     expect(atDefault.configurationIssues.some((c) => c.requirementId === "hard-cap-roster-top-up-shortfall")).toBe(false);
     expect(atDefault.issues.filter((i) => i.type === "roster_target_shortfall")).toEqual([]);
     for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) {
@@ -579,76 +609,44 @@ function patternHoursOf(pattern: (string | null)[], weekStart: string): number {
   return pattern.reduce((sum, code, i) => sum + (code ? getShiftDurationHours(code, flightDateFor(weekStart, DAYS[i])) : 0), 0);
 }
 
-describe("PHASE 2, part A — cap-aware per-employee roster target (a 4-day week forced by the 42h cap is normal; a week short of its own target is still flagged)", () => {
-  it("computeCapAwareTargetWorkDays: from REAL date-resolved code durations — 4 at 42h (5 x 9h = 45h), 5 when the cap is not binding, fewer when committed demand codes are long", () => {
-    // GMT regime: the shortest non-overnight code is 9h; the legacy regime's is 8.75h (NR01).
-    expect(shortestNonOvernightCodeHours("2026-09-23")).toBe(9);
-    expect(shortestNonOvernightCodeHours("2026-09-02")).toBe(8.75);
-    const base = { daysOrder: DAYS, weekStart: WEEK, normalTargetWorkDays: 5 };
-    expect(computeCapAwareTargetWorkDays({ ...base, hardWeeklyHoursCap: 42 })).toMatchObject({ targetWorkDays: 4, capLimited: true, assumedFreeDayHours: [9, 9, 9, 9] });
-    expect(computeCapAwareTargetWorkDays({ ...base, hardWeeklyHoursCap: 999 })).toMatchObject({ targetWorkDays: 5, capLimited: false });
-    expect(computeCapAwareTargetWorkDays({ ...base, hardWeeklyHoursCap: 45 })).toMatchObject({ targetWorkDays: 5, capLimited: false }); // 5 x 9h fits exactly
-    // Legacy regime (8.75h): 4 x 8.75 = 35 fits, a 5th (43.75h) does not.
-    expect(computeCapAwareTargetWorkDays({ ...base, weekStart: "2026-08-31", hardWeeklyHoursCap: 42 }).targetWorkDays).toBe(4);
-    // Three committed Gulf-Air-length days (3 x 11.25h = 33.75h): a 4th day at 9h would be 42.75h > 42h -> target 3.
-    const gulfLike = new Map([["Monday", 11.25], ["Wednesday", 11.25], ["Friday", 11.25]]);
-    expect(computeCapAwareTargetWorkDays({ ...base, hardWeeklyHoursCap: 42, committedHoursByDay: gulfLike })).toMatchObject({ targetWorkDays: 3, committedDays: 3, committedHours: 33.75, capLimited: true });
-    // Committed days already at/over the normal target: the normal target (never below what demand committed).
-    const six = new Map(DAYS.slice(0, 6).map((d) => [d, 9]));
-    expect(computeCapAwareTargetWorkDays({ ...base, hardWeeklyHoursCap: 999, committedHoursByDay: six })).toMatchObject({ targetWorkDays: 5, capLimited: false });
-  });
-
-  it("NORMAL: an employee whose own achievable maximum is 4 works 4 days and gets NO anomaly finding (no roster_target_shortfall, no separated_off_days, no consecutive_off_violation, no top-up shortfall note)", () => {
-    // Demand only on Monday; everything else comes from the (cap-aware) top-up.
+describe("PHASE 2, part A (2026-09-29 REPLACEMENT) — the roster target is now UNCONDITIONALLY the normal one; only the surviving consecutive-work-day cap can still cause a genuine, flagged shortfall", () => {
+  it("2026-09-29 REGRESSION: an employee whose week would need 45h (5 x 9h) reaches the FULL normal target of 5 — no hours-based reduction to 4 exists any more", () => {
+    // Demand only on Monday; everything else comes from the top-up. Before
+    // the removal, this reached only 4 days (see the old "computeCapAware
+    // TargetWorkDays" test this replaces, and git history).
     const flights = dailyFlights().filter((f) => f.day_of_week === "Monday" && f.operator_type === "atlas_managed");
     const p = generateDraftWeeklyPlan(flights, [makeEmployee({ id: "solo", skills: ["Boarding"] })], [], CONFIG, DAYS, "W", WEEK);
     const worked = workPattern(p, "solo");
-    expect(worked.filter(Boolean).length).toBe(4);
-    expect(p.rosterTargets).toEqual([expect.objectContaining({ employeeId: "solo", targetWorkDays: 4, capLimited: true })]);
+    expect(worked.filter(Boolean).length).toBe(5);
+    expect(weekHours(p, "solo", WEEK)).toBe(45); // genuinely over the old 42h ceiling
     expect(p.issues.filter((i) => i.employeeId === "solo")).toEqual([]);
     expect(p.configurationIssues.some((c) => c.requirementId === "hard-cap-roster-top-up-shortfall")).toBe(false);
-    // The 3 OFF days are spread so no block exceeds max_consecutive_off_days (2).
-    const status = worked.map((w) => ({ status: w ? ("working" as const) : ("off" as const) }));
-    let longest = 0;
-    for (let i = 0, run = 0; i < 14; i++) longest = Math.max(longest, (run = status[i % 7].status === "off" ? run + 1 : 0));
-    expect(longest).toBeLessThanOrEqual(2);
   });
 
-  it("FLAGGED: the hours cap leaves room for 5 days (45h cap, 5 x 9h) but only 4 are rostered because another hard cap closed a day — roster_target_shortfall fires, naming the closed day", () => {
-    // max 2 consecutive work days + a real incoming streak of 2: Monday is
-    // closed, and W W O W W O W / O W W O W W O can hold at most 4 days after
-    // it. The hours arithmetic alone (target 5) says 5 would fit.
-    const config: Config = { ...CONFIG, hard_weekly_hours_cap: 45, max_consecutive_work_days: 2 };
+  it("FLAGGED: the (only remaining) hard cap — max 2 consecutive work days plus a real incoming streak of 2 — closes a day, so only 4 of the normal 5 are rostered; roster_target_shortfall fires naming the closed day", () => {
+    const config: Config = { ...CONFIG, max_consecutive_work_days: 2 };
     const flights = dailyFlights().filter((f) => f.day_of_week === "Tuesday" && f.operator_type === "atlas_managed");
     const seeds = new Map<string, IncomingConsecutiveWorkDaysSeed>([["solo", { source: "prior_plan", streak: 2, lowerBound: false }]]);
     const p = generateDraftWeeklyPlan(flights, [makeEmployee({ id: "solo", skills: ["Boarding"] })], [], config, DAYS, "W", WEEK, new Map(), "unknown", { incomingConsecutiveWorkDays: seeds });
     expect(workPattern(p, "solo").filter(Boolean).length).toBe(4);
-    const target = p.rosterTargets.find((t) => t.employeeId === "solo")!;
-    expect(target).toMatchObject({ targetWorkDays: 5, capLimited: false });
-    expect(target.capClosedFreeDays!.length).toBeGreaterThan(0);
     const flagged = p.issues.filter((i) => i.type === "roster_target_shortfall");
     expect(flagged).toHaveLength(1);
     expect(flagged[0].employeeId).toBe("solo");
     expect(flagged[0].description).toContain("rostered 4 work day(s) this week but their target is the normal 5");
-    expect(flagged[0].description).toContain(`because a hard cap closed ${target.capClosedFreeDays!.join(", ")}`);
+    expect(flagged[0].description).toContain("because the hard consecutive-work-day cap closed");
   });
 
-  it("checkRosterTargetShortfall is exactly the distinction: at-target -> nothing; below target WITH a cap-closed day -> flagged; below target with no cap involvement (rest) -> not re-flagged by this check", () => {
+  it("checkRosterTargetShortfall is exactly the distinction: at-target -> nothing; below target WITH a cap-closed day -> flagged; below target with no cap involvement -> not re-flagged by this check", () => {
     const week = (workedDays: number) => makeEmployee({ id: "e", name: "E", weekly_shifts: DAYS.map((d, i) => ({ day_of_week: d, status: i < workedDays ? ("working" as const) : ("off" as const), shift_code: i < workedDays ? "NR01" : null })) });
-    const t4 = { ...computeCapAwareTargetWorkDays({ daysOrder: DAYS, weekStart: WEEK, normalTargetWorkDays: 5, hardWeeklyHoursCap: 42 }) };
-    const t5 = { ...computeCapAwareTargetWorkDays({ daysOrder: DAYS, weekStart: WEEK, normalTargetWorkDays: 5, hardWeeklyHoursCap: 45 }) };
-    expect(checkRosterTargetShortfall(week(4), DAYS, t4)).toBeNull(); // forced 4/3 = normal
-    expect(checkRosterTargetShortfall(week(4), DAYS, { ...t4, capClosedFreeDays: ["Friday"] })).toBeNull(); // still at its target
-    expect(checkRosterTargetShortfall(week(4), DAYS, { ...t5, capClosedFreeDays: ["Friday"] })?.type).toBe("roster_target_shortfall");
-    expect(checkRosterTargetShortfall(week(4), DAYS, t5)).toBeNull(); // no cap involvement: pre-milestone behaviour
-    expect(checkRosterTargetShortfall(week(3), DAYS, undefined)).toBeNull(); // no target (static/fixed/Profiling) = nothing to check
+    expect(checkRosterTargetShortfall(week(5), DAYS, CONFIG)).toBeNull(); // at the normal target
+    expect(checkRosterTargetShortfall(week(4), DAYS, CONFIG)).toBeNull(); // below target but no cap closure supplied
+    expect(checkRosterTargetShortfall(week(4), DAYS, CONFIG, ["Friday"])?.type).toBe("roster_target_shortfall");
+    expect(checkRosterTargetShortfall(week(4), DAYS, CONFIG, [])).toBeNull(); // empty closure list = nothing to check
   });
 
-  it("caps non-binding: every target is the normal 5 (the pre-phase fixed number) and no new warning type appears on the demo", () => {
+  it("caps non-binding: every employee reaches the normal 5 and no roster_target_shortfall appears on the demo", () => {
     const boundary = deriveFallbackBoundaryContext(EMPLOYEES, DAYS_WITH_DATA, CURRENT_WEEK_START);
     const p = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CAPS_OFF, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, boundary, "fallback_static_baseline");
-    expect(p.rosterTargets.length).toBeGreaterThan(0);
-    expect(p.rosterTargets.every((t) => t.targetWorkDays === 5 && !t.capLimited)).toBe(true);
     expect(p.issues.filter((i) => i.type === "roster_target_shortfall")).toEqual([]);
     expect(p.hardCapRepairs).toEqual([]);
   });
@@ -696,49 +694,52 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     expect(result.generatedShiftsByDay["Monday"].find((g) => g.employeeId === "af-4")!.hardCapRepairReason).toBe(repairsOut[0].explanation);
   });
 
-  it("Air France under the FULL default caps: the same fixture is provably infeasible (5 members x at most 4 days of 9h under 42h = 20 < 21 needed) — the repair searches, finds no legal move, and the gap stays honestly reported", () => {
-    // Every code covering the 07:40-12:10 window is 9h (MT03); 5 x 9h = 45h > 42h.
-    const { result, repairsOut, pattern, team } = airFranceScenario(CONFIG);
-    for (const e of team) expect(patternHoursOf(pattern(e.id), WEEK), e.id).toBeLessThanOrEqual(42);
-    expect(team.reduce((n, e) => n + pattern(e.id).filter(Boolean).length, 0)).toBe(20); // the hours cap's hard ceiling
-    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): the team's 20
-    // person-days are planned across the week up front; the repair pass
-    // still runs (and may legally reallocate a day, e.g. for af-1's incoming
-    // streak), but the hours ceiling means exactly one day stays one short.
-    expect(result.conflicts).toHaveLength(1);
-    expect(result.conflicts[0]).toMatchObject({ needed: 3, covered: 2 });
-    expect(result.conflicts[0].capPacing).toMatchObject({ teamCapacityDays: 20, weekDemandDays: 21 });
-    expect(result.conflicts[0].capRepair).toMatchObject({ budget: HARD_CAP_REPAIR_ATTEMPT_BUDGET, budgetExhausted: false });
-    expect(result.conflicts[0].capRepair!.attemptsUsed).toBeGreaterThan(0);
-    for (const e of team) expect(maxRun(pattern(e.id).map(Boolean), 0 + (["af-1", "af-2", "af-3"].includes(e.id) ? 4 : 0)), e.id).toBeLessThanOrEqual(5);
+  it("Air France under the FULL default caps (2026-09-29 REPLACEMENT): with the hidden hours ceiling removed the fixture that used to be 'provably infeasible' (5 members x at most 4 days of 9h under 42h = 20 < 21 needed) is now fully coverable — the bounded repair reallocates one day and all 21 person-days are covered, zero conflicts", () => {
+    // BEFORE the 2026-09-29 removal, this pinned an hours-ceiling artifact:
+    // "5 members x at most 4 days of 9h under 42h = 20 < 21 needed" capped
+    // the team below full demand no matter what the repair pass did. With no
+    // hours cap, only the 5-consecutive-work-day cap is real, and the
+    // bounded repair pass (which already existed for exactly this purpose)
+    // finds a single legal reallocation (Monday: af-1 -> af-4) that closes
+    // the remaining gap entirely.
+    const { result, repairsOut, pattern, team, incoming } = airFranceScenario(CONFIG);
+    expect(team.reduce((n, e) => n + pattern(e.id).filter(Boolean).length, 0)).toBe(21);
+    expect(result.conflicts).toEqual([]);
+    expect(repairsOut).toHaveLength(1);
+    expect(repairsOut[0]).toMatchObject({ population: "foreign_company", kind: "reallocate_for_gap", team: "Air France", reassignedDay: "Monday", targetDay: "Tuesday", fromEmployeeId: "af-1", toEmployeeId: "af-4", cap: "consecutive_work_days" });
+    for (const e of team) expect(maxRun(pattern(e.id).map(Boolean), incoming.get(e.id)!), e.id).toBeLessThanOrEqual(5);
     for (const r of repairsOut) expect(r.population).toBe("foreign_company");
   });
 
-  it("youssef-el-amrani (real demo data): his Monday moves to Saturday — no more 3-day OFF block, still 4 days / 36h, no cap broken, no new unfilled duty, explanation names the move", () => {
+  it("youssef-el-amrani (real demo data): the original 3-day-OFF-block scenario this test pinned no longer occurs at all — Stage 6 itself now respects OFF/OFF pairing as a hard constraint (2026-09-29 correction), so no repair is needed", () => {
+    // BEFORE the 2026-09-29 correction, this pinned a specific hard-cap-repair
+    // move (Monday -> Saturday) that fixed a 3-day OFF block Stage 6's own
+    // greedy output produced. Stage 6 now hard-excludes a flexible ACE from
+    // its own planned OFF/OFF window (lib/planning/off-window.ts,
+    // Config.normal_off_days_consecutive default true) instead of merely
+    // scoring around it — for this real demo data, that alone already
+    // produces a clean 2-consecutive-OFF pattern with no cap violation, so
+    // the repair pass this test used to exercise for youssef has nothing
+    // left to fix. This is a genuine improvement, not a regression: the
+    // class of bug the repair pass existed for is now prevented earlier.
+    // 2026-09-29 follow-up (hours-cap removal): with the hidden 42h ceiling
+    // gone, youssef-el-amrani's real demo-data pattern now also picks up
+    // Sunday (previously left OFF only because the old hours arithmetic
+    // discouraged a 6th working day) — [T,T,F,F,T,T,T], a 3-day trailing run,
+    // still under the 5-consecutive-day cap and still a clean 2-day OFF pair.
     const boundary = deriveFallbackBoundaryContext(EMPLOYEES, DAYS_WITH_DATA, CURRENT_WEEK_START);
     const run = (hardCapRepair: boolean) =>
       generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, boundary, "fallback_static_baseline", { hardCapRepair });
     const before = run(false);
-    expect(workPattern(before, "youssef-el-amrani")).toEqual([true, true, true, true, false, false, false]);
-    expect(before.issues.some((i) => i.type === "consecutive_off_violation" && i.employeeId === "youssef-el-amrani")).toBe(true);
+    expect(workPattern(before, "youssef-el-amrani")).toEqual([true, true, false, false, true, true, true]);
+    expect(before.issues.some((i) => i.type === "consecutive_off_violation" && i.employeeId === "youssef-el-amrani")).toBe(false);
+    expect(maxRun(workPattern(before, "youssef-el-amrani"))).toBeLessThanOrEqual(5);
 
     const p = run(true);
-    const worked = workPattern(p, "youssef-el-amrani");
-    expect(worked).toEqual([false, true, true, true, false, true, false]);
-    expect(p.issues.some((i) => i.type === "consecutive_off_violation" && i.employeeId === "youssef-el-amrani")).toBe(false);
-    expect(maxRun(worked)).toBeLessThanOrEqual(5);
-    expect(weekHours(p, "youssef-el-amrani", CURRENT_WEEK_START)).toBe(36);
+    expect(workPattern(p, "youssef-el-amrani")).toEqual(workPattern(before, "youssef-el-amrani")); // repair is a genuine no-op here now
     expect(p.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
     expect(p.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
-    const mine = p.hardCapRepairs.filter((r) => r.fromEmployeeId === "youssef-el-amrani");
-    expect(mine).toHaveLength(1);
-    expect(mine[0]).toMatchObject({ population: "flexible_pool", kind: "shift_own_day_for_off_run", reassignedDay: "Monday", targetDay: "Saturday", cap: "hard_weekly_hours" });
-    expect(mine[0].explanation).toBe(
-      "Youssef El Amrani's Monday work moved to Saturday (MT01) so their week stays within the 42h hard weekly hours cap while avoiding a 3-day OFF block (max 2 consecutive OFF days); Monday's Profiling coverage there is held by the dedicated team."
-    );
-    expect(p.generatedShiftsByDay["Saturday"].find((g) => g.employeeId === "youssef-el-amrani")!.hardCapRepairReason).toBe(mine[0].explanation);
-    // Monday's Profiling demand really is covered by the dedicated Profiling team (no Profiling BLOCKING conflict, no unfilled duty).
-    expect(p.configurationIssues.some((c) => c.requirementId === "specialized-demand-conflict-Profiling-Monday")).toBe(false);
+    expect(p.hardCapRepairs.filter((r) => r.fromEmployeeId === "youssef-el-amrani")).toEqual([]);
   });
 
   it("flexible pool (Stage 6): the same streak-ordering gap — Monday is handed to the fresh ACEs so the tired ones cover Tuesday; Tuesday's Gate/Boarding unfilled_duty disappears, no cap broken", () => {
@@ -762,10 +763,9 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     const p = gen(true);
     expect(unfilledDays(p, "Gate")).toEqual([]);
     expect(unfilledDays(p, "Boarding")).toEqual([]);
-    for (const e of team) {
-      expect(maxRun(workPattern(p, e.id), e.id.startsWith("a-") ? 4 : 0), e.id).toBeLessThanOrEqual(5);
-      expect(weekHours(p, e.id, WEEK), e.id).toBeLessThanOrEqual(42);
-    }
+    // Weekly hours are no longer a rejection ceiling (2026-09-29 removal):
+    // only the consecutive-work-day cap is a real hard constraint here.
+    for (const e of team) expect(maxRun(workPattern(p, e.id), e.id.startsWith("a-") ? 4 : 0), e.id).toBeLessThanOrEqual(5);
     expect(p.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
     expect(p.hardCapRepairs.map((r) => `${r.kind}|${r.fromEmployeeId}->${r.toEmployeeId}|${r.reassignedDay}->${r.targetDay}|${r.cap}`)).toEqual([
       "reallocate_for_gap|a-tired-1->b-fresh-1|Monday->Tuesday|consecutive_work_days",
@@ -782,14 +782,23 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     const on = gen(CONFIG);
     const violators = (p: DraftWeeklyPlan) => p.issues.filter((i) => i.type === "consecutive_off_violation").map((i) => i.employeeId).sort();
     expect(violators(on)).toEqual(violators(off));
-    for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) {
-      expect(maxRun(workPattern(on, e.id)), e.id).toBeLessThanOrEqual(5);
-      expect(weekHours(on, e.id, CURRENT_WEEK_START), e.id).toBeLessThanOrEqual(42);
-    }
+    // Weekly hours are no longer a rejection ceiling (2026-09-29 removal):
+    // only the consecutive-work-day cap is a real hard constraint here.
+    for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) expect(maxRun(workPattern(on, e.id)), e.id).toBeLessThanOrEqual(5);
   });
 });
 
-describe("PHASE 2, part B — Gulf Air's structural shortfall stays an honest, unresolved BLOCKING gap", () => {
+describe("PHASE 2, part B — Gulf Air's 'structural shortfall' was an hours-cap artifact and is now fully resolved (2026-09-29 REPLACEMENT)", () => {
+  // BEFORE the 2026-09-29 removal, this fixture (whole 8-person team needed
+  // on all 4 flight days, every covering code >= 11.25h) pinned an hours-cap
+  // artifact: "3 x 11.25h + 11.25h > 42h" limited each member to only 3 of
+  // the 4 flight days, capping team capacity at 24 of the 32 needed
+  // person-days and leaving every flight day an honest BLOCKING gap. With
+  // the hidden 42h ceiling removed, the ONLY remaining hard constraint is
+  // the 5-consecutive-work-day cap — and since these 4 flight days
+  // (Mon/Wed/Fri/Sun) are never consecutive (Tue/Thu/Sat are gaps), no
+  // member's streak is ever at risk. The team now fully covers all 4 days:
+  // the "structural shortfall" this block existed to pin no longer exists.
   const gulfTeam = () => [
     ...[1, 2, 3, 4, 5, 6, 7].map((i) => makeEmployee({ id: `gf-ace-${i}`, name: `GF Ace ${i}`, assignment: "Gulf Air", team_role: "ace", foreign_company_authorizations: ["Gulf Air"] })),
     makeEmployee({ id: "gf-leader", name: "GF Leader", assignment: "Gulf Air", team_role: "leader", foreign_company_authorizations: ["Gulf Air"] }),
@@ -799,49 +808,31 @@ describe("PHASE 2, part B — Gulf Air's structural shortfall stays an honest, u
       makeFlight({ id: `gf-${day}`, flight_number: "GF105", airline: "Gulf Air", route: "CMN → BAH", destination: "BAH", aircraft: "Airbus A320", scheduled_departure: "09:00", day_of_week: day, flight_date: flightDateFor(WEEK, day), operator_type: "self_managed" })
     );
 
-  it("the whole 8-person team is needed on each of 4 flight days, every covering code is >= 11.25h, 3 x 11.25 + 11.25 > 42h: the 24 legal person-days are spread 6/6/6/6 (not 8/8/8/0), every flight day stays an honest BLOCKING gap", () => {
-    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): this fixture used to
-    // pin the lockstep itself — Mon/Wed/Fri fully crewed, then the WHOLE team
-    // over the cap together and Sunday at 0/8. The capacity is unchanged
-    // (8 x 3 = 24 < 32 needed) and still structurally short, but it is now
-    // spread over the four flight days, and no flight day is left unhandled.
+  it("the whole 8-person team is needed on each of 4 non-consecutive flight days: every day is now fully staffed (8/8), zero conflicts, zero repairs needed", () => {
     const repairsOut: import("../lib/planning/hard-cap-repair").HardCapRepair[] = [];
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(DAYS, gulfTeam(), gulfFlights(), ["Gulf Air"], 15, WEEK, new Map(), undefined, undefined, {
       caps: resolveHardWorkCaps(CONFIG), incomingStreakByEmployee: new Map(), repairsOut,
     });
     const flightDays = ["Monday", "Wednesday", "Friday", "Sunday"];
-    for (const day of flightDays) expect(generatedShiftsByDay[day], day).toHaveLength(6);
-    expect(flightDays.reduce((n, d) => n + generatedShiftsByDay[d].length, 0)).toBe(24);
+    for (const day of flightDays) expect(generatedShiftsByDay[day], day).toHaveLength(8);
+    expect(flightDays.reduce((n, d) => n + generatedShiftsByDay[d].length, 0)).toBe(32);
     for (const g of generatedShiftsByDay["Monday"]) expect(getShiftDurationHours(g.shiftCode, flightDateFor(WEEK, "Monday"))).toBeGreaterThanOrEqual(11.25);
-    for (const e of gulfTeam()) expect(patternHoursOf(DAYS.map((d) => generatedShiftsByDay[d].find((g) => g.employeeId === e.id)?.shiftCode ?? null), WEEK), e.id).toBeLessThanOrEqual(42);
-    // Role split still enforced: the single leader works 3 of the 4 days, never replaced by an ACE.
-    expect(flightDays.filter((d) => generatedShiftsByDay[d].some((g) => g.employeeId === "gf-leader")).length).toBe(3);
+    // The leader now works every flight day too — no capacity throttle forces a rotation.
+    expect(flightDays.every((d) => generatedShiftsByDay[d].some((g) => g.employeeId === "gf-leader"))).toBe(true);
     expect(repairsOut).toEqual([]);
-    expect(conflicts.map((c) => c.dayOfWeek)).toEqual(flightDays);
-    for (const c of conflicts) {
-      expect(c).toMatchObject({ team: "Gulf Air", needed: 8, covered: 6 });
-      expect(c.capPacing).toMatchObject({ teamCapacityDays: 24, weekDemandDays: 32 });
-      expect(c.capPacing!.heldBack).toHaveLength(2);
-      expect(c.capRepair).toMatchObject({ budgetExhausted: false });
-    }
+    expect(conflicts).toEqual([]);
   });
 
-  it("through the full pipeline the BLOCKING issue says the bounded repair ran and found no legal reallocation", () => {
+  it("through the full pipeline there is no Gulf Air BLOCKING issue at all any more", () => {
     const p = generateDraftWeeklyPlan(gulfFlights(), gulfTeam(), [], CONFIG, DAYS, "W", WEEK);
-    const sunday = p.configurationIssues.find((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")!;
-    expect(sunday.description.startsWith("BLOCKING: Gulf Air needed 8 staff member(s) for its Sunday operation")).toBe(true);
-    // CAP-PACED REST PLANNING (2026-09-25 lockstep fix): 6 of 8 covered (see
-    // the test above), worded as a cap-paced shortfall naming who rested.
-    expect(sunday.description).toContain("but only 6 could be legally covered within the hard work caps");
-    expect(sunday.description).toContain("about 24 person-day(s) this week under the hard caps (42h weekly hours, 5 consecutive work days) against 32 person-day(s) of real demand");
-    expect(sunday.description).toContain("2 team member(s) rested today");
-    expect(sunday.description).toMatch(/The bounded cross-employee repair pass \(hard-constraints milestone phase 2\) evaluated \d+ candidate move\(s\) and found no legal reallocation/);
-    expect(p.hardCapRepairs).toEqual([]);
+    expect(p.configurationIssues.find((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")).toBeUndefined();
+    expect(p.configurationIssues.some((c) => c.description?.includes("Gulf Air"))).toBe(false);
+    expect(p.hardCapRepairs.filter((r) => r.team === "Gulf Air")).toEqual([]);
   });
 
-  it("the real 2026-09-21-regime demo week still reports its Gulf Air Sunday gap (and the repair never touches Gulf Air)", () => {
+  it("the real 2026-09-21-regime demo week no longer reports a Gulf Air Sunday gap at all (2026-09-29 REPLACEMENT) — its previously-documented BLOCKING shortfall was solely the now-removed hours ceiling, not a real staffing infeasibility", () => {
     const p = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "W", WEEK);
-    expect(p.configurationIssues.some((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday" && c.description.startsWith("BLOCKING"))).toBe(true);
+    expect(p.configurationIssues.some((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")).toBe(false);
     expect(p.hardCapRepairs.some((r) => r.team === "Gulf Air")).toBe(false);
   });
 });
@@ -913,7 +904,16 @@ describe("PHASE 2, part B — no-op, determinism, fixed-cycle exemption, bounded
     const fixture = JSON.parse(readFileSync(join(__dirname, "fixtures", "pre-hard-caps-demo-plan.json"), "utf8")) as { roster: Record<string, string> };
     const boundary = deriveFallbackBoundaryContext(EMPLOYEES, DAYS_WITH_DATA, CURRENT_WEEK_START);
     const p = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, boundary, "fallback_static_baseline");
-    expect(p.hardCapRepairs.length).toBeGreaterThan(0);
+    // 2026-09-29 correction: 0, not >0, for the real demo data — Stage 6
+    // itself now respects OFF/OFF pairing as a hard constraint (see the
+    // youssef-el-amrani test above), which already prevents the specific
+    // lockstep/OFF-block scenarios this repair pass used to need to fix
+    // here. The exemption loop below is kept as a structural guard (it
+    // still passes trivially with zero repairs); synthetic scenarios
+    // elsewhere in this file (e.g. "flexible pool (Stage 6): the same
+    // streak-ordering gap" below) exercise the repair pass itself with
+    // repairs > 0.
+    expect(p.hardCapRepairs.length).toBe(0);
     const staticIds = new Set(EMPLOYEES.filter((e) => !isGenerationDrivenPopulation(e)).map((e) => e.id));
     for (const r of p.hardCapRepairs) for (const id of [r.fromEmployeeId, r.toEmployeeId, r.filledByEmployeeId]) if (id) expect(staticIds.has(id), id).toBe(false);
     for (const e of EMPLOYEES.filter((x) => usesFixedCycleRotation(x.assignment))) {

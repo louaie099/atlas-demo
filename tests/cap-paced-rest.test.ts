@@ -141,15 +141,24 @@ describe("pure primitives", () => {
     expect(plan).toMatchObject({ capacityDays: 15, demandDays: 9 });
   });
 
-  it("planCapPacedRestDays, capacity-constrained: plans exactly the capacity, spread over the week in proportion to demand, staggered across members, within both caps", () => {
-    const ids = ["a", "b", "c", "d"];
+  it("planCapPacedRestDays, capacity-constrained (2026-09-29 REPLACEMENT — capacity is now streak-only): plans exactly the capacity, spread over the week in proportion to demand, staggered across members, within the consecutive-work-day cap", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, a 4-member team fully needed
+    // every day (demand 3/day) was capacity-constrained at 16 legal
+    // person-days under the old 42h ceiling. With capacity now purely
+    // streak-based, each member's capacity over a full 7-day demand week is 6
+    // (5 in a row, forced rest, then 1 more) — a 4-member team's 24 person-
+    // days comfortably covers 21 needed, so that fixture is no longer
+    // constrained at all (see the "no day planned empty" comment above this
+    // block for the general shape). A 3-member team, still fully needed
+    // every day, keeps the fixture genuinely constrained: 3 x 6 = 18 < 21.
+    const ids = ["a", "b", "c"];
     const plan = planCapPacedRestDays({ memberIds: ids, daysOrder: DAYS, demandByDay: DAYS.map(() => 3), estimatedShiftHoursByDay: DAYS.map(() => 9), caps: CAPS, incomingStreakByEmployee: new Map() });
-    expect(plan).toMatchObject({ active: true, capacityDays: 16, demandDays: 21 });
-    expect(plan.plannedWorkersByDay.reduce((x, y) => x + y, 0)).toBe(16);
+    expect(plan).toMatchObject({ active: true, capacityDays: 18, demandDays: 21 });
+    expect(plan.plannedWorkersByDay.reduce((x, y) => x + y, 0)).toBe(18);
     expect(Math.min(...plan.plannedWorkersByDay)).toBeGreaterThanOrEqual(2); // no day planned empty
     for (const id of ids) {
       const worked = DAYS.map((d) => plan.preferredWorkDays.get(id)!.has(d));
-      expect(worked.filter(Boolean).length, id).toBe(4); // 4 x 9h = 36h <= 42h
+      expect(worked.filter(Boolean).length, id).toBe(6); // 6 of 7: one forced rest day under the 5-consecutive-day cap
       expect(maxRun(worked), id).toBeLessThanOrEqual(5);
     }
     // Staggered: the members' rest days are not all the same days.
@@ -164,63 +173,84 @@ describe("pure primitives", () => {
     for (const id of ["tired", "fresh"]) expect(maxRun(DAYS.map((d) => plan.preferredWorkDays.get(id)!.has(d)), id === "tired" ? 5 : 0), id).toBeLessThanOrEqual(5);
   });
 
-  it("planAllowsDrawIn: only when working today cannot cost one of the member's own later planned days", () => {
-    const plan = planCapPacedRestDays({ memberIds: ["a", "b", "c", "d"], daysOrder: DAYS, demandByDay: DAYS.map(() => 3), estimatedShiftHoursByDay: DAYS.map(() => 9), caps: CAPS, incomingStreakByEmployee: new Map() });
-    const resting = ["a", "b", "c", "d"].find((id) => !plan.preferredWorkDays.get(id)!.has("Monday"))!;
-    // 4 planned days x 9h = 36h still ahead: +9h today = 45h > 42h.
-    expect(planAllowsDrawIn(plan, resting, 0, 0, 0)).toBe(false);
+  it("planAllowsDrawIn (2026-09-29 REPLACEMENT — the gate is now purely the 5-consecutive-work-day cap, never hours): drawing in a member resting to protect a later run is refused; drawing in a member whose rest already broke their streak, or who has no run left to protect, is allowed", () => {
+    // 3 members, demand 3/day on 6 days then 1 on Sunday: still genuinely
+    // capacity-constrained (18 legal person-days < 19 needed), but with a
+    // dip that leaves some rests NOT right at the cap edge.
+    const ids = ["a", "b", "c"];
+    const demand = [3, 3, 3, 3, 3, 3, 1];
+    const plan = planCapPacedRestDays({ memberIds: ids, daysOrder: DAYS, demandByDay: demand, estimatedShiftHoursByDay: DAYS.map(() => 9), caps: CAPS, incomingStreakByEmployee: new Map() });
+    expect(plan).toMatchObject({ active: true, capacityDays: 18, demandDays: 19 });
+    // b rests both Saturday and Sunday: drawing in on Saturday would extend a
+    // real 5-day run (Mon-Fri) into a 6th — refused.
+    expect(plan.preferredWorkDays.get("b")!.has("Saturday")).toBe(false);
+    expect(planAllowsDrawIn(plan, "b", 5, 0, 5)).toBe(false);
+    // ...but Sunday, entered with a streak already reset to 0 by Saturday's
+    // rest, has nothing left to protect — drawing in is allowed.
+    expect(plan.preferredWorkDays.get("b")!.has("Sunday")).toBe(false);
+    expect(planAllowsDrawIn(plan, "b", 6, 0, 0)).toBe(true);
+    // c rests Sunday too, entering with a real streak of 3 (Thu/Fri/Sat) and
+    // no more preferred days after it to protect — also allowed.
+    expect(plan.preferredWorkDays.get("c")!.has("Sunday")).toBe(false);
+    expect(planAllowsDrawIn(plan, "c", 6, 0, 3)).toBe(true);
     // An unknown member (not in any active plan) is never held back.
     expect(planAllowsDrawIn(plan, "stranger", 0, 0, 0)).toBe(true);
-    // With a lighter estimate there is room for an extra day.
-    const light = planCapPacedRestDays({ memberIds: ["a", "b", "c", "d"], daysOrder: DAYS, demandByDay: DAYS.map(() => 3), estimatedShiftHoursByDay: DAYS.map((_, i) => (i === 0 ? 5 : 9)), caps: CAPS, incomingStreakByEmployee: new Map() });
-    const lightResting = ["a", "b", "c", "d"].find((id) => !light.preferredWorkDays.get(id)!.has("Monday"))!;
-    const ahead = DAYS.filter((d) => light.preferredWorkDays.get(lightResting)!.has(d)).length * 9;
-    expect(planAllowsDrawIn(light, lightResting, 0, 0, 0)).toBe(ahead + 5 <= 42);
   });
 });
 
 // ---------------------------------------------------------------------------
 
 describe("TEST 1 — the lockstep bug at small scale: late-week coverage no longer collapses to zero", () => {
-  it("Profiling (4 members, 3 needed daily, 9h codes: 16 legal person-days < 21): BEFORE the fix the whole team caps out and Sunday is 0/3; AFTER, every day keeps real coverage", () => {
-    const ids = new Set(["p-0", "p-1", "p-2", "p-3"]);
+  it("Profiling (2026-09-29 REPLACEMENT — capacity is now streak-only, so a 4-member team fully covers 3/day and is no longer constrained: a 3-member team, still fully needed every day, is): 18 legal person-days < 21: BEFORE the fix the whole team caps out and Saturday is 0/3; AFTER, every day keeps real coverage", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, a 4-member team needing 3/day
+    // was constrained at 16 legal person-days under the old 42h ceiling. With
+    // capacity now purely streak-based (6 of 7 days per member on a fully-
+    // demanded week), that 4-member fixture reaches 24 >= 21 and is no longer
+    // constrained at all. A 3-member team, still fully needed every day,
+    // keeps the same shape genuinely constrained (3 x 6 = 18 < 21) — the
+    // "whole team caps out together" day lands on Saturday here rather than
+    // Sunday, since 3 fully-utilized members' streaks resolve differently
+    // than 4's, but the bug's shape (a zero day) is otherwise identical.
+    const ids = new Set(["p-0", "p-1", "p-2"]);
     // BEFORE (pre-fix behaviour): full coverage early, the whole team capped together, a zero day at the end.
-    const before = runProfiling(4, 3, false).result;
+    const before = runProfiling(3, 3, false).result;
     const beforeCounts = DAYS.map((d) => countOn(before.generatedShiftsByDay, d, ids));
-    expect(beforeCounts.slice(0, 4)).toEqual([3, 3, 3, 3]);
-    expect(beforeCounts[6]).toBe(0); // Sunday: nobody left under the cap
+    expect(beforeCounts.slice(0, 5)).toEqual([3, 3, 3, 3, 3]);
+    expect(beforeCounts[5]).toBe(0); // Saturday: nobody left under the cap
     // AFTER: same total legal capacity, spread across the week, no zero day.
-    const after = runProfiling(4, 3, true).result;
+    const after = runProfiling(3, 3, true).result;
     const afterCounts = DAYS.map((d) => countOn(after.generatedShiftsByDay, d, ids));
     expect(afterCounts.reduce((x, y) => x + y, 0)).toBe(beforeCounts.reduce((x, y) => x + y, 0));
     expect(Math.min(...afterCounts)).toBeGreaterThanOrEqual(2);
     expect(afterCounts[5]).toBeGreaterThan(0);
-    expect(afterCounts[6]).toBeGreaterThan(0);
     // Every shortfall is an honest paced conflict (needed 3, covered 2), naming who rested.
     expect(after.conflicts.length).toBeGreaterThan(0);
     for (const c of after.conflicts) {
       expect(c).toMatchObject({ team: "Profiling", needed: 3, covered: 2 });
-      expect(c.capPacing).toMatchObject({ teamCapacityDays: 16, weekDemandDays: 21 });
+      expect(c.capPacing).toMatchObject({ teamCapacityDays: 18, weekDemandDays: 21 });
       expect(c.capPacing!.heldBack.length).toBeGreaterThan(0);
     }
   });
 
-  it("the REAL 2026-10-05 stress week (154 flights, real seed workforce): Profiling+Mesure Saturday/Sunday go from 0/24 to real coverage", () => {
+  it("the REAL 2026-10-05 stress week (2026-09-29 REPLACEMENT — capacity is now streak-only): the original 0/24 Saturday-and-Sunday collapse this test pinned no longer reproduces at all, even with pacing off, since removing the hours ceiling roughly doubled real per-member capacity; pacing still evens the week out and every day stays well covered", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, this pinned the ORIGINAL bug's
+    // shape on real data: Profiling+Mesure fell to 0/24 on BOTH Saturday and
+    // Sunday under the old 42h ceiling. With capacity now purely streak-based
+    // (roughly 6 of 7 days/member instead of ~4), the team's real weekly
+    // capacity is high enough that even the UNPACED greedy never produces a
+    // zero day here — the lockstep bug's precondition (legal capacity below
+    // real demand) no longer holds for this fixture. Pacing (still a real,
+    // tested mechanism — see TEST 1's synthetic fixture above, which remains
+    // genuinely constrained) still smooths the week's distribution.
     const count = (p: DraftWeeklyPlan, day: string) => countOn(p.generatedShiftsByDay, day, PROF_MESURE_IDS);
     const before = stressPlan(false);
     expect(PROF_MESURE_IDS.size).toBe(24);
-    expect(count(before, "Saturday")).toBe(0);
-    expect(count(before, "Sunday")).toBe(0);
+    expect(Math.min(...DAYS.map((d) => count(before, d)))).toBeGreaterThan(0); // no collapse even unpaced
     const after = stressPlan(true);
     const perDay = DAYS.map((d) => count(after, d));
-    expect(count(after, "Saturday")).toBeGreaterThanOrEqual(12);
-    expect(count(after, "Sunday")).toBeGreaterThanOrEqual(12);
-    expect(Math.min(...perDay)).toBeGreaterThanOrEqual(10);
-    // The same legal capacity — just no longer spent entirely by Thursday.
-    expect(perDay.reduce((x, y) => x + y, 0)).toBe(DAYS.reduce((n, d) => n + count(before, d), 0));
-    // Nobody in the team breaks either hard cap.
+    expect(Math.min(...perDay)).toBeGreaterThanOrEqual(15);
+    // Nobody in the team breaks the real hard cap (consecutive work days); weekly hours are no longer a ceiling.
     for (const id of PROF_MESURE_IDS) {
-      expect(hoursOf(after.generatedShiftsByDay, id, STRESS_WEEK), id).toBeLessThanOrEqual(42);
       expect(maxRun(DAYS.map((d) => after.generatedShiftsByDay[d].some((g) => g.employeeId === id))), id).toBeLessThanOrEqual(5);
     }
   });
@@ -230,11 +260,14 @@ describe("TEST 1 — the lockstep bug at small scale: late-week coverage no long
 
 describe("TEST 3 — the staggering only affects ORDER / who rests, never eligibility: every hard constraint still filters", () => {
   it("rest: the plan prefers p-0 on Monday, but p-0's real prior shift leaves < 15h before any covering code — p-0 is still excluded, and nobody's rest drops below 15h", () => {
-    // Team of 3, 2 needed daily at an early departure: 12 legal person-days < 14 -> the plan is active.
-    const { pool, demandByDay } = profilingWeek(3, 2, "07:30");
+    // Team of 3, ALL 3 needed daily (2026-09-29 REPLACEMENT: capacity is now
+    // streak-only, so a lighter "2 of 3 needed" shape is no longer
+    // constrained at all — see TEST 1's doc comment; a fully-saturated team
+    // still is: 18 legal person-days < 21 -> the plan is active) at an early departure.
+    const { pool, demandByDay } = profilingWeek(3, 3, "07:30");
     const cluster = demandClustersForRole(demandByDay["Monday"], "Profiling")[0];
     const prior: PriorDayShiftMap = new Map([["p-0", { shift_start: "14:00", shift_end: "23:30" }]]);
-    const plan = planCapPacedRestDays({ memberIds: pool.map((e) => e.id), daysOrder: DAYS, demandByDay: DAYS.map(() => 2), estimatedShiftHoursByDay: DAYS.map(() => 9), caps: CAPS, incomingStreakByEmployee: new Map() });
+    const plan = planCapPacedRestDays({ memberIds: pool.map((e) => e.id), daysOrder: DAYS, demandByDay: DAYS.map(() => 3), estimatedShiftHoursByDay: DAYS.map(() => 9), caps: CAPS, incomingStreakByEmployee: new Map() });
     expect(plan.active).toBe(true);
     expect(plan.preferredWorkDays.get("p-0")!.has("Monday")).toBe(true); // the plan wants p-0 on Monday...
     const { generatedShiftsByDay } = generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, WEEK, prior, { caps: CAPS, incomingStreakByEmployee: new Map() });
@@ -252,17 +285,19 @@ describe("TEST 3 — the staggering only affects ORDER / who rests, never eligib
     }
   });
 
-  it("hard caps: a member the plan would place is still excluded when a real cap forbids it (incoming 5-day streak), and nobody ever exceeds 42h or 5 consecutive days", () => {
+  it("hard caps: a member the plan would place is still excluded when a real cap forbids it (incoming 5-day streak), and nobody ever exceeds 5 consecutive days (weekly hours are no longer a ceiling, 2026-09-29 removal)", () => {
     const incoming = new Map([["p-0", 5]]);
     const { pool, result } = runProfiling(4, 3, true, new Map(), incoming);
     expect(result.generatedShiftsByDay["Monday"].some((g) => g.employeeId === "p-0")).toBe(false);
-    for (const e of pool) {
-      expect(hoursOf(result.generatedShiftsByDay, e.id, WEEK), e.id).toBeLessThanOrEqual(42);
-      expect(maxRun(DAYS.map((d) => result.generatedShiftsByDay[d].some((g) => g.employeeId === e.id)), incoming.get(e.id) ?? 0), e.id).toBeLessThanOrEqual(5);
-    }
+    for (const e of pool) expect(maxRun(DAYS.map((d) => result.generatedShiftsByDay[d].some((g) => g.employeeId === e.id)), incoming.get(e.id) ?? 0), e.id).toBeLessThanOrEqual(5);
   });
 
-  it("qualification / role split (Gulf Air, 7 ACE + 1 Leader): on the day the plan rests the Leader, the Leader slot stays honestly short — never filled by an ACE", () => {
+  it("qualification / role split (Gulf Air, 7 ACE + 1 Leader) (2026-09-29 REPLACEMENT): with the hours ceiling removed there is no longer any day the plan needs to rest the Leader — the single Leader slot is filled every flight day, and it is never filled by an ACE", () => {
+    // BEFORE the 2026-09-29 removal, "3 x >= 11.25h fits under 42h, a 4th
+    // does not" forced the Leader to rest one of the 4 (non-consecutive)
+    // flight days. With no hours ceiling and these 4 days never consecutive,
+    // the Leader now covers every one of them; the role split itself
+    // (never substituted by an ACE) is unchanged and still real.
     const team = [
       ...[1, 2, 3, 4, 5, 6, 7].map((i) => makeEmployee({ id: `gf-ace-${i}`, name: `GF Ace ${i}`, assignment: "Gulf Air", team_role: "ace", foreign_company_authorizations: ["Gulf Air"] })),
       makeEmployee({ id: "gf-leader", name: "GF Leader", assignment: "Gulf Air", team_role: "leader", foreign_company_authorizations: ["Gulf Air"] }),
@@ -271,22 +306,19 @@ describe("TEST 3 — the staggering only affects ORDER / who rests, never eligib
     const flights = flightDays.map((day) => makeFlight({ id: `gf-${day}`, flight_number: "GF105", airline: "Gulf Air", route: "CMN → BAH", destination: "BAH", aircraft: "Airbus A320", scheduled_departure: "09:00", day_of_week: day, flight_date: flightDateFor(WEEK, day), operator_type: "self_managed" }));
     const { generatedShiftsByDay } = generateForeignCompanyShifts(DAYS, team, flights, ["Gulf Air"], 15, WEEK, new Map(), undefined, undefined, { caps: CAPS, incomingStreakByEmployee: new Map() });
     const leaderDays = flightDays.filter((d) => generatedShiftsByDay[d].some((g) => g.employeeId === "gf-leader"));
-    expect(leaderDays.length).toBe(3); // 3 x >= 11.25h fits under 42h, a 4th does not
+    expect(leaderDays.length).toBe(4); // no capacity throttle forces a rotation any more
     for (const d of flightDays) {
       const aces = generatedShiftsByDay[d].filter((g) => g.employeeId.startsWith("gf-ace-")).length;
       expect(aces, d).toBeLessThanOrEqual(7);
-      expect(generatedShiftsByDay[d].filter((g) => g.employeeId === "gf-leader").length, d).toBeLessThanOrEqual(1);
+      expect(generatedShiftsByDay[d].filter((g) => g.employeeId === "gf-leader").length, d).toBe(1); // never substituted by an ACE, never left empty
     }
   });
 
-  it("the whole real stress week: every Profiling/Mesure/foreign-company member stays <= 42h, <= 5 consecutive days, >= 15h rest", () => {
+  it("the whole real stress week: every Profiling/Mesure/foreign-company member stays <= 5 consecutive days and >= 15h rest (weekly hours are no longer a ceiling, 2026-09-29 removal)", () => {
     const p = stressPlan(true);
     const ids = EMPLOYEES.filter((e) => e.active && (PROF_MESURE_IDS.has(e.id) || e.foreign_company_authorizations.includes(e.assignment))).map((e) => e.id);
     expect(ids.length).toBeGreaterThan(24);
-    for (const id of ids) {
-      expect(hoursOf(p.generatedShiftsByDay, id, STRESS_WEEK), id).toBeLessThanOrEqual(42);
-      expect(maxRun(DAYS.map((d) => p.generatedShiftsByDay[d].some((g) => g.employeeId === id))), id).toBeLessThanOrEqual(5);
-    }
+    for (const id of ids) expect(maxRun(DAYS.map((d) => p.generatedShiftsByDay[d].some((g) => g.employeeId === id))), id).toBeLessThanOrEqual(5);
     expect(p.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
   });
 });
@@ -336,32 +368,36 @@ describe("TEST 5 — Stage 6's flexible pool is untouched", () => {
 // ---------------------------------------------------------------------------
 
 describe("TEST 6 — foreign-company teams had the same defect and get the same fix", () => {
-  it("Air France with a 4-person team (3 needed daily, 16 legal person-days < 21): BEFORE, the team caps out together and Sunday is 0/3; AFTER, every flight day keeps at least 2", () => {
+  it("Air France with a 4-person team (2026-09-29 REPLACEMENT): with the hours ceiling removed, capacity (4 x 6 = 24) now comfortably covers the 21 needed person-days, so this fixture is no longer constrained at all — every flight day is fully covered (3/3) with the fix on OR off", () => {
+    // BEFORE the 2026-09-29 removal, "16 legal person-days < 21" forced a
+    // lockstep collapse (Sunday 0/3) with pacing off. With capacity now
+    // purely streak-based, a 4-person team fully covers 3/day every day even
+    // WITHOUT pacing — there is no shortfall left for pacing to smooth.
     const ids = new Set(["af-0", "af-1", "af-2", "af-3"]);
     const covered = (r: ReturnType<typeof runAirFrance>["result"], d: string) => new Set(r.generatedShiftsByDay[d].filter((g) => g.coversRoles.includes("Air France") && ids.has(g.employeeId)).map((g) => g.employeeId)).size;
     const before = runAirFrance(4, false).result;
-    expect(covered(before, "Sunday")).toBe(0);
+    expect(DAYS.map((d) => covered(before, d))).toEqual(DAYS.map(() => 3));
+    expect(before.conflicts).toEqual([]);
     const after = runAirFrance(4, true).result;
-    const perDay = DAYS.map((d) => covered(after, d));
-    expect(Math.min(...perDay)).toBeGreaterThanOrEqual(2);
-    expect(perDay.reduce((x, y) => x + y, 0)).toBe(DAYS.reduce((n, d) => n + covered(before, d), 0));
-    for (const c of after.conflicts) expect(c).toMatchObject({ team: "Air France", needed: 3, covered: 2 });
+    expect(DAYS.map((d) => covered(after, d))).toEqual(DAYS.map(() => 3));
+    expect(after.conflicts).toEqual([]);
   });
 
-  it("the REAL 2026-09-07 heavy week: Gulf Air (8 members, 8 needed on 5 flight days) goes from 8/8/8/8/0 to an even 7/6/6/6/7 — same 32 legal person-days", () => {
+  it("the REAL 2026-09-07 heavy week (2026-09-29 REPLACEMENT): Gulf Air's old 8/8/8/8/0 lockstep collapse (and the paced 7/6/6/6/7 fix for it) no longer occurs — 8 members now cover all 5 flight days in full, 8/8/8/8/8, with the fix on or off", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, this real week's Gulf Air
+    // team hit the old 42h ceiling in lockstep (0 on Sunday unpaced, an even
+    // 7/6/6/6/7 paced). With capacity now purely streak-based (5 non-
+    // consecutive flight days never risk the 5-consecutive-day cap at all),
+    // the team fully covers every flight day regardless of pacing.
     const gulfIds = new Set(EMPLOYEES.filter((e) => e.active && e.assignment === "Gulf Air").map((e) => e.id));
     const gen = (specializedCapPacing: boolean) => generateDraftWeeklyPlan(heavyFlights, EMPLOYEES, [], CONFIG, DAYS, "W", HEAVY_WEEK, new Map(), "unknown", { specializedCapPacing });
     const flightDaysOf = (p: DraftWeeklyPlan) => DAYS.map((d) => p.generatedShiftsByDay[d].filter((g) => gulfIds.has(g.employeeId) && g.coversRoles.includes("Gulf Air")).length);
     const before = flightDaysOf(gen(false));
-    expect(before).toEqual([8, 0, 8, 0, 8, 8, 0]); // Sunday is a flight day with nobody left under the cap
+    expect(before).toEqual([8, 0, 8, 0, 8, 8, 8]);
     const on = gen(true);
     const after = flightDaysOf(on);
-    expect(after).toEqual([7, 0, 6, 0, 6, 6, 7]);
-    expect(after.reduce((x, y) => x + y, 0)).toBe(before.reduce((x, y) => x + y, 0));
-    for (const id of gulfIds) expect(hoursOf(on.generatedShiftsByDay, id, HEAVY_WEEK), id).toBeLessThanOrEqual(42);
-    const sunday = on.configurationIssues.find((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")!;
-    expect(sunday.description).toContain("but only 7 could be legally covered within the hard work caps");
-    expect(sunday.description).toContain("cap-paced rest planning");
+    expect(after).toEqual(before);
+    expect(on.configurationIssues.find((c) => c.requirementId === "specialized-demand-conflict-Gulf Air-Sunday")).toBeUndefined();
   });
 
   it("no-op when capacity suffices: a foreign team with enough legal capacity is byte-identical with the fix on or off", () => {
@@ -427,35 +463,35 @@ describe("TEST 7 — coverage-group allocation: a day's preferred workers are no
     return generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, WEEK, new Map(), { caps: CAPS, incomingStreakByEmployee: new Map(), capPacing });
   }
 
-  it("7 members, 2 needed per bank (42h cap -> 4 workdays/member -> 28 legal person-days, exactly enough for 2 morning + 2 evening every day, but not for the old per-cluster split's double-counted 2+2+2=6/day): pacing is active and covers BOTH banks in full every day", () => {
-    // With capPacing off, this shape's lockstep collapse (the ORIGINAL
-    // 2026-09-25 bug — see TEST 1) swamps the signal this test targets, so
-    // it is not used as the "before" comparison here: the old per-cluster
-    // share formula this test pins down no longer exists in the codebase to
-    // run standalone (it was replaced, not feature-flagged) — this test
-    // instead pins the CORRECT fixed-point behaviour directly.
-    const after = runTwoBank(7, 2, true);
+  it("4 members, 2 needed per bank (2026-09-29 REPLACEMENT — a smaller team keeps pacing genuinely active): a held-back member costs BOTH of the morning bank's non-overlapping clusters together, never double-counted into two separate shortfalls", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, a 7-member team at this same
+    // shape was exactly hours-capacity-tight (42h cap -> 4 workdays/member ->
+    // 28 legal person-days) and pacing was genuinely engaged. With capacity
+    // now streak-only (7 x 6 = 42 >> 28 needed), a 7-member team is no longer
+    // capacity-constrained at all, so pacing sits inactive and this block's
+    // actual subject — assignPacedProfilingMesureDay's coverage-group SHARE
+    // ALLOCATION — never runs. A 4-member team keeps the same shape genuinely
+    // constrained (4 x 6 = 24 < 28 needed), so pacing stays active here.
+    const after = runTwoBank(4, 2, true);
     const codesOn = (r: ReturnType<typeof runTwoBank>, day: string, code: string) => r.generatedShiftsByDay[day].filter((g) => g.shiftCode === code).length;
-    // Every day, the evening (AP01) bank is fully covered...
-    expect(DAYS.map((d) => codesOn(after, d, "AP01"))).toEqual(DAYS.map(() => 2));
-    // ...and so is the morning (MT03) bank, with no more than the 2 distinct
-    // people its own peak needs (the old formula wasted 3-5 MT03 shifts/day
-    // here chasing the double-counted Σ-peaks weight — see this describe
-    // block's doc comment).
-    for (const d of DAYS) {
-      const morningAssignments = after.generatedShiftsByDay[d].filter((g) => g.shiftCode === "MT03");
-      const morningWorkers = new Set(morningAssignments.map((g) => g.employeeId));
-      expect(morningWorkers.size, d).toBe(2);
-      expect(morningAssignments.length, d).toBe(2); // no duplicate roster rows for a shared-group employee
+    expect(DAYS.map((d) => codesOn(after, d, "AP01"))).toEqual([2, 2, 2, 2, 1, 2, 1]);
+    expect(DAYS.map((d) => codesOn(after, d, "MT03"))).toEqual([1, 2, 1, 2, 2, 1, 2]);
+    expect(after.conflicts).toHaveLength(8);
+    for (const c of after.conflicts) expect(c).toMatchObject({ team: "Profiling", needed: 2, covered: 1 }); // never the old double-counted peak
+    // On a day where BOTH morning clusters are short, they are short because
+    // of the SAME held-back member (one person's single MT03 shift spans
+    // both non-overlapping windows) — not two independently-counted people.
+    const morningConflictsByDay = new Map<string, typeof after.conflicts>();
+    for (const c of after.conflicts) {
+      if (c.window.start === "08:00" || c.window.start === "11:00") {
+        morningConflictsByDay.set(c.dayOfWeek, [...(morningConflictsByDay.get(c.dayOfWeek) ?? []), c]);
+      }
     }
-    // 28 person-days total (7 members x 4 legal workdays), fully spent on
-    // real coverage rather than any wasted on an already-satisfied bank.
-    const total = DAYS.reduce((n, d) => n + after.generatedShiftsByDay[d].length, 0);
-    expect(total).toBe(28);
-    // No conflict ever reports the double-counted old peak (2+2+2=6) as this
-    // population's need — there is none here (full coverage), but a real
-    // per-window shortfall must still report its own window's real 2.
-    for (const c of after.conflicts) expect(c.needed).toBe(2);
+    for (const [day, cs] of morningConflictsByDay) {
+      expect(cs, day).toHaveLength(2);
+      expect(cs[0].capPacing?.heldBack, day).toEqual(cs[1].capPacing?.heldBack);
+    }
+    expect(morningConflictsByDay.size).toBeGreaterThan(0); // the shared-group scenario actually occurred
   });
 
   it("no double-booking side effect: nobody is assigned twice into generatedShiftsByDay for a day their one shift covers two clusters, and their hours are counted exactly once", () => {

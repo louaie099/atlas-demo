@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
-import { CONFIG, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { CURRENT_WEEK_START } from "@/lib/seed-data";
 import { planIdForWeek, fetchAllRosterEntriesForPlan } from "@/lib/planning/weekly-plan-service";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
@@ -128,12 +128,17 @@ export async function GET(
   // Score against the CURRENT draft plan's own frozen config_snapshot
   // (lib/types.ts's WeeklyPlan doc comment) -- never a later live CONFIG
   // change silently reinterpreting which candidates look eligible for a
-  // plan already generated under different resolved rules. Falls back to
-  // the live CONFIG only if somehow no plan exists yet (defensive; Find
-  // Agent has nothing to fill without a generated plan in the first place).
+  // plan already generated under different resolved rules. No plan yet
+  // means Find Agent has nothing to fill without a generated plan in the
+  // first place (matches the checkin-zone-candidates/assign routes'
+  // stricter pattern; 2026-09-29: removed a static-CONFIG fallback here,
+  // which could disagree with the live resolved configuration).
   const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(CURRENT_WEEK_START));
   const plan = (planRows as WeeklyPlan[] | null)?.[0];
-  const effectiveConfig = plan?.config_snapshot ?? CONFIG;
+  const effectiveConfig = plan?.config_snapshot;
+  if (!effectiveConfig) {
+    return NextResponse.json({ error: "No draft plan exists for this week — generate one first." }, { status: 409 });
+  }
 
   // Fetch ALL assignments/requirements/flights, not just this requirement's
   // — computing an employee's protected commitments for this date requires

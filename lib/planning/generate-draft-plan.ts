@@ -21,7 +21,6 @@ import { IncomingFatigueSeed } from "./fatigue-continuity";
 import { createFatigueLedger, advanceFatigueLedger, stage6FatigueContextFromLedger, CandidateFatigueInput } from "./fatigue-planning";
 import { HardWorkCaps, HardCapExclusion, resolveHardWorkCaps, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { IncomingConsecutiveWorkDaysSeed, incomingStreakForHardCap } from "./consecutive-days-continuity";
-import { CapAwareRosterTarget, computeCapAwareTargetWorkDays, preferredOffWindowLength } from "./roster-target";
 import { HardCapRepair, repairFlexiblePoolWeek } from "./hard-cap-repair";
 
 /**
@@ -134,13 +133,6 @@ export interface DraftWeeklyPlan {
   // excluded at generation time; this list shows which of those situations
   // were subsequently repaired. Empty when nothing was repaired.
   hardCapRepairs: HardCapRepair[];
-  // CAP-AWARE ROSTER TARGETS (2026-09-25, phase 2 part A — roster-target.ts):
-  // each flexible-pool / foreign-company employee's work-day target for
-  // this window (the normal 5, or fewer when the hard weekly hours cap
-  // genuinely cannot fit 5 of their real codes), in employee order. A week
-  // that meets its own target is normal; validation flags only a week that
-  // falls short of it (roster_target_shortfall).
-  rosterTargets: ({ employeeId: string } & CapAwareRosterTarget)[];
 }
 
 /**
@@ -223,6 +215,15 @@ function runShiftGenerationPass(
       preferredOffDaysByEmployee,
       previousDay: prevIndex >= 0 ? { dayOfWeek: daysOrder[prevIndex], date: flightDateFor(weekStart, daysOrder[prevIndex]) } : undefined,
       nextDay: nextIndex >= 0 ? { dayOfWeek: daysOrder[nextIndex], date: flightDateFor(weekStart, daysOrder[nextIndex]) } : undefined,
+      // NORMAL OFF/OFF AS A HARD CONSTRAINT (2026-09-29 correction, point 3
+      // — see lib/labor-rules.ts's normalOffDaysConsecutive doc comment):
+      // when true, a flexible ACE's own planned OFF/OFF window is a genuine
+      // exclusion from Stage 6's candidate pool on those days, never merely
+      // the tier-3 scoring nudge it used to be — coverage can no longer
+      // silently outrank it. A resulting shortfall is reported honestly
+      // (unfilled_duty), the same "ATLAS recommends, humans approve"
+      // pathway every other genuine shortage in this codebase already uses.
+      hardExclude: config.normal_off_days_consecutive,
     };
   };
 
@@ -538,15 +539,14 @@ export function generateDraftWeeklyPlan(
   const hardCapRepairEnabled = planningOptions.hardCapRepair !== false;
   const specializedPacing = { capPacing: planningOptions.specializedCapPacing !== false, maxConsecutiveOffDays: config.max_consecutive_off_days };
   const hardCapRepairs: HardCapRepair[] = [];
-  const rosterTargetsById = new Map<string, CapAwareRosterTarget>();
-  // PART A (phase 2): the plan-level cap-aware target — how many work days
-  // the hard weekly hours cap leaves room for at the week's real SHORTEST
-  // codes, with no demand commitments yet (roster-target.ts). It sizes the
-  // preferred OFF window below; per-employee targets (from each employee's
-  // real committed days) drive the top-ups and validation.
+  // The normal roster target (daysOrder.length - normal_weekly_off_days),
+  // unconditionally — sizes the preferred OFF window below; per-employee
+  // committed days drive the top-ups. (2026-09-25 through 2026-09-28, PART A
+  // of the hard-constraints phase 2 milestone computed an HOURS-based
+  // "cap-aware" reduction of this here — REMOVED 2026-09-29, not relabeled;
+  // see hard-work-caps.ts's removal note.)
   const normalTargetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
-  const planLevelTarget = computeCapAwareTargetWorkDays({ daysOrder, weekStart, normalTargetWorkDays, hardWeeklyHoursCap: hardWorkCaps.hardWeeklyHoursCap });
-  const offWindowLength = preferredOffWindowLength(daysOrder.length, planLevelTarget.targetWorkDays, config.normal_weekly_off_days, config.max_consecutive_off_days);
+  const offWindowLength = config.normal_weekly_off_days;
 
   // FATIGUE (see planningOptions.fatigue above) — resolved once. An
   // employee without a supplied seed maps to nothing here and is treated
@@ -722,7 +722,7 @@ export function generateDraftWeeklyPlan(
     t1PeakDemandMinuteByDay,
     preferredOffDaysByEmployee,
     fatigueConfig,
-    { ...stageHardCaps, exclusionsOut: hardCapExclusions, targetsOut: rosterTargetsById }
+    { ...stageHardCaps, exclusionsOut: hardCapExclusions }
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
@@ -759,7 +759,7 @@ export function generateDraftWeeklyPlan(
     // constrained (not replaced) by their company's real flight days.
     config,
     stageFatigue,
-    { ...stageHardCaps, ...specializedPacing, exclusionsOut: hardCapExclusions, targetsOut: rosterTargetsById, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled }
+    { ...stageHardCaps, ...specializedPacing, exclusionsOut: hardCapExclusions, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled }
   );
 
   // Every population whose day is decided by generation this run, merged
@@ -1036,7 +1036,7 @@ export function generateDraftWeeklyPlan(
       : "The cross-employee repair pass (hard-constraints milestone phase 2) was not run for this plan.";
     const capNote = c.capExcluded && c.capExcluded.length > 0
       ? ` ${c.capExcluded.length} otherwise rested, compatible team member(s) were excluded by a HARD cap: ${c.capExcluded
-          .map((x) => `${employeesById.get(x.employeeId)?.name ?? x.employeeId} (${x.reason === "consecutive_work_days" ? `would be a ${hardWorkCaps.maxConsecutiveWorkDays + 1}th consecutive work day` : `would exceed the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap`})`)
+          .map((x) => `${employeesById.get(x.employeeId)?.name ?? x.employeeId} (would be a ${hardWorkCaps.maxConsecutiveWorkDays + 1}th consecutive work day)`)
           .join(", ")}. ${repairNote}`
       : "";
     // CAP-PACED REST PLANNING (2026-09-25 lockstep fix — cap-paced-rest.ts):
@@ -1048,7 +1048,7 @@ export function generateDraftWeeklyPlan(
     if (c.capPacing) {
       return {
         requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
-        description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered within the hard work caps. This team can legally work about ${c.capPacing.teamCapacityDays} person-day(s) this week under the hard caps (${hardWorkCaps.hardWeeklyHoursCap}h weekly hours, ${hardWorkCaps.maxConsecutiveWorkDays} consecutive work days) against ${c.capPacing.weekDemandDays} person-day(s) of real demand, so ATLAS spread that capacity across the week (cap-paced rest planning): each day carries a proportional share of the unavoidable shortfall, instead of the whole team reaching a cap together and leaving a later day with no coverage at all. ${c.capPacing.heldBack.length} team member(s) rested today to keep their remaining hard-cap capacity for their other planned days: ${c.capPacing.heldBack.map((id) => employeesById.get(id)?.name ?? id).join(", ")}.${capNote}${capNote ? "" : ` ${repairNote}`} The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+        description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered within the hard work caps. This team can legally work about ${c.capPacing.teamCapacityDays} person-day(s) this week under the hard consecutive-work-day cap (${hardWorkCaps.maxConsecutiveWorkDays} consecutive work days) against ${c.capPacing.weekDemandDays} person-day(s) of real demand, so ATLAS spread that capacity across the week (cap-paced rest planning): each day carries a proportional share of the unavoidable shortfall, instead of the whole team reaching a cap together and leaving a later day with no coverage at all. ${c.capPacing.heldBack.length} team member(s) rested today to keep their remaining hard-cap capacity for their other planned days: ${c.capPacing.heldBack.map((id) => employeesById.get(id)?.name ?? id).join(", ")}.${capNote}${capNote ? "" : ` ${repairNote}`} The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
       };
     }
     return {
@@ -1059,37 +1059,36 @@ export function generateDraftWeeklyPlan(
 
   // HARD WORK CAPS — Stage-6.5 / foreign roster top-up shortfall. A top-up
   // day is roster-shape capacity, not flight demand, so no duty is left
-  // uncovered by it — but a cap keeping an employee below THEIR OWN
-  // cap-aware target (PART A, phase 2 — roster-target.ts) is a real finding,
-  // reported once per run (non-blocking). Since phase 2 the top-up aims at
-  // that per-employee target, so a week the hours cap itself limits (e.g.
-  // 4 x 9h = 36h, where a 5th day would exceed 42h) is the employee's normal
-  // week and never lands here — only a genuinely avoidable shortfall does
-  // (a free day the arithmetic left room for was still closed, typically by
-  // the consecutive-work-day cap).
+  // uncovered by it — but the hard consecutive-work-day cap keeping an
+  // employee below their own NORMAL target is a real finding, reported once
+  // per run (non-blocking). (2026-09-25 through 2026-09-28: an HOURS-based
+  // cap-aware target existed here too, so a week that ceiling itself limited
+  // was the employee's normal week and never landed here. REMOVED
+  // 2026-09-29 along with that ceiling — see hard-work-caps.ts's removal
+  // note — so the target is now always the plain normal one.)
   const topUpCapShortfalls = hardCapExclusions.filter((x) => x.population === "flexible_pool_top_up" || x.population === "foreign_company_top_up");
   const topUpShortfallEmployees = new Set(topUpCapShortfalls.map((x) => x.employeeId));
   const hardCapTopUpIssues: ConfigurationIssue[] = [];
   if (topUpShortfallEmployees.size > 0) {
-    const byReason = (r: string) => new Set(topUpCapShortfalls.filter((x) => x.reason === r).map((x) => x.employeeId)).size;
     hardCapTopUpIssues.push({
       requirementId: "hard-cap-roster-top-up-shortfall",
-      description: `${topUpShortfallEmployees.size} employee(s) could not be topped up to their own cap-aware roster target (the normal ${normalTargetWorkDays} work days, or fewer where the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap cannot fit that many of their real shift codes) because a hard cap closed every remaining rest-legal day (${byReason("hard_weekly_hours")} by the ${hardWorkCaps.hardWeeklyHoursCap}h hard weekly hours cap, ${byReason("consecutive_work_days")} by the ${hardWorkCaps.maxConsecutiveWorkDays}-consecutive-work-day cap). No flight duty is left uncovered by this alone; those days stay OFF rather than breaking a hard rule.`,
+      description: `${topUpShortfallEmployees.size} employee(s) could not be topped up to their own normal roster target (${normalTargetWorkDays} work days) because the hard ${hardWorkCaps.maxConsecutiveWorkDays}-consecutive-work-day cap closed every remaining rest-legal day. No flight duty is left uncovered by this alone; those days stay OFF rather than breaking a hard rule.`,
     });
   }
 
-  // PART A — per-employee targets, in employee order, for validation and transparency.
-  const rosterTargets: ({ employeeId: string } & CapAwareRosterTarget)[] = [];
+  // PART A — per-employee free days the hard consecutive-work-day cap
+  // closed, for validation's roster_target_shortfall check. (2026-09-29:
+  // this used to be a full per-employee CapAwareRosterTarget map, including
+  // hours-cap arithmetic — removed, not relabeled, along with that
+  // mechanism; see hard-work-caps.ts's removal note. The target itself is
+  // unconditionally the normal one now, computed inside validation.ts.)
+  const capClosedFreeDaysByEmployee = new Map<string, string[]>();
   for (const employee of employees) {
-    const t = rosterTargetsById.get(employee.id);
-    if (!t) continue;
     const capClosed = daysOrder.filter((day) => topUpCapShortfalls.some((x) => x.employeeId === employee.id && x.dayOfWeek === day));
-    const withClosed: CapAwareRosterTarget = capClosed.length > 0 ? { ...t, capClosedFreeDays: capClosed } : t;
-    rosterTargetsById.set(employee.id, withClosed);
-    rosterTargets.push({ employeeId: employee.id, ...withClosed });
+    if (capClosed.length > 0) capClosedFreeDaysByEmployee.set(employee.id, capClosed);
   }
 
-  const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config, weekStart, rosterTargetsById);
+  const issues = validateWeeklyPlan(allUnfilled, employeesWithPlannedRoster, daysOrder, config, weekStart, capClosedFreeDaysByEmployee);
   const configurationIssues = [
     ...collectConfigurationIssues(requirements),
     // Average-hours feasibility: returns [] until a reference period is
@@ -1133,6 +1132,5 @@ export function generateDraftWeeklyPlan(
     restViolationsPrevented: [...flexibleRestDropped, ...specializedRestConflicts],
     hardCapExclusions,
     hardCapRepairs,
-    rosterTargets,
   };
 }

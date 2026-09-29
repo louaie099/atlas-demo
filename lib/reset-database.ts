@@ -40,6 +40,13 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   await supabase.from("staffing_requirements").delete().neq("id", "");
   await supabase.from("flights").delete().neq("id", "");
   await supabase.from("employees").delete().neq("id", "");
+  // Planning Rules milestone: an empty table means "no edit has ever been
+  // saved" (lib/planning/rules-service.ts falls back to the static
+  // DEFAULT_LABOR_RULES/DEFAULT_FATIGUE_CONFIG) -- Reset Demo genuinely
+  // starts over, so any saved rule/fatigue edit is cleared exactly like
+  // every other table above.
+  await supabase.from("planning_labor_rules").delete().neq("id", "");
+  await supabase.from("planning_fatigue_config").delete().neq("id", "");
 
   const { error: empErr } = await supabase.from("employees").insert(EMPLOYEES);
   if (empErr) throw new Error(`Seeding employees failed: ${empErr.message}`);

@@ -11,12 +11,13 @@ import {
   ZoneCheckinRequirement,
   ZoneCheckinAssignment,
 } from "../types";
-import { generateDraftWeeklyPlan } from "./generate-draft-plan";
+import { generateDraftWeeklyPlan, DraftPlanFatigueOptions } from "./generate-draft-plan";
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { buildPersistedWeeklyPlanView, PersistedWeeklyPlanView } from "./persisted-plan-view";
 import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
 import { deriveIncomingConsecutiveWorkDays, ConsecutiveDaysSeedInput } from "./consecutive-days-continuity";
+import { deriveIncomingFatigueState, fatigueSeedKindFor, FatigueSeedInput, IncomingFatigueSeed } from "./fatigue-continuity";
 import { CheckinZoneId } from "../checkin-zones";
 
 /**
@@ -233,6 +234,32 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     ? { kind: "prior_plan", priorPlanRosterEntries: input.priorPlanRosterEntries, weekStart, daysOrder }
     : { kind: "fallback_static_baseline", weekStart, daysOrder };
   const incomingConsecutiveWorkDays = new Map(employees.map((e) => [e.id, deriveIncomingConsecutiveWorkDays(e, consecutiveSeedInput)]));
+
+  // FATIGUE (2026-09-29, Planning Rules milestone): wired into real
+  // generation for the first time — previously `planningOptions.fatigue`
+  // was never passed here at all, so every real plan generated it as a
+  // no-op regardless of FATIGUE_MODEL_ENABLED (only tests exercised it
+  // directly). Only actually runs when a user has enabled it via the
+  // Planning Rules UI (config.fatigue.enabled) — same three-way provenance
+  // as the consecutive-work-day streak above (fatigueSeedKindFor maps the
+  // SAME priorWeekBoundaryProvenance onto the fatigue seed's own input
+  // kind, so the two continuity signals can never silently disagree about
+  // whether a real predecessor plan exists).
+  let fatigueOptions: DraftPlanFatigueOptions | undefined;
+  if (config.fatigue?.enabled) {
+    const fatigueSeedKind = fatigueSeedKindFor(priorWeekBoundaryProvenance);
+    const fatigueSeedInput: FatigueSeedInput =
+      fatigueSeedKind === "prior_plan"
+        ? { kind: "prior_plan", priorPlanRosterEntries: input.priorPlanRosterEntries ?? [], weekStart, daysOrder }
+        : fatigueSeedKind === "fallback_static_baseline"
+          ? { kind: "fallback_static_baseline", weekStart, daysOrder }
+          : { kind: "none" };
+    const incomingSeeds = new Map<string, IncomingFatigueSeed>(
+      employees.map((e) => [e.id, deriveIncomingFatigueState(e, fatigueSeedInput, config.fatigue!)])
+    );
+    fatigueOptions = { config: config.fatigue, incomingSeeds };
+  }
+
   const draft = generateDraftWeeklyPlan(
     flights,
     employees,
@@ -243,7 +270,7 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     weekStart,
     priorWeekBoundaryContext,
     priorWeekBoundaryProvenance,
-    { incomingConsecutiveWorkDays }
+    { incomingConsecutiveWorkDays, fatigue: fatigueOptions }
   );
 
   const plan: WeeklyPlan = {

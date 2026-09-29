@@ -1,22 +1,22 @@
 import { Employee, Flight, StaffingRequirement } from "./types";
-import { shiftCatalogForDate, getShiftDurationHours, LEGACY_BASELINE_DATE } from "./shift-templates";
-import { wouldExceedConsecutiveDayCap, wouldExceedHardWeeklyHoursCap } from "./planning/hard-work-caps";
+import { shiftCatalogForDate, LEGACY_BASELINE_DATE } from "./shift-templates";
+import { wouldExceedConsecutiveDayCap } from "./planning/hard-work-caps";
 
 /**
  * HARD WORK CAPS for ONE specific employee (2026-09-25, hard-constraints
  * milestone phase 1 — see lib/planning/hard-work-caps.ts), evaluated by
  * selectCompatibleShiftCodes in the same filter step as its optional rest
  * check: working today at all must not make this the
- * (maxConsecutiveWorkDays + 1)th consecutive calendar work day, and a
- * candidate code must not push the displayed week's hours past
- * hardWeeklyHoursCap. Like the rest filter, only meaningful when ranking for
- * one specific person.
+ * (maxConsecutiveWorkDays + 1)th consecutive calendar work day. Like the
+ * rest filter, only meaningful when ranking for one specific person.
+ * (2026-09-29: an hours-based cap — a candidate code must not push the
+ * displayed week's hours past a per-week ceiling — used to be checked here
+ * too; REMOVED, not relabeled, since that ceiling was never a confirmed
+ * rule — see lib/planning/hard-work-caps.ts's removal note.)
  */
 export interface EmployeeHardCapFilter {
   consecutiveWorkDaysBeforeToday: number;
   maxConsecutiveWorkDays: number;
-  hoursSoFarThisWeek: number;
-  hardWeeklyHoursCap: number;
 }
 import { computeForeignCompanyProtectedWindow } from "./foreign-company-window";
 import { restHoursBetween } from "./roster-generation";
@@ -180,14 +180,8 @@ export function selectCompatibleShiftCodes(
     );
   }
 
-  if (hardCapFilter) {
-    if (wouldExceedConsecutiveDayCap(hardCapFilter.consecutiveWorkDaysBeforeToday, true, hardCapFilter.maxConsecutiveWorkDays)) {
-      candidates = [];
-    } else {
-      candidates = candidates.filter(
-        (c) => !wouldExceedHardWeeklyHoursCap(hardCapFilter.hoursSoFarThisWeek, getShiftDurationHours(c.code, date), hardCapFilter.hardWeeklyHoursCap)
-      );
-    }
+  if (hardCapFilter && wouldExceedConsecutiveDayCap(hardCapFilter.consecutiveWorkDaysBeforeToday, true, hardCapFilter.maxConsecutiveWorkDays)) {
+    candidates = [];
   }
 
   candidates.sort((a, b) => {

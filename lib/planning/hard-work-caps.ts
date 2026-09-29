@@ -1,25 +1,25 @@
 import type { Config } from "../types";
+import { resolveDefaultLaborRules } from "../labor-rules";
 
 /**
  * HARD WORK CAPS (2026-09-25, hard-constraints milestone PHASE 1 of 3).
  *
- * Two new hard constraints for every GENERATION-DRIVEN population — the
+ * ONE remaining hard constraint for every GENERATION-DRIVEN population — the
  * flexible General T1 pool (Stage 6, shift-generation.ts, and its Stage-6.5
  * top-up, roster-generation.ts), Profiling/Mesure and every foreign-company
- * team (specialized-team-generation.ts):
+ * team (specialized-team-generation.ts): never more than
+ * `maxConsecutiveWorkDays` (default 5) CONSECUTIVE calendar work days,
+ * counted continuously across week boundaries. (A second cap — a
+ * single-displayed-week HOURS ceiling — existed here until 2026-09-29; see
+ * the removal note below for why it is gone, not merely relabeled.)
  *
- *   1. never more than `maxConsecutiveWorkDays` (default 5) CONSECUTIVE
- *      calendar work days, counted continuously across week boundaries;
- *   2. never more than `hardWeeklyHoursCap` (default 42) scheduled hours in
- *      a single displayed Monday-Sunday window.
- *
- * MECHANISM — exactly the 15h rest rule's: these are pure predicates that
- * each generation gate evaluates BEFORE scoring, alongside its existing
- * rest-legality filter (Stage 6's legalCodesByEmployee, the top-up's
- * legalCodesAt, selectCompatibleShiftCodes for Profiling/Mesure/foreign). A
- * candidate that would break either cap is simply never scored and never
- * assigned. There is deliberately no post-hoc repair/drop pass here and no
- * second legality mechanism.
+ * MECHANISM — exactly the 15h rest rule's: a pure predicate each generation
+ * gate evaluates BEFORE scoring, alongside its existing rest-legality filter
+ * (Stage 6's legalCodesByEmployee, the top-up's legalCodesAt,
+ * selectCompatibleShiftCodes for Profiling/Mesure/foreign). A candidate that
+ * would break the cap is simply never scored and never assigned. There is
+ * deliberately no post-hoc repair/drop pass here and no second legality
+ * mechanism.
  *
  * EXEMPT: the fixed JR→NT→OFF→OFF rotation (Transit/Leaders/Duty Officers,
  * lib/fixed-cycle-rotation.ts — audited to never exceed 2 consecutive work
@@ -34,12 +34,13 @@ import type { Config } from "../types";
  * cross-employee repair pass is PHASE 2. See
  * docs/known-limitations/roster-planning-vs-duty-allocation.md.
  *
- * PHASE 2 (2026-09-25) has landed on top of — not instead of — these
- * filters: hard-cap-repair.ts runs a bounded, deterministic cross-employee
- * repair AFTER each population's greedy generation (only when a cap
- * excluded someone), and roster-target.ts replaces the fixed 5-work-day
- * roster target with a per-employee cap-aware one. The filters here are
- * unchanged and every repaired week is re-checked against them.
+ * PHASE 2 (2026-09-25) has landed on top of — not instead of — this filter:
+ * hard-cap-repair.ts runs a bounded, deterministic cross-employee repair
+ * AFTER each population's greedy generation (only when the cap excluded
+ * someone). The filter here is unchanged and every repaired week is
+ * re-checked against it. (roster-target.ts's per-employee cap-aware roster
+ * target, mentioned here through 2026-09-28, was hours-based and is now
+ * removed — see below.)
  *
  * RUNNING STATE is always-on and independent of the (disabled-by-default)
  * fatigue subsystem: callers keep their own per-employee consecutive-work-
@@ -50,37 +51,62 @@ import type { Config } from "../types";
  * usageHours, the top-up's scheduled hours) — the hard comparison is simply
  * added at the filter stage; those totals' soft tie-break roles are
  * untouched.
+ *
+ * 2026-09-29 REMOVAL (Planning Rules milestone, follow-up audit): the
+ * single-displayed-week HOURS cap (`hardWeeklyHoursCap`, 42h) that used to
+ * exist here has been REMOVED, not merely excluded from the new
+ * configuration model. Audited and confirmed: it rejected candidate shift
+ * codes outright (shift-generation.ts's Stage 6, roster-generation.ts's
+ * top-up, foreign-shift-planning.ts's selectCompatibleShiftCodes) AND, more
+ * subtly, throttled how many days an employee was even TARGETED to work at
+ * all (roster-target.ts's computeCapAwareTargetWorkDays reduced the normal
+ * 5-day target below 5 whenever an employee's real shift codes would sum
+ * past 42h, and cap-paced-rest.ts's memberCapacityDays capped a team's
+ * weekly capacity the same way) — both are the SAME forbidden behavior
+ * ("42h treated as a hard Monday-Sunday ceiling") just expressed as a
+ * target/capacity throttle instead of a per-candidate rejection, and both
+ * are gone now too. The confirmed rule is `maximumAverageWeeklyWorkingHours`
+ * (see lib/labor-rules.ts) — an AVERAGE over a still-unconfirmed reference
+ * period, `not_evaluable` until that period is configured, and genuinely
+ * NOT a per-displayed-week ceiling. A legitimate configured shift
+ * combination that sums past 42h inside one displayed week is NOT rejected
+ * by anything in this codebase any more — see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md's
+ * 2026-09-29 "hard 42h cap removed" addendum for the full audit trail.
+ *
+ * `maxConsecutiveWorkDays` (5 consecutive calendar days) is UNCHANGED and
+ * REMAINS a real hard cap — a genuinely different, non-hours-based concept
+ * the correction above does not touch. It is still resolved from
+ * lib/labor-rules.ts (see DEFAULT_MAX_CONSECUTIVE_WORK_DAYS below) so there
+ * is one canonical number, honestly labeled `unconfirmed_prototype` there
+ * (normal flexible ACEs being configured for 5 WORK + 2 OFF does not, by
+ * itself, prove a separate confirmed rule that nobody may EVER work more
+ * than 5 consecutive calendar days across week boundaries).
  */
-
-/** Default hard cap on consecutive calendar work days (management rule, 2026-09-25). */
-export const DEFAULT_MAX_CONSECUTIVE_WORK_DAYS = 5;
 
 /**
- * Default hard single-displayed-week hours cap. The SAME NUMBER as
- * Config.maximum_average_weekly_working_hours (42) on purpose, but a
- * separate constant: it is a different concept (hard, one displayed week)
- * from that confirmed AVERAGE, and must never be derived from it — see
- * lib/types.ts's Config.hard_weekly_hours_cap doc comment.
+ * Default hard cap on consecutive calendar work days. DERIVED from
+ * lib/labor-rules.ts's DEFAULT_LABOR_RULES so there is one canonical
+ * number — see this module's 2026-09-29 correction note above on why its
+ * PROVENANCE there is honestly unconfirmed_prototype, not a confirmed
+ * separate labor rule. Kept as its own export here purely as
+ * `resolveHardWorkCaps`'s defensive fallback for a pre-migration
+ * `config_snapshot` that predates this field.
  */
-export const DEFAULT_HARD_WEEKLY_HOURS_CAP = 42;
-
-/** Tolerance for floating-point hour sums (quarter-hour shift durations). */
-const HOURS_EPSILON = 1e-9;
+export const DEFAULT_MAX_CONSECUTIVE_WORK_DAYS = resolveDefaultLaborRules().maxConsecutiveWorkDays;
 
 export interface HardWorkCaps {
   maxConsecutiveWorkDays: number;
-  hardWeeklyHoursCap: number;
 }
 
 /**
- * The caps in force for a Config. A config object persisted before this
- * phase (an old plan's config_snapshot) lacks both fields — it falls back to
- * the defaults rather than silently disabling a hard rule.
+ * The cap in force for a Config. A config object persisted before this
+ * phase (an old plan's config_snapshot) lacks the field — it falls back to
+ * the default rather than silently disabling a hard rule.
  */
-export function resolveHardWorkCaps(config: Partial<Pick<Config, "max_consecutive_work_days" | "hard_weekly_hours_cap">>): HardWorkCaps {
+export function resolveHardWorkCaps(config: Partial<Pick<Config, "max_consecutive_work_days">>): HardWorkCaps {
   return {
     maxConsecutiveWorkDays: typeof config.max_consecutive_work_days === "number" ? config.max_consecutive_work_days : DEFAULT_MAX_CONSECUTIVE_WORK_DAYS,
-    hardWeeklyHoursCap: typeof config.hard_weekly_hours_cap === "number" ? config.hard_weekly_hours_cap : DEFAULT_HARD_WEEKLY_HOURS_CAP,
   };
 }
 
@@ -100,14 +126,6 @@ export function nextConsecutiveWorkDayStreak(streakEnteringDay: number, workedTo
  */
 export function wouldExceedConsecutiveDayCap(streakEnteringToday: number, isWorkDay: boolean, cap: number): boolean {
   return isWorkDay && streakEnteringToday + 1 > cap;
-}
-
-/**
- * Hard eligibility: would a shift of `candidateShiftHours` push this
- * displayed week's scheduled total past the cap?
- */
-export function wouldExceedHardWeeklyHoursCap(hoursSoFarThisWeek: number, candidateShiftHours: number, cap: number): boolean {
-  return hoursSoFarThisWeek + candidateShiftHours > cap + HOURS_EPSILON;
 }
 
 /**
@@ -137,7 +155,7 @@ export function consecutiveRunLengthIfWorked(isWorked: (k: number) => boolean, i
   return back + 1 + forward;
 }
 
-export type HardCapExclusionReason = "consecutive_work_days" | "hard_weekly_hours";
+export type HardCapExclusionReason = "consecutive_work_days";
 
 /**
  * Transparency record: an employee who had at least one REST-LEGAL

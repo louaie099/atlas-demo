@@ -12,7 +12,6 @@ import { FatigueStateOrUnknown } from "./fatigue-model";
 import { createFatigueLedger, advanceFatigueLedger, projectFatigueForShift, explainFatigueChoice, FatigueCandidateProjection } from "./fatigue-planning";
 import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
-import { CapAwareRosterTarget, computeCapAwareTargetWorkDays, preferredOffWindowLength } from "./roster-target";
 import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
 import { CapPacedRestPlan, allocateProportionally, planAllowsDrawIn, planCapPacedRestDays } from "./cap-paced-rest";
 
@@ -31,8 +30,6 @@ export interface SpecializedHardCaps {
   caps: HardWorkCaps;
   incomingStreakByEmployee: ReadonlyMap<string, number>;
   exclusionsOut?: HardCapExclusion[];
-  /** PART A (phase 2): receives each foreign-company member's cap-aware roster target (top-up population only). */
-  targetsOut?: Map<string, CapAwareRosterTarget>;
   /** PART B (phase 2): receives every reallocation the bounded cross-employee repair pass applied. */
   repairsOut?: HardCapRepair[];
   /** PART B (phase 2): false disables the repair pass (tests compare with/without). Default true. */
@@ -52,7 +49,6 @@ export interface SpecializedHardCaps {
 interface PoolDayHardCaps {
   caps: HardWorkCaps;
   streakEnteringDay: ReadonlyMap<string, number>;
-  hoursSoFar: ReadonlyMap<string, number>;
 }
 
 /** The streak map entering the next day: +1 for each pool member who worked today, 0 otherwise. */
@@ -239,8 +235,6 @@ function assignPoolToWindow(
         ? {
             consecutiveWorkDaysBeforeToday: hardCaps.streakEnteringDay.get(employee.id) ?? 0,
             maxConsecutiveWorkDays: hardCaps.caps.maxConsecutiveWorkDays,
-            hoursSoFarThisWeek: hardCaps.hoursSoFar.get(employee.id) ?? 0,
-            hardWeeklyHoursCap: hardCaps.caps.hardWeeklyHoursCap,
           }
         : undefined
     );
@@ -248,11 +242,13 @@ function assignPoolToWindow(
       assigned.push({ employeeId: employee.id, shiftCode: candidates[0].code });
     } else if (hardCaps) {
       // Transparency only (the decision is already made above): was this
-      // member rest-legal with a compatible code, i.e. excluded by a cap?
+      // member rest-legal with a compatible code, i.e. excluded by the
+      // (consecutive-work-day) cap? That is the only cap left (2026-09-29
+      // removal — see hard-work-caps.ts) so it is the only possible reason
+      // once restOnly is non-empty.
       const restOnly = selectCompatibleShiftCodes(window.start, window.end, prior?.shift_start ?? null, prior?.shift_end ?? null, minimumRestHours, true, preferExtended, date);
       if (restOnly.length > 0) {
-        const streak = hardCaps.streakEnteringDay.get(employee.id) ?? 0;
-        capExcluded.push({ employeeId: employee.id, reason: streak + 1 > hardCaps.caps.maxConsecutiveWorkDays ? "consecutive_work_days" : "hard_weekly_hours" });
+        capExcluded.push({ employeeId: employee.id, reason: "consecutive_work_days" });
       }
     }
   }
@@ -580,7 +576,7 @@ export function generateProfilingMesureShifts(
     // Always-on consecutive-work-day streak (hard-work-caps.ts), advanced
     // once per day right alongside priorDayShift/usageHours below.
     const streaks = new Map<string, number>(pool.map((e) => [e.id, hardCaps?.incomingStreakByEmployee.get(e.id) ?? 0]));
-    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks, hoursSoFar: usageHours } : undefined;
+    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks } : undefined;
     // Team-local results, merged into generatedShiftsByDay/conflicts once the
     // (optional) hard-cap repair pass below has run. Same order as before.
     const teamAssignmentsByDay: Record<string, RepairSlotAssignment[]> = {};
@@ -876,7 +872,7 @@ export function generateForeignCompanyShifts(
     // Always-on consecutive-work-day streak (hard-work-caps.ts), advanced
     // once per day right alongside priorDayShift/usageHours below.
     const streaks = new Map<string, number>(pool.map((e) => [e.id, hardCaps?.incomingStreakByEmployee.get(e.id) ?? 0]));
-    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks, hoursSoFar: usageHours } : undefined;
+    const dayCaps: PoolDayHardCaps | undefined = hardCaps ? { caps: hardCaps.caps, streakEnteringDay: streaks } : undefined;
     // Running fatigue state for this company's team (see fatigue-planning.ts's
     // FatigueLedger), advanced once per day. Only when fatigue is enabled.
     const ledger = fatigueActive
@@ -1104,24 +1100,14 @@ export function generateForeignCompanyShifts(
         const scheduledDays = new Set<string>(
           daysOrder.filter((d) => (generatedShiftsByDay[d] ?? []).some((g) => g.employeeId === employee.id))
         );
-        // PART A (2026-09-25, hard-constraints phase 2): with hard caps, the
-        // target is this member's own CAP-AWARE target (roster-target.ts) from
-        // their real flight-day hours plus the real shortest code per free
-        // day — the same rule as the flexible pool's top-up. Without hard
-        // caps, the fixed normal target, byte-for-byte as before.
-        let targetWorkingDaysThisWindow = normalTargetWorkDays;
-        let offWindowLength = config.normal_weekly_off_days;
-        if (hardCaps) {
-          const committedHoursByDay = new Map<string, number>();
-          for (const d of daysOrder) {
-            const g = (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
-            if (g) committedHoursByDay.set(d, getShiftDurationHours(g.shiftCode, flightDateFor(weekStart, d)));
-          }
-          const target = computeCapAwareTargetWorkDays({ daysOrder, weekStart, normalTargetWorkDays, hardWeeklyHoursCap: hardCaps.caps.hardWeeklyHoursCap, committedHoursByDay });
-          hardCaps.targetsOut?.set(employee.id, target);
-          targetWorkingDaysThisWindow = target.targetWorkDays;
-          offWindowLength = preferredOffWindowLength(daysOrder.length, targetWorkingDaysThisWindow, config.normal_weekly_off_days, config.max_consecutive_off_days ?? config.normal_weekly_off_days);
-        }
+        // PART A (2026-09-25, hard-constraints phase 2) used to compute this
+        // member's own CAP-AWARE target here (roster-target.ts) when hard
+        // caps were in force — an HOURS-based reduction of the normal
+        // target. REMOVED 2026-09-29 (see hard-work-caps.ts's removal
+        // note): the fixed normal target is used unconditionally now,
+        // exactly as the no-hard-caps case always did.
+        const targetWorkingDaysThisWindow = normalTargetWorkDays;
+        const offWindowLength = config.normal_weekly_off_days;
         const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
         const topUpReasons = fatigueActive ? new Map<string, string[]>() : undefined;
         const capShortfall: { day: string; reason: HardCapExclusionReason }[] = [];

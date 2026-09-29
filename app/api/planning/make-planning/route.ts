@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 import { makePlanning } from "@/lib/planning/weekly-plan-service";
-import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { resolveEffectiveConfig } from "@/lib/planning/rules-service";
+import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
 import { weekLabelFor } from "@/lib/flight-date";
 
 /**
@@ -50,7 +51,8 @@ export async function POST(req: Request) {
   const weekLabel = weekLabelFor(weekStart);
 
   try {
-    const result = await makePlanning(supabase, weekStart, weekLabel, DAYS_WITH_DATA, CONFIG);
+    const config = await resolveEffectiveConfig(supabase);
+    const result = await makePlanning(supabase, weekStart, weekLabel, DAYS_WITH_DATA, config);
     if ("blocked" in result) {
       return NextResponse.json({ error: result.reason }, { status: 409, headers: { "Cache-Control": "no-store" } });
     }

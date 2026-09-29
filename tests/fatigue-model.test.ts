@@ -323,8 +323,16 @@ describe("transport burden — architecture only, inert by default, never availa
     expect(FATIGUE_MODEL_ENABLED).toBe(false);
     expect(DEFAULT_FATIGUE_CONFIG.enabled).toBe(false);
     const planningDir = join(__dirname, "..", "lib", "planning");
+    // rules-service.ts (2026-09-29, Planning Rules milestone) is excluded
+    // from this scan for the same reason lib/seed-data.ts (outside
+    // lib/planning entirely) always has been: it is the persistence/
+    // resolution layer whose job IS to decide the current effective
+    // fatigue config, including the "never edited yet" fallback to
+    // DEFAULT_FATIGUE_CONFIG — a designated default-terminus, not a
+    // pipeline consumer that should always receive an explicit config from
+    // its own caller.
     const importers = readdirSync(planningDir)
-      .filter((f) => f.endsWith(".ts") && !["fatigue-model.ts", "fatigue-continuity.ts", "fatigue-planning.ts"].includes(f))
+      .filter((f) => f.endsWith(".ts") && !["fatigue-model.ts", "fatigue-continuity.ts", "fatigue-planning.ts", "rules-service.ts"].includes(f))
       .filter((f) => /from\s+["'][^"']*fatigue-(model|continuity|config|planning)["']/.test(readFileSync(join(planningDir, f), "utf8")))
       .sort();
     expect(importers).toEqual([
@@ -333,6 +341,7 @@ describe("transport burden — architecture only, inert by default, never availa
       "roster-generation.ts", // Stage-6.5 top-up: optional TopUpFatigueOptions
       "shift-generation.ts", // Stage 6: optional fatigueContext (tier 4)
       "specialized-team-generation.ts", // foreign roster: optional ForeignFatigueOptions
+      "weekly-plan-service.ts", // 2026-09-29: derives incomingSeeds via deriveIncomingFatigueState only when config.fatigue.enabled — never references the default/global switch itself (checked below)
     ]);
     // Nothing imports the global switch or a ready-made config to turn
     // itself on: every consumer is driven by an explicitly-passed config.

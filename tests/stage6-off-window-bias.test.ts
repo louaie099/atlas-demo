@@ -392,24 +392,34 @@ describe("separated OFF is no longer the normal-case outcome — but stays legal
     }
   });
 
-  it("when coverage genuinely forces it (the ONLY qualified employee is needed Mon/Wed/Fri/Sun), the result is still 5 WORK + 2 OFF, separated, fully legal, and flagged by checkSeparatedOffDays", () => {
+  it("2026-09-29 correction: when coverage would only be achievable by breaking OFF/OFF pairing, ATLAS no longer silently splits it — the conflicting demand surfaces as an honest gap instead", () => {
+    // Every possible 2-consecutive-day window here includes at least one of
+    // Monday/Wednesday/Friday/Sunday (the only idle days — Tuesday,
+    // Thursday, Saturday — are never adjacent to EACH OTHER), so with a
+    // single qualified employee there is no window that avoids all demand.
+    // Before the correction, Stage 6 would have silently worked all four
+    // demand days anyway (a genuinely separated OFF pattern, merely
+    // flagged as an informational recommendation after the fact). Now the
+    // window is a hard exclusion: solo is never a candidate for the
+    // demand day(s) inside it, and that demand is reported honestly.
     const solo = makeAce("solo", ["Boarding"]);
     const flights = ["Monday", "Wednesday", "Friday", "Sunday"].map((d, i) => makeFlight(d, PRE_REGIME_WEEK, i));
     const plan = generateDraftWeeklyPlan(flights, [solo], [], CONFIG, DAYS, "W", PRE_REGIME_WEEK);
     const pattern = patternFor(plan, "solo");
 
-    for (const d of ["Monday", "Wednesday", "Friday", "Sunday"]) expect(pattern[DAYS.indexOf(d)]).toBe("W"); // coverage kept
-    expect((pattern.match(/W/g) ?? []).length).toBe(5);
-    expect(isFiveWorkTwoConsecutiveOff(pattern)).toBe(false); // genuinely separated
+    // solo's OFF/OFF window is a genuine 2-consecutive block (the hard
+    // constraint held) ...
+    expect(isFiveWorkTwoConsecutiveOff(pattern) || maxConsecutiveOffCyclic([...pattern].map((c) => ({ status: c === "O" ? ("off" as const) : ("working" as const) }))) >= 2).toBe(true);
+    // ... which necessarily swallows at least one demand day, so solo is
+    // NEVER illegally/silently assigned there, and that day's Boarding
+    // demand is an honest, reportable gap instead of a silent override.
+    const swallowedDemandDay = ["Monday", "Wednesday", "Friday", "Sunday"].find((d) => pattern[DAYS.indexOf(d)] === "O");
+    expect(swallowedDemandDay, `pattern=${pattern}`).toBeDefined();
+    expect(plan.issues.some((i) => i.type === "unfilled_duty" && i.dayOfWeek === swallowedDemandDay)).toBe(true);
 
-    const issue = plan.issues.find((i) => i.type === "separated_off_days" && i.employeeId === "solo");
-    expect(issue).toBeDefined();
+    // Never a hard violation, and no illegal fallback was ever computed then discarded.
     expect(plan.issues.filter((i) => i.type === "rest_violation" || i.type === "consecutive_off_violation")).toHaveLength(0);
     expect(plan.restViolationsPrevented.filter((d) => d.employeeId === "solo")).toHaveLength(0);
-
-    // And checkSeparatedOffDays itself reports it as the non-blocking soft issue.
-    const asEmployee: Employee = { ...solo, weekly_shifts: DAYS.map((d, i) => ({ day_of_week: d, status: pattern[i] === "W" ? "working" : "off", shift_code: null })) };
-    expect(checkSeparatedOffDays(asEmployee, DAYS, CONFIG)?.type).toBe("separated_off_days");
   });
 
   it("the top-up (unit level) still produces a legal separated pattern when demand-driven days leave no consecutive pair free", () => {
@@ -421,6 +431,32 @@ describe("separated OFF is no longer the normal-case outcome — but stays legal
     const added = generateObligationToppedUpShifts(DAYS, [e], demandDriven, CONFIG, new Map(), CONFIG.minimum_rest_hours, PRE_REGIME_WEEK, undefined, preferred);
     const worked = new Set([...["Monday", "Wednesday", "Friday", "Sunday"], ...DAYS.filter((d) => added[d].length > 0)]);
     expect(worked.size).toBe(5);
+  });
+
+  it("Config.normal_off_days_consecutive actually drives the planner (2026-09-29 correction) — the SAME conflicting demand is silently worked with it off, and honestly gapped with it on", () => {
+    const solo = makeAce("solo", ["Boarding"]);
+    const flights = ["Monday", "Wednesday", "Friday", "Sunday"].map((d, i) => makeFlight(d, PRE_REGIME_WEEK, i));
+
+    const softConfig = { ...CONFIG, normal_off_days_consecutive: false };
+    const soft = generateDraftWeeklyPlan(flights, [solo], [], softConfig, DAYS, "W", PRE_REGIME_WEEK);
+    // With the constraint OFF (the pre-2026-09-29 behavior, reproduced
+    // exactly via the same Config flag every other before/after comparison
+    // in this codebase uses), coverage wins every time: all four real
+    // demand days are worked, and any resulting split is merely the
+    // existing soft `separated_off_days` recommendation, never a gap.
+    for (const d of ["Monday", "Wednesday", "Friday", "Sunday"]) {
+      expect(patternFor(soft, "solo")[DAYS.indexOf(d)], `soft OFF: ${d}`).toBe("W");
+    }
+    expect(soft.issues.filter((i) => i.type === "unfilled_duty" && i.dayOfWeek !== undefined && ["Monday", "Wednesday", "Friday", "Sunday"].includes(i.dayOfWeek) && i.description.includes("Boarding"))).toEqual([]);
+
+    const hardConfig = { ...CONFIG, normal_off_days_consecutive: true };
+    const hard = generateDraftWeeklyPlan(flights, [solo], [], hardConfig, DAYS, "W", PRE_REGIME_WEEK);
+    // With the SAME inputs and the constraint ON, at least one of those same
+    // four demand days is now genuinely left OFF (never silently worked),
+    // and its Boarding demand is an honest gap instead.
+    const gapDay = ["Monday", "Wednesday", "Friday", "Sunday"].find((d) => patternFor(hard, "solo")[DAYS.indexOf(d)] === "O");
+    expect(gapDay, `hard ON pattern=${patternFor(hard, "solo")}`).toBeDefined();
+    expect(hard.issues.some((i) => i.type === "unfilled_duty" && i.dayOfWeek === gapDay && i.description.includes("Boarding"))).toBe(true);
   });
 });
 

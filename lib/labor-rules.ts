@@ -76,20 +76,56 @@ export interface LaborRules {
   // an "unconfirmed_prototype" placeholder at 10h; now a real, confirmed
   // management policy value.
   minimumRestHours: RuleValue<number>;
-  // The confirmed rule: a normal week has exactly 2 OFF/rest days.
+  // The confirmed NORMAL weekly roster structure, part 1 of 2 (see
+  // normalWeeklyWorkDays below for part 2 — the two are stored as
+  // INDEPENDENT explicit facts, never one inferred from the other or from
+  // maxConsecutiveWorkDays, per the 2026-09-29 correction: "5 WORK" is not
+  // merely "not-2-OFF", and is a genuinely different concept from the hard
+  // consecutive-work-day cap). A normal week has exactly 2 OFF/rest days.
   normalWeeklyOffDays: RuleValue<number>;
+  // The confirmed NORMAL weekly roster structure, part 2 of 2 — how many
+  // days a normal flexible ACE works in a normal week (5). Deliberately its
+  // OWN stored field, not derived as `7 - normalWeeklyOffDays` and NOT
+  // derived from maxConsecutiveWorkDays (a different, HARD, cross-week-
+  // boundary concept — see that field's own doc comment) — explicit,
+  // independently editable, per the 2026-09-29 correction.
+  normalWeeklyWorkDays: RuleValue<number>;
   // Only reachable via an explicit, human-invoked renfort decision —
   // never chosen automatically by ATLAS. No automation reads or sets this
   // per employee yet (that's future, explicitly out of scope for this
   // milestone); it exists here only so the rule is representable.
   renfortWeeklyOffDays: RuleValue<number>;
+  // The confirmed RECOVERY-BLOCK POLICY: for NORMAL automatic flexible-ACE
+  // generation, the 2 normal OFF days must be scheduled CONSECUTIVELY (a
+  // "OO WWWWW" / "W OO WWWW" / ... shape), never silently split into
+  // separated single OFF days just because that happens to improve
+  // coverage. This is a genuinely DIFFERENT concept from maxConsecutiveOffDays
+  // below (2026-09-29 correction, point 4): this field says the normal
+  // pair must be TOGETHER; maxConsecutiveOffDays says a run of OFF days
+  // must never be LONGER than some ceiling — a week could violate either
+  // one without violating the other. Engine effect: lib/planning/shift-
+  // generation.ts's generateFlexiblePoolShifts hard-excludes a flexible
+  // ACE from Stage 6 on the days inside their own planned OFF/OFF window
+  // (lib/planning/off-window.ts's planPreferredOffWindows, which already
+  // SEARCHES every candidate window position for one demand can actually
+  // support) when this is true — never a mere scoring tie-break a
+  // sufficiently-good coverage score can silently outrank. When demand
+  // genuinely cannot support ANY OFF/OFF placement without a coverage gap,
+  // that gap is reported honestly (unfilled_duty) rather than the pair
+  // being silently split — a human then explicitly APPROVES the exception
+  // by manually assigning the employee via Find Agent, exactly as this
+  // app's existing "ATLAS recommends, humans approve" convention already
+  // works for every other genuine shortage (see duty-generation.ts).
+  normalOffDaysConsecutive: RuleValue<boolean>;
   // The confirmed rule: an employee must never have more than this many
   // CONSECUTIVE OFF days, evaluated across week boundaries (never a
-  // single Monday-Sunday snapshot in isolation). This is a HUMAN-
-  // PROTECTION constraint (how much rest is acceptable), not a rotation
-  // policy — a fixed-cycle team's own sequence (see
-  // lib/fixed-cycle-rotation.ts) is validated AGAINST this value, but the
-  // sequence itself lives in the rotation engine, never here.
+  // single Monday-Sunday snapshot in isolation) — a CEILING, unrelated to
+  // whether the normal 2-day pair above happens to be scheduled together
+  // (see normalOffDaysConsecutive's doc comment on why these are modeled
+  // separately). This is a HUMAN-PROTECTION constraint (how much rest is
+  // acceptable), not a rotation policy — a fixed-cycle team's own sequence
+  // (see lib/fixed-cycle-rotation.ts) is validated AGAINST this value, but
+  // the sequence itself lives in the rotation engine, never here.
   maxConsecutiveOffDays: RuleValue<number>;
   // Confirmed: 42h is the maximum AVERAGE weekly working duration (sum of
   // scheduled shift durations, overnight shifts counted correctly),
@@ -128,6 +164,29 @@ export interface LaborRules {
   // guessing a business rule this codebase's own conventions exist to
   // avoid.
   workingHoursObligationHours: RuleValue<number | null>;
+  // INTERNAL SAFETY DEFAULT, honestly labeled `unconfirmed_prototype`
+  // (2026-09-29 correction, point 5) — NOT a confirmed, independent
+  // company-wide labor rule. lib/planning/hard-work-caps.ts enforces a hard
+  // pre-scoring filter (nobody is ever assigned a 6th+ consecutive calendar
+  // work day) as an engineering safety guard, but the fact that normal
+  // flexible-ACE rosters are configured for 5 WORK + 2 OFF
+  // (normalWeeklyWorkDays above) does NOT, by itself, prove a separate
+  // confirmed rule that nobody may EVER work more than 5 consecutive
+  // calendar days across week boundaries. The NUMBER (5) is still sourced
+  // from here as the one canonical value the engine's safety filter reads
+  // (see hard-work-caps.ts's DEFAULT_MAX_CONSECUTIVE_WORK_DAYS) — only the
+  // PROVENANCE changes, so the Planning Rules UI shows this honestly as an
+  // engine safety default pending real confirmation, not as settled policy.
+  maxConsecutiveWorkDays: RuleValue<number>;
+  // NOT YET CONFIRMED, purely representable. A minimum buffer/movement time
+  // between two duties for the same employee — no real number has been
+  // confirmed by RAM Handling, and no generation or validation code reads
+  // this value yet. `value: null` means "not configured" and must stay that
+  // way until a real number is confirmed; do not invent one (e.g. by
+  // guessing a plausible turnaround time). Exists here only so the rule is
+  // representable in the Planning Rules UI, exactly like
+  // renfortWeeklyOffDays/workingHoursObligationHours above.
+  operationalBufferMinutes: RuleValue<number | null>;
 }
 
 /**
@@ -142,13 +201,18 @@ export interface LaborRules {
  * confirmed, the period it averages over is not, and those are two
  * separate facts (see the module doc comment above).
  *
- * normalWeeklyOffDays (2), renfortWeeklyOffDays (1), and
- * maxConsecutiveOffDays (2) remain confirmed and unchanged.
- * maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
+ * normalWeeklyOffDays (2), normalWeeklyWorkDays (5), normalOffDaysConsecutive
+ * (true), renfortWeeklyOffDays (1), and maxConsecutiveOffDays (2) remain
+ * confirmed. maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
  * consecutive-OFF check and the hard feasibility gate the Rotation
  * Feasibility Engine applies to candidate rotations (see
  * lib/rotation-feasibility.ts) — one resolved number, one source of truth,
  * never a value re-declared at either call site.
+ *
+ * maxConsecutiveWorkDays (5) is deliberately `unconfirmed_prototype`
+ * (2026-09-29 correction) — see its own doc comment above for why this
+ * differs from every other field here that shares its VALUE with a
+ * confirmed rule.
  */
 export const DEFAULT_LABOR_RULES: LaborRules[] = [
   {
@@ -158,11 +222,15 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     effectiveTo: null,
     minimumRestHours: { value: 15, source: "confirmed_management_policy" },
     normalWeeklyOffDays: { value: 2, source: "confirmed_management_policy" },
+    normalWeeklyWorkDays: { value: 5, source: "confirmed_management_policy" },
+    normalOffDaysConsecutive: { value: true, source: "confirmed_management_policy" },
     renfortWeeklyOffDays: { value: 1, source: "confirmed_management_policy" },
     maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
     maximumAverageWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
     workingHoursReferencePeriodDays: { value: null, source: "unconfirmed_prototype" },
     workingHoursObligationHours: { value: null, source: "unconfirmed_prototype" },
+    maxConsecutiveWorkDays: { value: 5, source: "unconfirmed_prototype" },
+    operationalBufferMinutes: { value: null, source: "unconfirmed_prototype" },
   },
 ];
 
@@ -171,6 +239,10 @@ export interface ResolvedLaborRules {
   minimumRestHoursSource: LaborRuleSource;
   normalWeeklyOffDays: number;
   normalWeeklyOffDaysSource: LaborRuleSource;
+  normalWeeklyWorkDays: number;
+  normalWeeklyWorkDaysSource: LaborRuleSource;
+  normalOffDaysConsecutive: boolean;
+  normalOffDaysConsecutiveSource: LaborRuleSource;
   renfortWeeklyOffDays: number;
   renfortWeeklyOffDaysSource: LaborRuleSource;
   maxConsecutiveOffDays: number;
@@ -183,11 +255,28 @@ export interface ResolvedLaborRules {
   // null = not yet confirmed. See workingHoursObligationHours above.
   workingHoursObligationHours: number | null;
   workingHoursObligationHoursSource: LaborRuleSource;
+  maxConsecutiveWorkDays: number;
+  maxConsecutiveWorkDaysSource: LaborRuleSource;
+  // null = not yet confirmed. See operationalBufferMinutes above.
+  operationalBufferMinutes: number | null;
+  operationalBufferMinutesSource: LaborRuleSource;
 }
 
+/**
+ * `effectiveTo` is EXCLUSIVE: a rule is effective for `effectiveFrom <= date
+ * < effectiveTo` (or forever, when `effectiveTo` is null). This matters once
+ * more than one row can exist (2026-09-29, Planning Rules milestone):
+ * lib/planning/rules-service.ts's saveLaborRuleEdit closes the previous
+ * default row by setting its `effectiveTo` to the NEW row's own
+ * `effectiveFrom` — so on that exact boundary date, only the NEW row must
+ * match, never both (which an inclusive `effectiveTo` would allow, and
+ * which callers that pick the first/most-specific match could then resolve
+ * to either row depending on array order — a real latent bug this
+ * exclusive convention avoids by construction, not by caller discipline).
+ */
 function isEffective(rule: LaborRules, date: string): boolean {
   if (rule.effectiveFrom > date) return false;
-  if (rule.effectiveTo && rule.effectiveTo < date) return false;
+  if (rule.effectiveTo && rule.effectiveTo <= date) return false;
   return true;
 }
 
@@ -235,6 +324,10 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     minimumRestHoursSource: rule.minimumRestHours.source,
     normalWeeklyOffDays: rule.normalWeeklyOffDays.value,
     normalWeeklyOffDaysSource: rule.normalWeeklyOffDays.source,
+    normalWeeklyWorkDays: rule.normalWeeklyWorkDays.value,
+    normalWeeklyWorkDaysSource: rule.normalWeeklyWorkDays.source,
+    normalOffDaysConsecutive: rule.normalOffDaysConsecutive.value,
+    normalOffDaysConsecutiveSource: rule.normalOffDaysConsecutive.source,
     renfortWeeklyOffDays: rule.renfortWeeklyOffDays.value,
     renfortWeeklyOffDaysSource: rule.renfortWeeklyOffDays.source,
     maxConsecutiveOffDays: rule.maxConsecutiveOffDays.value,
@@ -245,6 +338,10 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     workingHoursReferencePeriodDaysSource: rule.workingHoursReferencePeriodDays.source,
     workingHoursObligationHours: rule.workingHoursObligationHours.value,
     workingHoursObligationHoursSource: rule.workingHoursObligationHours.source,
+    maxConsecutiveWorkDays: rule.maxConsecutiveWorkDays.value,
+    maxConsecutiveWorkDaysSource: rule.maxConsecutiveWorkDays.source,
+    operationalBufferMinutes: rule.operationalBufferMinutes.value,
+    operationalBufferMinutesSource: rule.operationalBufferMinutes.source,
   };
 }
 
@@ -267,3 +364,59 @@ export function resolveDefaultLaborRules(
   }
   return unwrap(defaultRule);
 }
+
+/**
+ * How a rule is actually ENFORCED by the engine — display-only metadata for
+ * the Planning Rules UI, never persisted and never user-editable. This is
+ * deliberately a static, code-level fact (derived from how the value is
+ * really used elsewhere in the codebase), not a field a user can flip: a
+ * confirmed hard rule must never become "soft" just because someone wants
+ * easier coverage in the UI.
+ *
+ *   "hard"           — a pre-scoring eligibility filter; a violation is
+ *                       never assigned, only ever reported as a gap.
+ *   "soft"            — a tie-break/preference; never blocks an assignment.
+ *   "recommendation"  — surfaced as a non-blocking PlanIssue for human review.
+ *   "not_evaluable"   — the rule is confirmed as a PRINCIPLE, but a
+ *                       dependent value is still unconfirmed (null), so no
+ *                       code currently evaluates compliance one way or the
+ *                       other. See average-hours.ts / roster-obligation.ts.
+ */
+export type RuleSeverity = "hard" | "soft" | "recommendation" | "not_evaluable";
+
+/** The value-only fields of ResolvedLaborRules (excludes the `*Source` provenance fields) — the UI's severity lookup key set. */
+export type LaborRuleKey =
+  | "minimumRestHours"
+  | "normalWeeklyOffDays"
+  | "normalWeeklyWorkDays"
+  | "normalOffDaysConsecutive"
+  | "renfortWeeklyOffDays"
+  | "maxConsecutiveOffDays"
+  | "maximumAverageWeeklyWorkingHours"
+  | "workingHoursReferencePeriodDays"
+  | "workingHoursObligationHours"
+  | "maxConsecutiveWorkDays"
+  | "operationalBufferMinutes";
+
+export const LABOR_RULE_SEVERITY: Record<LaborRuleKey, RuleSeverity> = {
+  minimumRestHours: "hard",
+  normalWeeklyOffDays: "soft",
+  normalWeeklyWorkDays: "soft",
+  // HARD as of the 2026-09-29 correction: lib/planning/shift-generation.ts
+  // now hard-excludes a flexible ACE from Stage 6 on their planned OFF/OFF
+  // window days rather than merely penalizing the score — see this field's
+  // own doc comment in the LaborRules interface above.
+  normalOffDaysConsecutive: "hard",
+  renfortWeeklyOffDays: "soft",
+  maxConsecutiveOffDays: "hard",
+  maximumAverageWeeklyWorkingHours: "not_evaluable",
+  workingHoursReferencePeriodDays: "not_evaluable",
+  workingHoursObligationHours: "not_evaluable",
+  // Enforced as a hard pre-scoring filter (an engineering safety default),
+  // but its VALUE is not itself an independently confirmed labor rule — see
+  // this field's own doc comment. Severity describes ENFORCEMENT; the
+  // resolved rule's own `*Source` describes CONFIRMATION status — the two
+  // are shown separately in the UI.
+  maxConsecutiveWorkDays: "hard",
+  operationalBufferMinutes: "not_evaluable",
+};

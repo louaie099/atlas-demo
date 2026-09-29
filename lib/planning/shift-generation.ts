@@ -9,18 +9,19 @@ import { stage6CandidateScore, fatigueScoreSteps } from "./stage6-score-tiers";
 import { Stage6OffWindowContext, startForcesPreviousDayOff, endForcesNextDayOff, countOffWindowStructureConflicts } from "./off-window";
 import { Stage6FatigueContext, FatigueCandidateProjection, projectFatigueForShift, explainFatigueChoice } from "./fatigue-planning";
 import { unknownFatigueState } from "./fatigue-model";
-import { HardWorkCaps, HardCapExclusion, wouldExceedConsecutiveDayCap, wouldExceedHardWeeklyHoursCap } from "./hard-work-caps";
+import { HardWorkCaps, HardCapExclusion, wouldExceedConsecutiveDayCap } from "./hard-work-caps";
 
 /**
  * HARD WORK CAPS for one Stage-6 day (2026-09-25, hard-constraints
  * milestone phase 1 — see hard-work-caps.ts). `streakEnteringDay` is each
  * employee's always-on consecutive-work-day streak ENTERING this day (the
  * caller advances it day by day with nextConsecutiveWorkDayStreak, seeded
- * from consecutive-days-continuity.ts); a missing employee reads as 0. The
- * weekly hours side reuses this function's own `hoursSoFarThisWeek`
- * parameter (its soft tie-break role is unchanged). `exclusionsOut`, when
- * given, receives every employee a cap removed from today's candidate set
- * despite having a rest-legal code.
+ * from consecutive-days-continuity.ts); a missing employee reads as 0.
+ * `exclusionsOut`, when given, receives every employee the cap removed from
+ * today's candidate set despite having a rest-legal code. (This function's
+ * own `hoursSoFarThisWeek` parameter is unrelated — a soft fairness
+ * tie-break only; no hard hours-based exclusion exists any more, see
+ * hard-work-caps.ts's 2026-09-29 removal note.)
  */
 export interface FlexiblePoolHardCaps {
   caps: HardWorkCaps;
@@ -284,18 +285,20 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * labels vs the pick fatigue displaced, [] when it changed nothing).
  *
  * HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1 — see
- * hard-work-caps.ts): the optional trailing `hardCaps` adds two exclusion
- * conditions to the per-employee legality filter (legalCodesByEmployee),
+ * hard-work-caps.ts): the optional trailing `hardCaps` adds an exclusion
+ * condition to the per-employee legality filter (legalCodesByEmployee),
  * right next to the 15h rest check: an employee whose streak entering today
- * already equals max_consecutive_work_days gets no legal code at all today,
- * and any code that would push hoursSoFarThisWeek past
- * hard_weekly_hours_cap is dropped like a rest-illegal one. Excluded
- * candidates are never scored. If that leaves demand uncovered, it stays
- * uncovered and surfaces through Stage 9's ordinary `unfilled_duty` — the
- * same honest-gap path a rest-driven shortfall already takes. No
+ * already equals max_consecutive_work_days gets no legal code at all today.
+ * Excluded candidates are never scored. If that leaves demand uncovered, it
+ * stays uncovered and surfaces through Stage 9's ordinary `unfilled_duty` —
+ * the same honest-gap path a rest-driven shortfall already takes. No
  * cross-employee reallocation is attempted HERE: since phase 2
  * (2026-09-25), generate-draft-plan.ts runs hard-cap-repair.ts's bounded
  * repairFlexiblePoolWeek on this function's whole-week result afterwards.
+ * (2026-09-29: an hours-based exclusion — any code that would push
+ * hoursSoFarThisWeek past a per-week hours ceiling — used to exist here
+ * too; REMOVED, not relabeled, because that ceiling was never a confirmed
+ * rule — see hard-work-caps.ts's removal note.)
  */
 export function generateFlexiblePoolShifts(
   dayOfWeek: string,
@@ -467,20 +470,25 @@ export function generateFlexiblePoolShifts(
       }
       return true;
     });
-    // HARD WORK CAPS — additional exclusion conditions at this SAME gate
+    // HARD WORK CAPS — additional exclusion condition at this SAME gate
     // (see FlexiblePoolHardCaps): a 6th consecutive work day removes the
-    // employee outright; a code that would push this displayed week past
-    // the hard hours cap is removed like a rest-illegal one. Never scored.
+    // employee outright. Never scored. (2026-09-29: an hours-based
+    // exclusion used to live here too — removed, see hard-work-caps.ts.)
     let capped = legal;
     if (hardCaps && legal.length > 0) {
       if (wouldExceedConsecutiveDayCap(hardCaps.streakEnteringDay.get(employee.id) ?? 0, true, hardCaps.caps.maxConsecutiveWorkDays)) {
         capped = [];
         hardCaps.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek, population: "flexible_pool", reason: "consecutive_work_days" });
-      } else {
-        const hoursSoFar = hoursSoFarThisWeek.get(employee.id) ?? 0;
-        capped = legal.filter((c) => !wouldExceedHardWeeklyHoursCap(hoursSoFar, getShiftDurationHours(c.code, date), hardCaps.caps.hardWeeklyHoursCap));
-        if (capped.length === 0) hardCaps.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek, population: "flexible_pool", reason: "hard_weekly_hours" });
       }
+    }
+    // NORMAL OFF/OFF AS A HARD CONSTRAINT — same gate, same "never scored"
+    // treatment as the hard caps above (2026-09-29 correction, point 3; see
+    // off-window.ts's Stage6OffWindowContext.hardExclude doc comment). A
+    // flexible ACE whose own planned OFF/OFF window includes today is
+    // excluded outright when the caller has opted into hard exclusion —
+    // Stage 6 can no longer let a coverage score silently outrank it.
+    if (capped.length > 0 && offWindowContext?.hardExclude && offWindowContext.preferredOffDaysByEmployee.get(employee.id)?.has(dayOfWeek)) {
+      capped = [];
     }
     if (capped.length > 0) legalCodesByEmployee.set(employee.id, capped);
   }

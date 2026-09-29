@@ -5,14 +5,62 @@ import { getShiftTimesAs, buildUniformWeeklySchedule, restHoursForDailyRepeating
 import { CONFIGURED_COMPANIES } from "./company-config";
 import { planForeignCompanyDay } from "./foreign-shift-planning";
 import { buildStaggeredOffDays } from "./roster-generation";
-import { resolveDefaultLaborRules } from "./labor-rules";
+import { resolveDefaultLaborRules, ResolvedLaborRules } from "./labor-rules";
 import { buildFixedCycleWeeklySchedule, JR_NT_OFF_OFF_CYCLE } from "./fixed-cycle-rotation";
 import { usesFixedCycleRotation } from "./teams";
 import { flightDateFor, weekLabelFor } from "./flight-date";
 import { DEFAULT_CHECKIN_DEMAND_POLICY } from "./planning/checkin-demand";
 import { DEFAULT_ZONE_CHECKIN_DEMAND_POLICY } from "./planning/checkin-zone-demand";
 import { DEFAULT_FAIRNESS_WEIGHTS } from "./fairness-config";
-import { DEFAULT_HARD_WEEKLY_HOURS_CAP, DEFAULT_MAX_CONSECUTIVE_WORK_DAYS } from "./planning/hard-work-caps";
+import { DEFAULT_FATIGUE_CONFIG } from "./fatigue-config";
+
+/**
+ * Builds the full Config shape from a resolved labor-rule set — the single
+ * place that assembles Config, used both for the static CONFIG singleton
+ * below AND (2026-09-29, Planning Rules milestone) by
+ * lib/planning/rules-service.ts's resolveEffectiveConfig, which resolves
+ * against DB-persisted, user-editable rules instead of this module's static
+ * DEFAULT_LABOR_RULES. Never duplicate this assembly elsewhere — every
+ * caller that needs a Config from a ResolvedLaborRules goes through here.
+ *
+ * fairness_weights/checkin policies are NOT part of LaborRules (they are
+ * soft scoring weights / demand-model config, not human-protection rules —
+ * see their own modules' doc comments) and always come from their own
+ * defaults regardless of which labor rules are in force.
+ */
+export function buildConfigFromResolvedRules(resolved: ResolvedLaborRules): Config {
+  return {
+    minimum_rest_hours: resolved.minimumRestHours,
+    maximum_average_weekly_working_hours: resolved.maximumAverageWeeklyWorkingHours,
+    working_hours_reference_period_days: resolved.workingHoursReferencePeriodDays,
+    working_hours_obligation_hours: resolved.workingHoursObligationHours,
+    // NOT YET CONFIRMED — null, exactly like working_hours_obligation_hours
+    // itself; see lib/types.ts's Config doc comment and
+    // lib/planning/roster-generation.ts. Never default this away.
+    working_hours_obligation_reference_period_days: null,
+    fairness_weights: DEFAULT_FAIRNESS_WEIGHTS,
+    baseline_checkin_requirement: 4,
+    overbooking_checkin_reinforcement: 2,
+    checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,
+    zone_checkin_demand_policy: DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
+    normal_weekly_off_days: resolved.normalWeeklyOffDays,
+    normal_weekly_work_days: resolved.normalWeeklyWorkDays,
+    normal_off_days_consecutive: resolved.normalOffDaysConsecutive,
+    max_consecutive_off_days: resolved.maxConsecutiveOffDays,
+    renfort_weekly_off_days: resolved.renfortWeeklyOffDays,
+    // HARD cap on consecutive work days (2026-09-25, hard-constraints
+    // milestone phase 1) — sourced from labor-rules.ts (2026-09-29
+    // consolidation) for one canonical number, though its provenance there
+    // is honestly unconfirmed_prototype (see that field's doc comment).
+    max_consecutive_work_days: resolved.maxConsecutiveWorkDays,
+    operational_buffer_minutes: resolved.operationalBufferMinutes,
+    // Fatigue (2026-09-29, Planning Rules milestone): always the disabled
+    // prototype default here — resolveEffectiveConfig is where a real
+    // DB-persisted fatigue toggle/weights would override this once a user
+    // has actually edited it via the Planning Rules UI.
+    fatigue: DEFAULT_FATIGUE_CONFIG,
+  };
+}
 
 // minimum_rest_hours and maximum_average_weekly_working_hours are sourced
 // from lib/labor-rules.ts, not hand-picked here — 15h rest is confirmed
@@ -23,32 +71,7 @@ import { DEFAULT_HARD_WEEKLY_HOURS_CAP, DEFAULT_MAX_CONSECUTIVE_WORK_DAYS } from
 // this CONFIG object (itself read from the resolver).
 const DEFAULT_RULES = resolveDefaultLaborRules();
 
-export const CONFIG: Config = {
-  minimum_rest_hours: DEFAULT_RULES.minimumRestHours,
-  maximum_average_weekly_working_hours: DEFAULT_RULES.maximumAverageWeeklyWorkingHours,
-  working_hours_reference_period_days: DEFAULT_RULES.workingHoursReferencePeriodDays,
-  working_hours_obligation_hours: DEFAULT_RULES.workingHoursObligationHours,
-  // NOT YET CONFIRMED — null, exactly like working_hours_obligation_hours
-  // itself; see lib/types.ts's Config doc comment and
-  // lib/planning/roster-generation.ts. Never default this away.
-  working_hours_obligation_reference_period_days: null,
-  fairness_weights: DEFAULT_FAIRNESS_WEIGHTS,
-  baseline_checkin_requirement: 4,
-  overbooking_checkin_reinforcement: 2,
-  checkin_demand_policy: DEFAULT_CHECKIN_DEMAND_POLICY,
-  zone_checkin_demand_policy: DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
-  normal_weekly_off_days: DEFAULT_RULES.normalWeeklyOffDays,
-  max_consecutive_off_days: DEFAULT_RULES.maxConsecutiveOffDays,
-  renfort_weekly_off_days: DEFAULT_RULES.renfortWeeklyOffDays,
-  // HARD caps (2026-09-25, hard-constraints milestone phase 1) — see
-  // lib/types.ts's Config doc comments and lib/planning/hard-work-caps.ts.
-  // hard_weekly_hours_cap deliberately uses its OWN constant (42), NOT
-  // DEFAULT_RULES.maximumAverageWeeklyWorkingHours: same number today, but a
-  // structurally separate single-displayed-week hard rule, never derived from
-  // (or allowed to drift with) the confirmed 42h AVERAGE.
-  hard_weekly_hours_cap: DEFAULT_HARD_WEEKLY_HOURS_CAP,
-  max_consecutive_work_days: DEFAULT_MAX_CONSECUTIVE_WORK_DAYS,
-};
+export const CONFIG: Config = buildConfigFromResolvedRules(DEFAULT_RULES);
 
 // Multi-week Flight Program: many weeks can now have real, distinct data
 // (see lib/flight-date.ts and the flights.week_start/flight_date columns).

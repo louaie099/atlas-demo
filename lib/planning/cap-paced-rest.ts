@@ -29,9 +29,12 @@ import { HardWorkCaps } from "./hard-work-caps";
  * THE MECHANISM (only when the team is genuinely capacity-constrained):
  *
  *   1. Per member, an estimated capacity in work days this window: the most
- *      demand days that fit under the hard weekly-hours cap at each day's
- *      estimated covering-shift hours (cheapest days first), and under the
- *      consecutive-work-day cap from the member's real incoming streak.
+ *      demand days that fit under the consecutive-work-day cap from the
+ *      member's real incoming streak. (2026-09-29: capacity used to ALSO be
+ *      capped by a per-week hours ceiling here — removed, not relabeled, as
+ *      that ceiling was never a confirmed rule; see hard-work-caps.ts's
+ *      removal note. `estimatedShiftHoursByDay` remains, but only as a SOFT
+ *      tie-break input now — see step 4 — never a hard capacity limit.)
  *   2. `active` iff the team's total capacity < the week's demand in
  *      person-days (each day's need capped at the team size). Otherwise the
  *      plan is inert and the caller keeps its exact prior behaviour
@@ -149,16 +152,8 @@ export function allocateProportionally(total: number, weights: readonly number[]
   return out;
 }
 
-/** Estimated work-day capacity of one member: min(hours-cap days at cheapest-first, consecutive-cap days). */
-function memberCapacityDays(demandDayIdx: number[], hours: readonly number[], caps: HardWorkCaps, incomingStreak: number, n: number, demand: readonly number[]): number {
-  const costs = demandDayIdx.map((i) => hours[i]).sort((a, b) => a - b);
-  let sum = 0;
-  let byHours = 0;
-  for (const c of costs) {
-    if (sum + c > caps.hardWeeklyHoursCap + HOURS_EPSILON) break;
-    sum += c;
-    byHours++;
-  }
+/** Estimated work-day capacity of one member: how many demand days fit under the consecutive-work-day cap from their real incoming streak. */
+function memberCapacityDays(caps: HardWorkCaps, incomingStreak: number, n: number, demand: readonly number[]): number {
   let streak = incomingStreak;
   let byStreak = 0;
   for (let i = 0; i < n; i++) {
@@ -169,7 +164,7 @@ function memberCapacityDays(demandDayIdx: number[], hours: readonly number[], ca
       streak = 0;
     }
   }
-  return Math.min(byHours, byStreak);
+  return byStreak;
 }
 
 export function planCapPacedRestDays(input: CapPacedRestPlanInput): CapPacedRestPlan {
@@ -178,10 +173,9 @@ export function planCapPacedRestDays(input: CapPacedRestPlanInput): CapPacedRest
   const teamSize = memberIds.length;
   const cappedDemand = demandByDay.map((d) => Math.max(0, Math.min(d, teamSize)));
   const demandDays = cappedDemand.reduce((a, b) => a + b, 0);
-  const demandDayIdx = cappedDemand.map((d, i) => (d > 0 ? i : -1)).filter((i) => i >= 0);
   const capacityDaysByMember = new Map<string, number>();
   for (const id of memberIds) {
-    capacityDaysByMember.set(id, memberCapacityDays(demandDayIdx, estimatedShiftHoursByDay, caps, incomingStreakByEmployee.get(id) ?? 0, n, cappedDemand));
+    capacityDaysByMember.set(id, memberCapacityDays(caps, incomingStreakByEmployee.get(id) ?? 0, n, cappedDemand));
   }
   const capacityDays = [...capacityDaysByMember.values()].reduce((a, b) => a + b, 0);
   const base = { capacityDays, demandDays, capacityDaysByMember, daysOrder, estimatedShiftHoursByDay, caps };
@@ -205,7 +199,7 @@ export function planCapPacedRestDays(input: CapPacedRestPlanInput): CapPacedRest
     const chosen = new Set<string>();
     if (want > 0) {
       const candidates = memberIds
-        .filter((id) => quota.get(id)! > 0 && streak.get(id)! + 1 <= caps.maxConsecutiveWorkDays && plannedHours.get(id)! + hours <= caps.hardWeeklyHoursCap + HOURS_EPSILON)
+        .filter((id) => quota.get(id)! > 0 && streak.get(id)! + 1 <= caps.maxConsecutiveWorkDays)
         .map((id) => ({
           id,
           slack: futureDemandDays - quota.get(id)!,
@@ -235,19 +229,20 @@ export function planCapPacedRestDays(input: CapPacedRestPlanInput): CapPacedRest
 
 /**
  * May `employeeId`, on day `dayIndex` that is NOT one of their preferred
- * work days, still be offered today's work? Only when it cannot cost one of
- * their own later preferred work days: their real hours so far + today's
- * estimated shift + every later preferred day's estimate still fit under
- * the hard weekly-hours cap, and working today would not join a planned run
- * past the consecutive-work-day cap. This is a soft ordering gate — the
- * hard filters still decide actual legality.
+ * work days, still be offered today's work? Only when working today would
+ * not join a planned run past the consecutive-work-day cap. This is a soft
+ * ordering gate — the hard filters still decide actual legality.
+ * (2026-09-29: an hours-based check — today's shift plus every later
+ * preferred day's estimate must fit under a per-week hours ceiling — used
+ * to gate this too; removed, not relabeled, since that ceiling was never a
+ * confirmed rule. See hard-work-caps.ts's removal note. `hoursSoFar` is
+ * kept as a parameter only so existing callers' call sites don't need to
+ * change; it is no longer read.)
  */
 export function planAllowsDrawIn(plan: CapPacedRestPlan, employeeId: string, dayIndex: number, hoursSoFar: number, streakEnteringDay: number): boolean {
+  void hoursSoFar;
   const preferred = plan.preferredWorkDays.get(employeeId);
   if (!preferred) return true;
-  let committed = hoursSoFar + plan.estimatedShiftHoursByDay[dayIndex];
-  for (let j = dayIndex + 1; j < plan.daysOrder.length; j++) if (preferred.has(plan.daysOrder[j])) committed += plan.estimatedShiftHoursByDay[j];
-  if (committed > plan.caps.hardWeeklyHoursCap + HOURS_EPSILON) return false;
   let run = streakEnteringDay + 1;
   for (let j = dayIndex + 1; j < plan.daysOrder.length && preferred.has(plan.daysOrder[j]); j++) run++;
   return run <= plan.caps.maxConsecutiveWorkDays;

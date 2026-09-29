@@ -374,6 +374,19 @@ export interface Config {
   // no automatic generation path reads it; renfort is only ever activated
   // by an explicit human management action.
   normal_weekly_off_days: number;
+  // The confirmed normal roster structure's OTHER half (2026-09-29,
+  // Planning Rules milestone) — see lib/labor-rules.ts's normalWeeklyWorkDays
+  // doc comment on why this is its own explicit field, never derived from
+  // normal_weekly_off_days or from max_consecutive_work_days.
+  normal_weekly_work_days: number;
+  // The confirmed RECOVERY-BLOCK POLICY (2026-09-29, Planning Rules
+  // milestone) — see lib/labor-rules.ts's normalOffDaysConsecutive doc
+  // comment. When true, lib/planning/shift-generation.ts's
+  // generateFlexiblePoolShifts hard-excludes a flexible ACE from Stage 6 on
+  // the days inside their own planned OFF/OFF window
+  // (lib/planning/off-window.ts) — a genuinely different concept from
+  // max_consecutive_off_days below.
+  normal_off_days_consecutive: boolean;
   max_consecutive_off_days: number;
   renfort_weekly_off_days: number;
   // NOT YET CONFIRMED — mirrors working_hours_reference_period_days'
@@ -396,41 +409,49 @@ export interface Config {
   // same LaborRuleSource "don't invent a coefficient" convention as
   // lib/labor-rules.ts, even though it isn't itself a LaborRules entry.
   fairness_weights: import("./fairness-config").FairnessWeights;
-  // HARD, SINGLE-DISPLAYED-WEEK HOURS CEILING (2026-09-25, hard-constraints
-  // milestone phase 1). The most hours a GENERATION-DRIVEN employee
-  // (flexible General T1 pool incl. its Stage-6.5 top-up, Profiling/Mesure,
-  // every foreign-company team) may be scheduled for across ONE displayed
-  // Monday-Sunday WeeklyPlan window (sum of getShiftDurationHours over that
-  // window's worked days). Enforced exactly like the 15h rest rule: as a
-  // pre-scoring eligibility FILTER at every generation gate
-  // (lib/planning/hard-work-caps.ts's wouldExceedHardWeeklyHoursCap) — a
-  // candidate shift that would push the week past this number is never
-  // scored, never assigned; a shortfall that results is reported honestly
-  // (unfilled_duty / BLOCKING DemandConflict), never filled illegally.
+  // 2026-09-29 REMOVAL: a `hard_weekly_hours_cap` field used to live here —
+  // a HARD, SINGLE-DISPLAYED-WEEK 42h ceiling enforced as a pre-scoring
+  // eligibility filter at every generation gate. Audited and REMOVED, not
+  // relabeled: it silently treated `maximum_average_weekly_working_hours`
+  // (below) — a confirmed AVERAGE over a still-unconfirmed reference period,
+  // NOT a per-displayed-week ceiling — as if it were a real Monday-Sunday
+  // cap, which is exactly the incorrect interpretation that field's own doc
+  // comment warns against. See lib/planning/hard-work-caps.ts's 2026-09-29
+  // removal note and docs/known-limitations/roster-planning-vs-duty-
+  // allocation.md for the full audit trail. A legitimate configured shift
+  // combination that sums past 42h inside one displayed week is no longer
+  // rejected by anything in this codebase.
+  //
+  // HARD CAP on CONSECUTIVE calendar work days for the generation-driven
+  // populations (flexible General T1 pool incl. its Stage-6.5 top-up,
+  // Profiling/Mesure, every foreign-company team; 2026-09-25, hard-
+  // constraints milestone phase 1) — a genuinely different, non-hours-based
+  // concept the removal above does not touch. An employee may never be
+  // assigned a work day that would make it their (max_consecutive_work_days
+  // + 1)th consecutive calendar work day, counted continuously across week
+  // boundaries from real predecessor-plan history (lib/planning/
+  // consecutive-days-continuity.ts). Enforced as a pre-scoring eligibility
+  // filter at every generation gate (lib/planning/hard-work-caps.ts).
   // Fixed-cycle teams (Transit/Leaders/Duty Officers, lib/fixed-cycle-
   // rotation.ts) and other static teams are EXEMPT (never re-generated).
-  //
-  // DO NOT CONFLATE WITH maximum_average_weekly_working_hours ABOVE. That
-  // field is a confirmed AVERAGE over a still-unconfirmed multi-week
-  // reference period and is deliberately NOT a per-week ceiling: a hard
-  // Monday-Sunday 42h gate built on it used to exist in this pipeline and
-  // was REMOVED on purpose (see generate-draft-plan.ts's "IMPORTANT — no
-  // calendar-week 42h gate" doc comment; tests/labor-rule-invariants.test.ts
-  // keeps that distinction honest). This field is a SEPARATE, newly
-  // introduced management rule that happens to default to the same number
-  // (42) — the two must stay independently configurable: changing the
-  // average's number must never move this cap, and nothing may read the
-  // average as a per-week gate. Average-hours reporting
-  // (lib/planning/average-hours.ts) never reads this field.
-  hard_weekly_hours_cap: number;
-  // HARD CAP on CONSECUTIVE calendar work days for the same generation-
-  // driven populations (2026-09-25, hard-constraints milestone phase 1).
-  // An employee may never be assigned a work day that would make it their
-  // (max_consecutive_work_days + 1)th consecutive calendar work day,
-  // counted continuously across week boundaries from real predecessor-plan
-  // history (lib/planning/consecutive-days-continuity.ts). Same filter-gate
-  // mechanism and same exemption as hard_weekly_hours_cap above.
   max_consecutive_work_days: number;
+  // NOT YET CONFIRMED, purely representable (2026-09-29, Planning Rules
+  // milestone) — see lib/labor-rules.ts's operationalBufferMinutes. No
+  // generation or validation code reads this value; it exists only so the
+  // Planning Rules UI can show it, clearly marked "not yet enforced." Do
+  // not invent a value here — null means "not configured."
+  operational_buffer_minutes?: number | null;
+  // Fatigue-burden model configuration (2026-09-29, Planning Rules
+  // milestone) — see lib/fatigue-config.ts. OPTIONAL: every existing
+  // hand-built Config object literal (tests included) predates this field
+  // and stays valid; every real read site falls back to
+  // DEFAULT_FATIGUE_CONFIG (disabled) when absent, exactly like
+  // lib/planning/hard-work-caps.ts's resolveHardWorkCaps already falls back
+  // for a pre-migration config_snapshot missing max_consecutive_work_days.
+  // Folding this into Config (rather than leaving it a sibling parameter to
+  // generateDraftWeeklyPlan, as before) means a plan's config_snapshot now
+  // actually captures the fatigue settings it was generated under.
+  fatigue?: import("./fatigue-config").FatigueConfig;
 }
 
 /**

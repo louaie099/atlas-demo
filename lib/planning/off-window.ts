@@ -35,10 +35,22 @@ import { restHoursBetween } from "../roster-generation";
  *     pre-planned window is still fully free after Stage 6, the top-up
  *     keeps exactly that window OFF.
  *
- * Everything here is a SOFT preference. A separated-OFF result stays fully
- * legal (validation.ts's non-blocking `separated_off_days` PlanIssue still
- * fires exactly when it happens), and nothing here ever widens or narrows
- * the set of legal candidates or creates a coverage gap.
+ * 2026-09-29 CORRECTION (point 3): the SEARCH this module performs
+ * (planPreferredOffWindows' water-filling over every candidate cyclic
+ * window position) was already real, but Stage 6 only ever treated the
+ * chosen window as a SOFT tier-3 scoring nudge (see stage6-score-tiers.ts)
+ * — small enough that a candidate covering real hard demand always
+ * outranked it, so a genuinely avoidable split could still happen purely
+ * from greedy per-bucket ordering. When Config.normal_off_days_consecutive
+ * is true (the default), Stage6OffWindowContext.hardExclude makes the
+ * window a genuine HARD exclusion instead (see shift-generation.ts's
+ * legalCodesByEmployee gate — the SAME mechanism hard-work-caps.ts already
+ * uses): a flexible ACE is never even a candidate on their own window days.
+ * If that leaves real demand uncovered, it surfaces as an honest
+ * unfilled_duty gap — a human then explicitly approves the exception via
+ * Find Agent, never an automatic silent override. Tier 3 remains a SOFT
+ * nudge for everything the hard exclusion does not cover (the window's
+ * calendar-adjacent edges, and ties among non-excluded candidates).
  */
 
 /**
@@ -268,6 +280,13 @@ export interface Stage6OffWindowContext {
   preferredOffDaysByEmployee: ReadonlyMap<string, ReadonlySet<string>>;
   previousDay?: { dayOfWeek: string; date: string };
   nextDay?: { dayOfWeek: string; date: string };
+  // 2026-09-29 correction, point 3 (see this module's doc comment): when
+  // true, an employee's window day is a HARD exclusion from Stage 6's
+  // candidate pool (shift-generation.ts's legalCodesByEmployee gate) —
+  // never merely the tier-3 scoring penalty below. Default false (via
+  // `?? false` at every read site) reproduces the exact prior soft-only
+  // behavior for any caller that omits it.
+  hardExclude?: boolean;
 }
 
 function minutesToTime(mins: number): string {

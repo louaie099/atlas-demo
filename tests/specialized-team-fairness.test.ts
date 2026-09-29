@@ -129,17 +129,23 @@ describe("fairness still holds when cap-paced rest planning is active (real 42h 
   const caps = resolveHardWorkCaps(CONFIG);
   const count = (byDay: Record<string, { employeeId: string }[]>, id: string) => DAYS.filter((d) => (byDay[d] ?? []).some((g) => g.employeeId === id)).length;
 
-  it("the original Air France scenario (5 members, 3/flight, a flight every day): 20 legal person-days < 21 needed, the plan is active — every member still gets 4 duties, Tarik and Widad included", () => {
+  it("the original Air France scenario (2026-09-29 REPLACEMENT — capacity is now streak-only): 5 members x 6 legal days = 30 >= 21 needed, so this fixture is no longer capacity-constrained at all — full coverage, zero conflicts, and rotation still varies day to day (fairness holds without pacing needing to engage)", () => {
+    // BEFORE the 2026-09-29 hours-cap removal, "20 legal person-days < 21
+    // needed" made this fixture genuinely capacity-constrained and pacing
+    // spread the one honest shortfall across the week. With capacity now
+    // streak-only (6 of 7 days/member on a fully-demanded week), 5 members
+    // comfortably cover all 21 needed person-days: one member (whoever the
+    // rotation lands on first) picks up a 5th duty, the rest get 4 — full
+    // coverage, not an uneven-but-fair split of a real shortfall.
     const team = ["Fadwa", "Khalid", "Marouane", "Tarik", "Widad"].map((name, i) =>
       makeEmployee({ id: `af-${i}`, name: `${name} Idrissi`, assignment: "Air France", foreign_company_authorizations: ["Air France"] })
     );
     const flights = DAYS.map((day, i) => makeFlight({ id: `af-flight-${i}`, day_of_week: day, flight_date: flightDateFor(TEST_WEEK_START, day) }));
     const { generatedShiftsByDay, conflicts } = generateForeignCompanyShifts(DAYS, team, flights, ["Air France"], 15, TEST_WEEK_START, new Map(), undefined, undefined, { caps, incomingStreakByEmployee: new Map() });
     const counts = team.map((e) => count(generatedShiftsByDay, e.id));
-    expect(counts).toEqual([4, 4, 4, 4, 4]);
-    // The pacing is really engaged here (one day is honestly short, spread rather than a zero day).
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0].capPacing).toBeDefined();
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(21); // full coverage, no shortfall
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1); // still spread within 1
+    expect(conflicts).toEqual([]);
     // Not the same first 3 every day: each day's crew differs from Monday's on some day.
     const crew = (d: string) => generatedShiftsByDay[d].map((g) => g.employeeId).sort().join(",");
     expect(new Set(DAYS.map(crew)).size).toBeGreaterThan(1);

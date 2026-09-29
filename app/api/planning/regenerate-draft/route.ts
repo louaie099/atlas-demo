@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 import { regenerateDraftPlan } from "@/lib/planning/weekly-plan-service";
-import { CONFIG, DAYS_WITH_DATA } from "@/lib/seed-data";
+import { resolveEffectiveConfig } from "@/lib/planning/rules-service";
+import { DAYS_WITH_DATA } from "@/lib/seed-data";
 
 /**
  * Regenerate Draft. Only valid on an existing DRAFT plan (409 if
@@ -22,7 +23,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "planId is required" }, { status: 400 });
   }
 
-  const result = await regenerateDraftPlan(supabase, planId, DAYS_WITH_DATA, CONFIG);
+  const config = await resolveEffectiveConfig(supabase);
+  const result = await regenerateDraftPlan(supabase, planId, DAYS_WITH_DATA, config);
   if ("blocked" in result) {
     return NextResponse.json({ error: result.reason }, { status: 409 });
   }

@@ -5,7 +5,7 @@ import { restHoursBetween } from "../roster-generation";
 import { selectCompatibleShiftCodes } from "../foreign-shift-planning";
 import { DailyDemand } from "./demand-aggregation";
 import { GeneratedShiftAssignment, PriorDayShiftMap, replayStage6HardCoverage, STAGE6_DEFAULT_ROLES } from "./shift-generation";
-import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, wouldExceedHardWeeklyHoursCap } from "./hard-work-caps";
+import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason } from "./hard-work-caps";
 import { maxConsecutiveOffCyclic } from "./consecutive-off";
 import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
 
@@ -13,14 +13,15 @@ import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
  * BOUNDED CROSS-EMPLOYEE HARD-CAP REPAIR (2026-09-25, hard-constraints
  * milestone PHASE 2, part B).
  *
- * THE PROBLEM. Phase 1 made two caps hard (max 5 consecutive work days, a
- * hard single-week hours cap) as pre-scoring filters inside each greedy,
- * day-by-day generator. A greedy has no lookahead: it can spend employee X's
- * cap headroom on a day that another eligible employee Y could have covered
- * just as well, and then find X — the only person left who could cover a
- * later need — blocked by the cap. The result is an avoidable gap (an
- * uncovered demand slot) or an avoidable roster dead-end (a 3-day OFF run
- * because the hours cap closed the end of X's week).
+ * THE PROBLEM. Phase 1 made the consecutive-work-day cap (max 5 days) hard,
+ * as a pre-scoring filter inside each greedy, day-by-day generator. (A
+ * second, hours-based cap existed here through 2026-09-28; REMOVED
+ * 2026-09-29, not relabeled — see hard-work-caps.ts's removal note.) A
+ * greedy has no lookahead: it can spend employee X's cap headroom on a day
+ * that another eligible employee Y could have covered just as well, and
+ * then find X — the only person left who could cover a later need —
+ * blocked by the cap. The result is an avoidable gap (an uncovered demand
+ * slot) or an avoidable roster dead-end (e.g. a 3-day OFF run).
  *
  * THE MECHANISM — one move type, an "ejection chain of length 1":
  *
@@ -169,10 +170,14 @@ export function restLegalAt(ctx: RepairLegalityContext, employeeId: string, patt
   return true;
 }
 
-/** The first hard cap a whole-week pattern breaks, or null when it respects both (streak counted from the real incoming streak). */
+/**
+ * The hard cap a whole-week pattern breaks, or null when it respects it
+ * (streak counted from the real incoming streak). (2026-09-29: this used to
+ * check a second, hours-based cap too — removed, not relabeled, since that
+ * ceiling was never a confirmed rule; see hard-work-caps.ts's removal note.)
+ */
 export function hardCapBreach(ctx: RepairLegalityContext, employeeId: string, pattern: WeekPattern): HardCapExclusionReason | null {
   let streak = ctx.incomingStreakByEmployee.get(employeeId) ?? 0;
-  let hours = 0;
   for (let i = 0; i < pattern.length; i++) {
     const code = pattern[i];
     if (!code) {
@@ -181,9 +186,7 @@ export function hardCapBreach(ctx: RepairLegalityContext, employeeId: string, pa
     }
     if (streak + 1 > ctx.caps.maxConsecutiveWorkDays) return "consecutive_work_days";
     streak++;
-    hours += getShiftDurationHours(code, flightDateFor(ctx.weekStart, ctx.daysOrder[i]));
   }
-  if (wouldExceedHardWeeklyHoursCap(hours, 0, ctx.caps.hardWeeklyHoursCap)) return "hard_weekly_hours";
   return null;
 }
 
@@ -203,7 +206,6 @@ function withDay(pattern: WeekPattern, j: number, code: string | null): WeekPatt
 
 function capPhrase(reason: HardCapExclusionReason | null, caps: HardWorkCaps): string {
   if (reason === "consecutive_work_days") return `the ${caps.maxConsecutiveWorkDays}-consecutive-work-day cap`;
-  if (reason === "hard_weekly_hours") return `the ${caps.hardWeeklyHoursCap}h hard weekly hours cap`;
   return "the hard work caps";
 }
 

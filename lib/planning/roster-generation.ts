@@ -10,8 +10,7 @@ import { unknownFatigueState, transitionBurdenForSpans, spanFromResolvedTimes } 
 import { projectFatigueForShift, explainFatigueChoice, shiftSpanOnDate, LastWorkedShift, FatigueCandidateProjection } from "./fatigue-planning";
 import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { maxConsecutiveOffCyclic } from "./consecutive-off";
-import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, consecutiveRunLengthIfWorked, wouldExceedHardWeeklyHoursCap } from "./hard-work-caps";
-import { CapAwareRosterTarget, computeCapAwareTargetWorkDays, preferredOffWindowLength } from "./roster-target";
+import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, consecutiveRunLengthIfWorked } from "./hard-work-caps";
 
 /**
  * HARD WORK CAPS for one employee's top-up (2026-09-25, hard-constraints
@@ -384,33 +383,22 @@ export function computeEmployeeDayCountTopUp(
     const code = getExistingShift(d)?.shiftCode ?? additional.get(d);
     return code ? getShiftTimesAs(code, flightDateFor(weekStart, d)) : null;
   }
-  // HARD WORK CAPS helpers (see TopUpHardCaps). The window's scheduled
-  // hours are this function's own running value: initialScheduledHours
-  // (the caller's already-scheduled days) plus every day added so far.
+  // HARD WORK CAPS helpers (see TopUpHardCaps) — the consecutive-work-day
+  // cap only (2026-09-29: an hours-based cap used to live here too; see
+  // legalCodesAt's removal note).
   function isWorkedAt(k: number, override?: { index: number; shift: Times }): boolean {
     if (override && override.index === k) return true;
     const d = daysOrder[k];
     return Boolean(getExistingShift(d)?.shiftCode ?? additional.get(d));
   }
-  function scheduledHoursNow(override?: { index: number; shift: Times }): number {
-    let hours = initialScheduledHours;
-    for (const [d, code] of additional) hours += getShiftDurationHours(code, flightDateFor(weekStart, d));
-    if (override && !isWorkedAt(override.index)) {
-      const startMin = timeToMinutes(override.shift.shift_start);
-      let endMin = timeToMinutes(override.shift.shift_end);
-      if (endMin <= startMin) endMin += 24 * 60;
-      hours += (endMin - startMin) / 60;
-    }
-    return hours;
-  }
-  /** Why day `j` is closed to every code by a hard cap, or null when the caps leave at least a code-level choice (hours filtering is then per code). */
+  /** Why day `j` is closed to every code by a hard cap (the consecutive-work-day cap only — see legalCodesAt's 2026-09-29 removal note). */
   function capClosesDay(j: number, override?: { index: number; shift: Times }): HardCapExclusionReason | null {
     if (!hardCaps) return null;
     if (consecutiveRunLengthIfWorked((k) => isWorkedAt(k, override), j, n, hardCaps.incomingStreak) > hardCaps.caps.maxConsecutiveWorkDays) return "consecutive_work_days";
     return null;
   }
   /** Rest-legal catalog codes (shortest first) for day `j`, optionally pretending day `override.index` holds `override.shift`. With hardCaps (default), also cap-legal. */
-  let capBound = false; // a hard cap has removed at least one rest-legal code during this employee's walk
+  let capBound = false; // the hard consecutive-work-day cap has closed at least one day during this employee's walk
   function legalCodesAt(j: number, override?: { index: number; shift: Times }, applyCaps = true): { code: string; entreeMin: number; sortieMin: number }[] {
     const restLegal = restLegalCodesAt(j, override);
     if (!hardCaps || !applyCaps || restLegal.length === 0) return restLegal;
@@ -418,11 +406,11 @@ export function computeEmployeeDayCountTopUp(
       capBound = true;
       return [];
     }
-    const hoursNow = scheduledHoursNow(override);
-    const date = flightDateFor(weekStart, daysOrder[j]);
-    const capped = restLegal.filter((c) => !wouldExceedHardWeeklyHoursCap(hoursNow, getShiftDurationHours(c.code, date), hardCaps.caps.hardWeeklyHoursCap));
-    if (capped.length < restLegal.length) capBound = true;
-    return capped;
+    // 2026-09-29: an hours-based per-code filter used to run here too
+    // (dropping a code that would push this week's scheduled hours past a
+    // per-week ceiling) — removed, not relabeled; see hard-work-caps.ts's
+    // removal note. Every rest-legal, day-open code is now cap-legal.
+    return restLegal;
   }
   /** Whether the current window state keeps every OFF block within maxConsecutiveOffDays (always true when not supplied). */
   function offBlocksWithinRule(): boolean {
@@ -679,13 +667,17 @@ export function computeEmployeeDayCountTopUp(
   }
 
   // HARD-CAP SHORTFALL REPORTING: the day-count target is still unmet and a
-  // free day that WAS rest-legal was closed off by a hard cap — recorded for
-  // the caller's honest reporting (never filled).
+  // free day that WAS rest-legal was closed off by the hard consecutive-
+  // work-day cap — recorded for the caller's honest reporting (never
+  // filled). (2026-09-29: an hours-cap-driven closure used to be possible
+  // here too — with that removed, capClosesDay is now the only way
+  // legalCodesAt can go from non-empty-without-caps to empty-with-caps.)
   if (hardCaps?.shortfallOut && scheduledDays.size < targetWorkingDaysThisWindow) {
     for (let i = 0; i < n; i++) {
       if (!freeDays.has(daysOrder[i])) continue;
       if (legalCodesAt(i, undefined, false).length === 0 || legalCodesAt(i).length > 0) continue;
-      hardCaps.shortfallOut.push({ day: daysOrder[i], reason: capClosesDay(i) ?? "hard_weekly_hours" });
+      const reason = capClosesDay(i);
+      if (reason) hardCaps.shortfallOut.push({ day: daysOrder[i], reason });
     }
   }
 
@@ -755,20 +747,18 @@ export interface FlexibleEmployeeTopUpResult {
   additions: Map<string, string>;
   fatigueReasons?: Map<string, string[]>;
   shortfall: { day: string; reason: HardCapExclusionReason }[];
-  /** The cap-aware target this employee was topped up toward (null without hard caps: the fixed normal target applies). */
-  target: CapAwareRosterTarget | null;
 }
 
 /**
  * One flexible-pool employee's Stage-6.5 top-up (see
- * generateObligationToppedUpShifts). PART A (2026-09-25, hard-constraints
- * phase 2): with hard caps, the day-count target is this employee's own
- * CAP-AWARE target (roster-target.ts's computeCapAwareTargetWorkDays, from
- * their real Stage-6 days and the real shortest code per free day) instead
- * of the fixed daysOrder.length - normal_weekly_off_days — so a week the
- * 42h cap genuinely limits to 4 days is topped up to 4 (normal) rather than
- * chasing an unreachable 5 and reporting a false shortfall. Without hard
- * caps the fixed target is used, byte-for-byte as before.
+ * generateObligationToppedUpShifts). The day-count target is always the
+ * confirmed normal one (daysOrder.length - normal_weekly_off_days).
+ * (2026-09-25 through 2026-09-28, PART A of the hard-constraints phase 2
+ * milestone computed an HOURS-based "cap-aware" target here instead,
+ * reducing it below normal whenever an employee's real shift codes would
+ * sum past a per-week hours ceiling — REMOVED 2026-09-29: that ceiling was
+ * never a confirmed rule; see hard-work-caps.ts's removal note. The normal
+ * target applies unconditionally now, hard caps or not.)
  */
 export function computeFlexibleEmployeeTopUp(
   employeeId: string,
@@ -776,7 +766,8 @@ export function computeFlexibleEmployeeTopUp(
   ctx: FlexibleTopUpContext
 ): FlexibleEmployeeTopUpResult {
   const { daysOrder, config, weekStart, hardCaps, fatigueConfig } = ctx;
-  const normalTarget = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
+  const targetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
+  const offWindowLength = config.normal_weekly_off_days;
   const committedHoursByDay = new Map<string, number>();
   for (const day of daysOrder) {
     const g = (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employeeId);
@@ -786,14 +777,6 @@ export function computeFlexibleEmployeeTopUp(
   let scheduledHours = 0;
   for (const h of committedHoursByDay.values()) scheduledHours += h;
   const getExistingShift = (day: string) => (demandDrivenShiftsByDay[day] ?? []).find((x) => x.employeeId === employeeId);
-
-  const target = hardCaps
-    ? computeCapAwareTargetWorkDays({ daysOrder, weekStart, normalTargetWorkDays: normalTarget, hardWeeklyHoursCap: hardCaps.caps.hardWeeklyHoursCap, committedHoursByDay })
-    : null;
-  const targetWorkDays = target ? target.targetWorkDays : normalTarget;
-  const offWindowLength = target
-    ? preferredOffWindowLength(daysOrder.length, targetWorkDays, config.normal_weekly_off_days, config.max_consecutive_off_days)
-    : config.normal_weekly_off_days;
 
   const fatigueReasons = fatigueConfig?.enabled ? new Map<string, string[]>() : undefined;
   const shortfall: { day: string; reason: HardCapExclusionReason }[] = [];
@@ -816,7 +799,7 @@ export function computeFlexibleEmployeeTopUp(
       ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employeeId) ?? 0, shortfallOut: shortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }
       : undefined
   );
-  return { additions, fatigueReasons, shortfall, target };
+  return { additions, fatigueReasons, shortfall };
 }
 
 /**
@@ -865,9 +848,8 @@ export function generateObligationToppedUpShifts(
   // employee's incoming consecutive-work-day streak (missing = 0; the caller
   // is responsible for disclosing unknown history). `exclusionsOut` receives
   // one record per day a cap kept an employee below the day-count target.
-  // `targetsOut` (phase 2 part A) receives each employee's cap-aware target.
-  // Omitted = no cap filtering and the fixed normal target.
-  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number>; exclusionsOut?: HardCapExclusion[]; targetsOut?: Map<string, CapAwareRosterTarget> }
+  // Omitted = no cap filtering.
+  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number>; exclusionsOut?: HardCapExclusion[] }
 ): Record<string, GeneratedShiftAssignment[]> {
   const additional: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) additional[day] = [];
@@ -889,8 +871,7 @@ export function generateObligationToppedUpShifts(
   // or cap-aware, target) governs both, so an hours top-up can never push
   // an employee past the roster shape objective 1 establishes.
   for (const employee of employees.filter(isFlexibleGeneralPool)) {
-    const { additions, fatigueReasons, shortfall, target } = computeFlexibleEmployeeTopUp(employee.id, demandDrivenShiftsByDay, ctx);
-    if (target) hardCaps?.targetsOut?.set(employee.id, target);
+    const { additions, fatigueReasons, shortfall } = computeFlexibleEmployeeTopUp(employee.id, demandDrivenShiftsByDay, ctx);
     for (const { day, reason } of shortfall) {
       hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "flexible_pool_top_up", reason });
     }

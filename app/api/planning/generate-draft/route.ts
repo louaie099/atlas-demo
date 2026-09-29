@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 import { generateDraftPlan } from "@/lib/planning/weekly-plan-service";
-import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { resolveEffectiveConfig } from "@/lib/planning/rules-service";
+import { DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "@/lib/seed-data";
 
 /**
  * Generate Draft. Creates and persists a new WeeklyPlan for the current
@@ -16,8 +17,9 @@ import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START } from "
  */
 export async function POST() {
   const supabase = getSupabaseServerClient();
+  const config = await resolveEffectiveConfig(supabase);
 
-  const result = await generateDraftPlan(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+  const result = await generateDraftPlan(supabase, CURRENT_WEEK_START, CURRENT_WEEK_LABEL, DAYS_WITH_DATA, config);
   if ("blocked" in result) {
     return NextResponse.json({ error: result.reason }, { status: 409 });
   }

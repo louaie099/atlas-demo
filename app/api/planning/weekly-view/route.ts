@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
 import { loadPersistedPlanView, hashPlanInputs } from "@/lib/planning/weekly-plan-service";
-import { CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
+import { resolveEffectiveConfig } from "@/lib/planning/rules-service";
+import { DAYS_WITH_DATA, CURRENT_WEEK_START } from "@/lib/seed-data";
 import { weekLabelFor } from "@/lib/flight-date";
 
 /**
@@ -84,7 +85,15 @@ export async function GET(req: Request) {
   if (view.plan.status === "draft") {
     const { data: allEmployees, error: empErr } = await supabase.from("employees").select("*");
     if (!empErr && allEmployees) {
-      const currentHash = hashPlanInputs(weekFlights ?? [], allEmployees, CONFIG);
+      // Planning Rules milestone: the CURRENT resolved config (which
+      // reflects any rule edit saved since this plan was generated), never
+      // the plan's own frozen config_snapshot -- comparing against the
+      // snapshot would trivially always match and could never detect a
+      // rule change. This is what makes editing a rule surface the same
+      // "schedule changed, click Make Planning" banner a flight-schedule
+      // change already does, via the same existing mechanism.
+      const currentConfig = await resolveEffectiveConfig(supabase);
+      const currentHash = hashPlanInputs(weekFlights ?? [], allEmployees, currentConfig);
       isStale = currentHash !== view.plan.generated_from_hash;
     }
   }

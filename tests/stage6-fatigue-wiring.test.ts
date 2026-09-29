@@ -57,7 +57,12 @@ import { Employee, Flight } from "../lib/types";
 // fatigue wiring; tests/hard-work-caps.test.ts proves the caps set this way
 // reproduce the pre-caps pipeline byte-for-byte, and tests the caps
 // themselves at their real defaults.
-const CONFIG = { ...SEED_CONFIG, hard_weekly_hours_cap: 999, max_consecutive_work_days: 999 };
+// normal_off_days_consecutive: false pins the pre-2026-09-29 soft-only
+// OFF/OFF behavior here too, for the exact same isolation reason as the two
+// caps above — this file proves fatigue wiring is neutral, which says
+// nothing about the separate OFF/OFF-as-hard-constraint correction;
+// tests/stage6-off-window-bias.test.ts covers that mechanism itself.
+const CONFIG = { ...SEED_CONFIG, hard_weekly_hours_cap: 999, max_consecutive_work_days: 999, normal_off_days_consecutive: false };
 
 /**
  * Fatigue-aware roster planning milestone, PART 2 (2026-09-24): the
@@ -631,15 +636,16 @@ function fingerprints(mode: FingerprintMode): Record<string, string> {
     // still covers every pre-existing field byte-for-byte.
     // (Overwriting `issues` in a spread keeps its original key position, so
     // the JSON — and the hash — of every pre-existing field is unchanged.)
-    // HARD-CAPS PHASE 2 (2026-09-25): same treatment for phase 2's two
-    // purely additive transparency outputs — `hardCapRepairs` (always [] with
-    // the caps non-binding: the repair pass never runs without a cap
-    // exclusion) and `rosterTargets` (each flexible/foreign employee's
-    // cap-aware target — the normal 5 here, since the caps never bind).
-    const { hardCapExclusions, hardCapRepairs, rosterTargets, ...pre } = rest;
+    // HARD-CAPS PHASE 2 (2026-09-25): same treatment for phase 2's purely
+    // additive transparency output — `hardCapRepairs` (always [] with the
+    // caps non-binding: the repair pass never runs without a cap
+    // exclusion). (2026-09-29: `rosterTargets` — each flexible/foreign
+    // employee's HOURS-based cap-aware target — was stripped the same way
+    // here too; it no longer exists at all, see hard-work-caps.ts's removal
+    // note, so there is nothing left to strip.)
+    const { hardCapExclusions, hardCapRepairs, ...pre } = rest;
     expect(hardCapExclusions).toEqual([]);
     expect(hardCapRepairs).toEqual([]);
-    expect(rosterTargets.every((t) => t.targetWorkDays === t.normalTargetWorkDays && !t.capLimited)).toBe(true);
     out[`plan:${ws}`] = h({ ...pre, issues: pre.issues.filter((i) => i.type !== "consecutive_work_history_unknown") });
     const reqs = computeWeeklyStaffingRequirements(FLIGHTS, CONFIG);
     const day = DAYS_WITH_DATA[0];

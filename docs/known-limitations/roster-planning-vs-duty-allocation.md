@@ -2271,3 +2271,148 @@ stress week's Profiling/Mesure headcount never collapses to zero on any day
   it means `preferredWorkDays` targets can still exceed a day's real
   distinct need — this fix places the resulting surplus rather than
   eliminating it.
+
+## 2026-09-29 addendum: Planning Rules configuration + week picker
+
+### What shipped
+
+Labor/planning rules are no longer hidden constants discovered only from
+generated results. `lib/labor-rules.ts`'s `LaborRules`/`DEFAULT_LABOR_RULES`
+resolution mechanism (already effective-dated and scoped, previously
+in-memory only) is now backed by a real, editable, versioned table
+(`planning_labor_rules`, migration 0016) via `lib/planning/rules-service.ts`.
+`app/api/planning/rules/route.ts` exposes it; `components/planning-rules-
+bar.tsx` + `planning-rules-sheet.tsx` show a compact one-line summary beside
+Make Planning with an "Edit rules" drawer (common rules first, Fatigue
+behind "Show advanced"). Every real generation API route
+(`generate-draft`/`regenerate-draft`/`make-planning`/`weekly-view`) now
+resolves the CURRENT persisted rules instead of the static `CONFIG`
+singleton — editing a rule and clicking Make Planning again is the only way
+it takes effect; an already-generated draft's existing "schedule changed"
+staleness banner now also fires on a rule change (the existing
+`hashPlanInputs`/`config_snapshot` mechanism already covered this once
+`resolveEffectiveConfig` replaced the static import — no new staleness
+logic needed).
+
+`FatigueConfig` (already fully built, previously a sibling parameter
+`generateDraftWeeklyPlan` never actually received from any real caller) is
+now `Config.fatigue` (optional, so every hand-built `Config` object literal
+stays valid) — real generation wires it via `weekly-plan-service.ts`'s
+`buildDraftPlanBundle`, deriving `incomingSeeds` with the already-built
+`deriveIncomingFatigueState` the exact same way the incoming consecutive-
+work-day streak is already derived. Its own persistence
+(`planning_fatigue_config`) is a single mutable "current settings" row, not
+effective-dated — it stays SOFT/prototype, deliberately never given the
+same version-history treatment as a confirmed labor rule.
+
+Week navigation gained `components/week-picker.tsx`: clicking the week
+label opens a small popover (4 weeks back, current, 5 forward, plus a raw
+date input) built entirely from `lib/flight-date.ts`'s existing primitives
+— no new date math. Previous/Next remain as one-step shortcuts. The
+picker's "Today" resolves via `weekStartFor(todayISO)`, independent of the
+seeded demo's seven-week-stale `CURRENT_WEEK_START` default.
+
+### Corrections made before implementation (a mid-review caught real business-rule errors)
+
+A review of the initial plan caught several errors before they shipped —
+recorded here because they're exactly the kind of mistake this milestone
+exists to prevent (an unconfirmed number quietly presented as confirmed
+policy):
+
+1. **No new `hardWeeklyHoursCap` concept was added to `LaborRules`.** The
+   confirmed rule is `maximumAverageWeeklyWorkingHours` (42h) evaluated over
+   a still-unconfirmed reference period — `not_evaluable` until configured.
+   `lib/planning/hard-work-caps.ts`'s PRE-EXISTING (2026-09-25) hard,
+   single-displayed-week 42h filter is a genuine, separate, ALREADY-ACTIVE
+   engineering safety default — it keeps working exactly as before
+   (unchanged behavior/tests), but is deliberately excluded from the new
+   Planning Rules model/UI so it's never mistaken for the confirmed average.
+   A full audit of whether that enforcement mechanism itself should be
+   removed/refactored is real, separate follow-up work (it touches
+   specialized-team-generation.ts, shift-generation.ts, roster-generation.ts,
+   cap-paced-rest.ts, hard-cap-repair.ts and roster-target.ts, each with
+   substantial existing test coverage) — out of scope here.
+2. **`normalWeeklyWorkDays` (5) is now its own explicit, confirmed field**,
+   never inferred from `normalWeeklyOffDays` (7 minus 2) or from
+   `maxConsecutiveWorkDays` — genuinely different concepts.
+3. **`normalOffDaysConsecutive` (recovery-block policy) is a HARD engine
+   constraint, not a soft scoring preference.** Before this, a flexible
+   ACE's planned OFF/OFF window (`lib/planning/off-window.ts`,
+   `planPreferredOffWindows` — the real, pre-existing SEARCH over candidate
+   window positions) was only a small tier-3 Stage-6 scoring penalty (see
+   `stage6-score-tiers.ts`) — small enough that ANY candidate covering real
+   hard demand always outranked it, so a genuinely avoidable split could
+   still happen from ordinary greedy per-bucket ordering. `Stage6OffWindow
+   Context.hardExclude` (driven by `Config.normal_off_days_consecutive`,
+   default true) now makes a flexible ACE's own window days a genuine
+   exclusion from `shift-generation.ts`'s `legalCodesByEmployee` gate — the
+   SAME "never scored" mechanism the hard work caps already use. When that
+   would leave real demand uncovered, it surfaces as an honest
+   `unfilled_duty` gap; a human explicitly approves the exception via Find
+   Agent — the same "ATLAS recommends, humans approve" pathway this
+   codebase already uses for every other genuine shortage, reused rather
+   than inventing a new approval mechanism or PlanIssue type.
+4. **`maxConsecutiveOffDays` (a ceiling) and `normalOffDaysConsecutive` (the
+   normal pair must be together) are modeled as two separate fields** — a
+   week can violate either without violating the other.
+5. **`maxConsecutiveWorkDays`'s provenance was corrected to
+   `unconfirmed_prototype`.** Flexible ACEs being configured for 5 WORK + 2
+   OFF does not, by itself, prove a separate confirmed rule that nobody may
+   ever work more than 5 consecutive calendar days across week boundaries.
+   The NUMBER (5) still comes from one canonical place
+   (`DEFAULT_MAX_CONSECUTIVE_WORK_DAYS`, derived from `DEFAULT_LABOR_RULES`)
+   and the engine still enforces it as a hard safety filter — only its
+   confirmation-status label changed. An explicit human edit through the
+   Planning Rules UI DOES become `confirmed_management_policy` — only the
+   never-edited default stays honestly unconfirmed.
+6. **`saveLaborRuleEdit` takes an optional `effectiveFrom`** (defaulting to
+   today, since no scheduling UI exists yet) rather than hard-wiring every
+   edit to take effect immediately — a real future-dated rule can be saved
+   without waiting for that date, and `isEffective`'s `effectiveTo` boundary
+   was fixed to be EXCLUSIVE (a genuine latent bug the fix exposed: with two
+   rows possible for the first time, an inclusive boundary let both match on
+   the handover date, and which one won depended on array order).
+
+### Fallout from making OFF/OFF pairing a hard constraint by default
+
+Several existing pinned scenarios in `tests/hard-work-caps.test.ts` used
+the REAL demo dataset and were calibrated to the OLD soft-only behavior.
+With the hard exclusion on by default, Stage 6 itself now produces a clean
+2-consecutive-OFF pattern for cases that previously needed the phase-2
+cross-employee repair pass to fix (e.g. Youssef El Amrani's 3-day-OFF-block
+scenario no longer occurs at all) — a genuine improvement, not a
+regression, but it made two pinned repair-count assertions obsolete; both
+were updated with inline justification rather than silently loosened.
+Tests specifically isolating an UNRELATED mechanism (hard-cap byte-identical
+regression guards, fatigue-neutrality fingerprints) now pin
+`normal_off_days_consecutive: false` alongside the other caps they already
+neutralize, for the same isolation reason.
+
+### Tests
+
+`tests/labor-rules.test.ts` (corrections 1, 2, 4, 5), `tests/planning-rules-
+persistence.test.ts` (effective-dating, version history, fatigue
+persistence, hardWeeklyHoursCap's deliberate absence), `tests/stage6-off-
+window-bias.test.ts` (the hard-exclusion mechanism itself — the same
+conflicting demand is silently worked with `normal_off_days_consecutive:
+false` and honestly gapped with it `true`), `tests/flight-date.test.ts`
+(the week picker's date-math primitives — no component-render
+infrastructure exists in this repo to render the component itself).
+
+### What it cannot do (known limitations, stated plainly)
+
+- **No per-population (scoped) rule UI yet.** `LaborRuleScope`/
+  `resolveLaborRules(employee, ...)` already support it, but no scoped rule
+  is confirmed today — inventing one would guess a business rule. The
+  Planning Rules UI instead shows a read-only "Team & rotation policy"
+  panel describing which mechanism each population is actually generated
+  under.
+- **No scheduling UI for a future-dated rule change.** The service layer
+  supports it (`saveLaborRuleEdit`'s `effectiveFrom`); the prototype UI
+  always defaults to today.
+- **Fatigue coefficients remain unvalidated engineering placeholders** —
+  folding `FatigueConfig` into `Config` changes where it's stored, not what
+  it means; see `lib/fatigue-config.ts`'s own disclaimer.
+- **The pre-existing `hard_weekly_hours_cap` mechanism's own removal/
+  refactor is unaudited follow-up work**, not performed here (see
+  correction 1 above).

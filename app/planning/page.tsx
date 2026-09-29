@@ -16,6 +16,7 @@ import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
+import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { shiftWeek } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
@@ -101,7 +102,6 @@ export default function PlanningPage() {
   // value -- there is no longer an implicit "current week" anywhere on
   // this page.
   const [weekStart, setWeekStart] = useState<string | null>(null);
-  const [weekLabel, setWeekLabel] = useState<string>("");
 
   // Single fetch, single computed plan: Flight Coverage, the summary bar,
   // and Agent Schedule all come from the same /api/planning/weekly-view
@@ -131,7 +131,6 @@ export default function PlanningPage() {
       .then((r) => r.json())
       .then((data) => {
         setWeekStart(data.weekStart ?? targetWeekStart ?? null);
-        setWeekLabel(data.weekLabel ?? "");
         setFlights(data.flights ?? []);
         setRoster(data.roster ?? []);
         setSchedule(data.schedule ?? []);
@@ -164,25 +163,27 @@ export default function PlanningPage() {
           <p className="text-muted mt-1 max-w-2xl">
             {plan === null
               ? "No plan has been generated for this week yet. Click Make Planning to generate one from the current flight schedule."
-              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the draft plan; management can still review and edit the whole draft before publishing. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
+              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the draft plan; management can still review and edit the whole draft before publishing. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule or the planning rules above, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
           <DraftLifecycle />
+          <PlanningRulesBar />
           {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
         </div>
       </div>
 
       <WeekNav
-        weekLabel={weekLabel}
+        weekStart={weekStart}
         hasData={(flights?.length ?? 0) > 0}
         onPrev={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, -1))}
         onNext={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, 1))}
+        onSelectWeek={(target) => loadWeeklyPlan(target)}
       />
 
       {plan && plan.status === "draft" && isStale && (
         <div className="bg-warn-50 border border-warn-200 text-warn-700 rounded-xl2 px-4 py-3 text-sm flex items-center justify-between gap-3">
-          <span>The flight schedule has changed since this draft was generated. Click Make Planning to update it.</span>
+          <span>The flight schedule or planning rules have changed since this draft was generated. Click Make Planning to update it.</span>
         </div>
       )}
 
