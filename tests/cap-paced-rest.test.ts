@@ -382,3 +382,104 @@ describe("TEST 6 — foreign-company teams had the same defect and get the same 
     expect(gen(true)).toEqual(gen(false));
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * TEST 7 — COVERAGE-GROUP ALLOCATION (2026-09-29 follow-up fix).
+ *
+ * THE BUG this covers: once a Profiling/Mesure team is genuinely
+ * capacity-constrained (cap-paced rest active), assignPacedProfilingMesureDay
+ * split each day's PREFERRED workers across demand CLUSTERS in proportion to
+ * each cluster's own raw peak — even when two clusters are both fully inside
+ * the SAME catalog shift code's span (e.g. two morning flights both covered
+ * by one 05:45-14:45 shift). That double-counted the morning side's real
+ * need (duty-generation, Stage 9, reuses one working person across every
+ * non-overlapping requirement window their real shift spans — see
+ * duty-generation.ts), handing it MORE preferred workers than it could ever
+ * use while an evening bank needing its OWN, non-overlapping shift code
+ * (e.g. 13:45-22:45) was starved of the workers it genuinely needed.
+ *
+ * Real 2026-10-05 stress week, Monday, Mesure: two morning requirements
+ * (both MT03-covered) plus one evening requirement (AP01-covered) — see
+ * docs/known-limitations/roster-planning-vs-duty-allocation.md's
+ * "2026-09-29" section for the full trace.
+ */
+describe("TEST 7 — coverage-group allocation: a day's preferred workers are no longer double-counted across clusters the same shift code covers", () => {
+  /** A Profiling team with, every day, two morning flights (both MT03-covered, non-overlapping) and one evening flight (AP01-covered, disjoint from MT03) — the real Monday Mesure shape from the 2026-10-05 stress week, at a size and need small enough to compute by hand. */
+  function twoBankWeek(size: number, needEach: number) {
+    const pool = Array.from({ length: size }, (_, i) => makeEmployee({ id: `q-${i}`, name: `Q ${i}`, assignment: "Profiling", skills: ["Profiling"] }));
+    const flights = DAYS.flatMap((day) => [
+      makeFlight({ id: `m1-${day}`, day_of_week: day, flight_date: flightDateFor(WEEK, day), scheduled_departure: "09:15" }), // window 08:15-09:15, MT03-covered
+      makeFlight({ id: `m2-${day}`, day_of_week: day, flight_date: flightDateFor(WEEK, day), scheduled_departure: "12:00" }), // window 11:00-12:00, MT03-covered, separate cluster (zero demand 09:15-11:00)
+      makeFlight({ id: `e1-${day}`, day_of_week: day, flight_date: flightDateFor(WEEK, day), scheduled_departure: "20:00" }), // window 19:00-20:00, AP01-covered, disjoint from MT03
+    ]);
+    const reqs: StaffingRequirement[] = flights.map((f) => ({
+      id: `r-${f.id}`, flight_id: f.id, role: "Profiling", baseline_requirement: needEach, additional_requirement: 0,
+      total_requirement: needEach, source: "fixed_rule", reasoning: "", needs_configuration: false,
+    }));
+    const demandByDay = Object.fromEntries(DAYS.map((d) => [d, aggregateDailyDemand(d, flights, reqs)]));
+    return { pool, flights, demandByDay };
+  }
+
+  function runTwoBank(size: number, needEach: number, capPacing: boolean) {
+    const { pool, demandByDay } = twoBankWeek(size, needEach);
+    return generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, WEEK, new Map(), { caps: CAPS, incomingStreakByEmployee: new Map(), capPacing });
+  }
+
+  it("7 members, 2 needed per bank (42h cap -> 4 workdays/member -> 28 legal person-days, exactly enough for 2 morning + 2 evening every day, but not for the old per-cluster split's double-counted 2+2+2=6/day): pacing is active and covers BOTH banks in full every day", () => {
+    // With capPacing off, this shape's lockstep collapse (the ORIGINAL
+    // 2026-09-25 bug — see TEST 1) swamps the signal this test targets, so
+    // it is not used as the "before" comparison here: the old per-cluster
+    // share formula this test pins down no longer exists in the codebase to
+    // run standalone (it was replaced, not feature-flagged) — this test
+    // instead pins the CORRECT fixed-point behaviour directly.
+    const after = runTwoBank(7, 2, true);
+    const codesOn = (r: ReturnType<typeof runTwoBank>, day: string, code: string) => r.generatedShiftsByDay[day].filter((g) => g.shiftCode === code).length;
+    // Every day, the evening (AP01) bank is fully covered...
+    expect(DAYS.map((d) => codesOn(after, d, "AP01"))).toEqual(DAYS.map(() => 2));
+    // ...and so is the morning (MT03) bank, with no more than the 2 distinct
+    // people its own peak needs (the old formula wasted 3-5 MT03 shifts/day
+    // here chasing the double-counted Σ-peaks weight — see this describe
+    // block's doc comment).
+    for (const d of DAYS) {
+      const morningAssignments = after.generatedShiftsByDay[d].filter((g) => g.shiftCode === "MT03");
+      const morningWorkers = new Set(morningAssignments.map((g) => g.employeeId));
+      expect(morningWorkers.size, d).toBe(2);
+      expect(morningAssignments.length, d).toBe(2); // no duplicate roster rows for a shared-group employee
+    }
+    // 28 person-days total (7 members x 4 legal workdays), fully spent on
+    // real coverage rather than any wasted on an already-satisfied bank.
+    const total = DAYS.reduce((n, d) => n + after.generatedShiftsByDay[d].length, 0);
+    expect(total).toBe(28);
+    // No conflict ever reports the double-counted old peak (2+2+2=6) as this
+    // population's need — there is none here (full coverage), but a real
+    // per-window shortfall must still report its own window's real 2.
+    for (const c of after.conflicts) expect(c.needed).toBe(2);
+  });
+
+  it("no double-booking side effect: nobody is assigned twice into generatedShiftsByDay for a day their one shift covers two clusters, and their hours are counted exactly once", () => {
+    const after = runTwoBank(7, 2, true);
+    for (const day of DAYS) {
+      const ids = after.generatedShiftsByDay[day].map((g) => g.employeeId);
+      expect(new Set(ids).size, day).toBe(ids.length); // no employee appears twice for the same day
+    }
+  });
+
+  it("no regression: a team whose demand is UNDER capacity keeps its exact pre-existing (non-paced) two-cluster-per-code behaviour, byte-identical", () => {
+    // 12 members, 2 needed per bank: capacity comfortably covers demand, so pacing stays inactive and this is the untouched greedy path — must be byte-for-byte unaffected by this fix.
+    const before = runTwoBank(12, 2, false);
+    const after = runTwoBank(12, 2, true);
+    expect(after).toEqual(before);
+  });
+
+  it("no regression: the real 2026-10-05 stress week never drops a whole specialized team to zero on any day (the ORIGINAL lockstep bug this fix must not reintroduce)", () => {
+    const plan = stressPlan(true);
+    const profIds = new Set(EMPLOYEES.filter((e) => e.assignment === "Profiling").map((e) => e.id));
+    const mesureIds = new Set(EMPLOYEES.filter((e) => e.assignment === "Mesure").map((e) => e.id));
+    for (const day of DAYS) {
+      expect(countOn(plan.generatedShiftsByDay, day, profIds), `Profiling ${day}`).toBeGreaterThan(0);
+      expect(countOn(plan.generatedShiftsByDay, day, mesureIds), `Mesure ${day}`).toBeGreaterThan(0);
+    }
+  });
+});

@@ -2138,3 +2138,136 @@ and 15h rest (tested on the whole stress week).
   member covers only when their own plan has slack.
 - **No cross-week pacing.** The plan covers one displayed week. It uses the
   incoming streak, but does not reserve capacity for the next week.
+
+## 2026-09-29 addendum: coverage-group allocation — the paced day's own cluster split was double-counting shared-shift demand
+
+### The investigation
+
+Regenerating the plan after the 2026-09-25 cap-paced-rest fix, Profiling/
+Mesure `unfilled_duty` gaps still existed on both real fixtures (stress week:
+12 gap requirements / 16 unfilled seats; heavy week: 16 / 27). Tracing one —
+Monday Mesure, the real 2026-10-05 stress week — through demand, eligible
+agents, shifts, and final duty assignment:
+
+- **Demand**: 3 requirements that day — two morning departures (09:15,
+  12:00; windows 07:45-09:15 and 10:30-12:00, both fully inside the MT03
+  catalog code's 05:45-14:45 span) and one evening departure (20:00; window
+  19:00-20:00, only inside AP01's 13:45-22:45 span, disjoint from MT03).
+  Each needs 4.
+- **Eligible agents**: the 12-member Mesure team; the week is
+  capacity-constrained (cap-paced rest active), so only 7 are offered work
+  that Monday.
+- **Shifts generated**: 5 got MT03, 2 got AP01.
+- **Duty assignment**: both morning requirements got 4/4 (Stage 9 correctly
+  reuses the same MT03 workers across both non-overlapping windows — one of
+  the 5 sits idle). The evening requirement got only 2/4 — there were only 2
+  AP01-covering workers to begin with, so no amount of duty-assignment
+  cleverness could cover it.
+
+**Conclusion: a bug, not a real shortage.** `assignPacedProfilingMesureDay`
+(specialized-team-generation.ts) split each day's preferred/drawn-in workers
+across demand CLUSTERS in proportion to each cluster's own raw peak
+(`allocateProportionally(preferred.length, clusters.map(peak), ...)`) — so
+the two MT03-covered morning clusters, worth 4+4=8 of "weight", drew roughly
+5 of the day's 7 available workers, leaving only 2 for the evening cluster's
+own weight of 4. But the two morning clusters do NOT need 8 distinct
+people — Stage 9 already reuses one person across both (as the duty
+assignment above confirms) — so at most 4 morning-covering workers can ever
+be used no matter how many are assigned. The other 1-3 morning-shift workers
+the split produced were pure waste: capacity `assignPacedProfilingMesureDay`
+itself had already decided to spend on Monday, spent on a cluster with no
+way to use it, instead of the evening cluster that had real, usable demand
+for it.
+
+### The fix — `groupCoverableClusters` (`specialized-team-generation.ts`)
+
+Before splitting a day's workers across clusters, clusters are grouped by
+which single catalog code is EACH cluster's own top-ranked compatible pick
+— clusters sharing a code go in one group, sized by the group's LARGEST
+single cluster peak (not their sum), since one person on that one
+continuous shift genuinely covers every cluster in the group. A cluster no
+code covers at all keeps its own singleton group, unresolvable by pacing,
+exactly as before.
+
+`assignPacedProfilingMesureDay` walks by GROUP instead of by raw cluster:
+the day's preferred workers are split proportional to each group's real
+(deduped) headcount, so a group spanning several clusters no longer draws a
+share for each one. The split is NOT capped at a group's own headcount,
+though (`allocateProportionally`'s `limits`): the day's `preferred` set size
+itself still comes from the coarser, un-deduped weekly plan (see "what it
+tried and reverted" below), so on a day where the corrected need is even
+lower than that, any true surplus is still placed somewhere (spread
+proportionally to the same weights) rather than silently benched — leaving
+a planned-to-work member unplaced would understate this team's real worked
+days against the weekly pacing plan's own target.
+
+Two callers previously assumed exactly one `RepairSlotAssignment` per
+`(employee, day)` in `dayAssignments`: usageHours accumulation and the final
+`generatedShiftsByDay` construction. Once a shared-group employee legitimately
+appears once per group's cluster (correct for the hard-cap-repair pass's own
+coverage counting, which needs one entry per group), both were changed to
+dedupe by employee before summing hours / emitting a roster row, so a
+grouped employee's one real shift is counted once, not once per cluster it
+happens to cover.
+
+### What it tried and reverted
+
+The same double-counting exists in `planProfilingMesurePacing`'s WEEKLY
+demand estimate (`Σ cluster peaks`, used for the capacityDays-vs-demandDays
+decision of whether pacing activates for the team at all, and how capacity
+is spread across the week). Deduping it there too was tried first and
+caused a regression: on the real heavy week, it lowered Profiling's
+estimated weekly demand just enough to cross under its capacity, flipping
+pacing OFF entirely — reverting that team to the un-staggered greedy, which
+reintroduced the ORIGINAL 2026-09-25 lockstep bug (Profiling collapsed to
+0/12 on Sunday). The weekly estimate deliberately stays Σ-peaks-based:
+overestimating weekly demand a little only means more staggering than
+strictly needed (safe); underestimating it disables the staggering that
+prevents lockstep (not safe). Only the INTRA-day split — which cluster
+today's already-decided headcount goes to — uses the deduped grouping.
+
+### Measured results (real fixtures, default caps, full pipeline)
+
+|                          | before | after |
+| ------------------------ | -----: | ----: |
+| Stress week gap requirements | 12 | 14 |
+| Stress week unfilled seats    | 16 | 15 |
+| Heavy week gap requirements   | 16 | 14 |
+| Heavy week unfilled seats     | 27 | 24 |
+
+Gap *requirement* count can go up (a shortfall that used to land entirely on
+one cluster is now spread — e.g. 2 clusters short by 1 instead of 1 cluster
+short by 2), same trade-off already documented above for the 2026-09-25
+fix's own day-level spreading. Total unfilled seats — the number that
+matters for whether the airport's real demand gets covered — improves on
+both fixtures. Profiling's per-day headcount pattern is materially
+unchanged from before this fix (confirmed on both fixtures; the heavy week
+moved by at most 1 on one day, a genuine rebalancing, not a stranding
+regression).
+
+### Tests
+
+`tests/cap-paced-rest.test.ts`, TEST 7 (4 tests): a constructed 7-member,
+two-morning-bank-plus-one-evening-bank team where 28 legal person-days is
+exactly enough for 2+2 every day but not for the old formula's
+double-counted 2+2+2=6 — after the fix, both banks are fully covered every
+day with no duplicate roster rows; no regression when a team's demand is
+comfortably under capacity (byte-identical, pacing stays inactive); the real
+stress week's Profiling/Mesure headcount never collapses to zero on any day
+(guards against reintroducing the reverted regression above).
+
+### What it cannot do (known limitations, stated plainly)
+
+- **Intrinsic shortages are unchanged.** When the day's TRUE distinct need
+  (post-grouping) exceeds the team's paced headcount for that day, the
+  shortfall is real and this fix does not create capacity that isn't there
+  — it only stops discarding capacity onto a cluster that cannot use it.
+- **Grouping is by top-ranked code only.** Two clusters that could BOTH be
+  covered by some second-choice code, but whose own top picks differ, are
+  not grouped — a rare, more conservative miss (worst case: back to the
+  pre-fix split for that pair), never an incorrect merge.
+- **The weekly estimate still double-counts.** As documented above, this is
+  deliberate (the safe direction for the lockstep-avoidance decision), but
+  it means `preferredWorkDays` targets can still exceed a day's real
+  distinct need — this fix places the resulting surplus rather than
+  eliminating it.

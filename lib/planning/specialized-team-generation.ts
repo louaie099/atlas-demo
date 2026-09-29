@@ -354,10 +354,80 @@ function repairReasonFor(repairs: readonly HardCapRepair[] | undefined, team: st
 }
 
 /**
+ * One day's demand clusters, grouped by which single catalog shift code
+ * would cover them — the cap-paced planner's unit of "distinct people
+ * needed" (see this function's call sites' doc comments for the bug this
+ * fixes). Two clusters share a group when the SAME code is each cluster's
+ * own top-ranked compatible pick: a single person on that one continuous
+ * shift genuinely covers both non-overlapping windows (duty-generation,
+ * Stage 9, already reuses one working person across every requirement
+ * window their real shift spans — see duty-generation.ts's own busy-window
+ * accumulation), so the group's real headcount need is the LARGEST single
+ * cluster peak in it, not their sum. A cluster whose window no catalog code
+ * covers at all gets its own singleton group (code: null) — an honest,
+ * unresolvable-by-pacing shortfall, unchanged from before. Groups are
+ * returned in the day's chronological order (by their earliest cluster).
+ */
+interface ClusterCoverageGroup {
+  clusterIndices: number[];
+  window: { start: string; end: string };
+  headcount: number;
+}
+
+function groupCoverableClusters(
+  clusters: { start: string; end: string; peak: number }[],
+  minimumRestHours: number,
+  preferExtended: boolean,
+  date: string
+): ClusterCoverageGroup[] {
+  const byCode = new Map<string, number[]>();
+  const singles: number[] = [];
+  clusters.forEach((c, i) => {
+    const top = selectCompatibleShiftCodes(c.start, c.end, null, null, minimumRestHours, true, preferExtended, date)[0];
+    if (!top) {
+      singles.push(i);
+      return;
+    }
+    byCode.set(top.code, [...(byCode.get(top.code) ?? []), i]);
+  });
+  const groups: ClusterCoverageGroup[] = [];
+  for (const idxs of byCode.values()) {
+    groups.push({
+      clusterIndices: idxs,
+      window: {
+        start: idxs.map((i) => clusters[i].start).sort()[0],
+        end: idxs.map((i) => clusters[i].end).sort().slice(-1)[0],
+      },
+      headcount: Math.max(...idxs.map((i) => clusters[i].peak)),
+    });
+  }
+  for (const i of singles) groups.push({ clusterIndices: [i], window: { start: clusters[i].start, end: clusters[i].end }, headcount: clusters[i].peak });
+  groups.sort((a, b) => Math.min(...a.clusterIndices) - Math.min(...b.clusterIndices));
+  return groups;
+}
+
+/**
  * Estimated hours of one covering shift on a Profiling/Mesure day, for the
  * cap-paced rest planner: the peak-weighted mean duration of each demand
  * cluster's top-ranked compatible catalog code (no prior-day constraint).
  * 0 when no cluster has any compatible code (nobody could cover that day).
+ *
+ * Deliberately still keyed on raw clusters (Σ peaks), NOT
+ * groupCoverableClusters' deduped headcount: this feeds
+ * planProfilingMesurePacing's WEEKLY capacityDays-vs-demandDays decision
+ * (whether pacing/staggering activates for the team AT ALL) and its
+ * across-week distribution — a different question from "how many DISTINCT
+ * people does today need," which is what groupCoverableClusters answers
+ * for assignPacedProfilingMesureDay's per-day split. Deduping here too was
+ * tried and caused a regression: it can lower a team's estimated weekly
+ * demand just enough to cross under its capacity, flipping pacing OFF
+ * entirely for a team that still needs the across-week staggering to avoid
+ * the ORIGINAL lockstep bug (sortByLeastUsedFirst's near-uniform hours
+ * growth hitting the hard cap for the whole team on the same day near the
+ * week's end) — see docs/known-limitations/roster-planning-vs-duty-
+ * allocation.md's 2026-09-25 section. Overestimating weekly demand a
+ * little is the safe direction (more staggering than strictly needed);
+ * underestimating it is not (reverts to the un-staggered greedy).
  */
 function estimateClusterShiftHours(clusters: { start: string; end: string; peak: number }[], minimumRestHours: number, preferExtended: boolean, date: string): number {
   let weight = 0;
@@ -387,7 +457,9 @@ function planProfilingMesurePacing(
   for (const day of daysOrder) {
     const clusters = demandClustersForRole(demandByDay[day], team);
     const est = estimateClusterShiftHours(clusters, minimumRestHours, preferExtended, flightDateFor(weekStart, day));
-    // One member covers one cluster per day, so a day needs Σ peaks distinct people.
+    // One member covers one cluster per day, so a day needs Σ peaks distinct
+    // people — see this function's doc comment on why this stays
+    // Σ-peaks-based rather than switching to groupCoverableClusters' dedup.
     demand.push(est > 0 ? clusters.reduce((n, c) => n + c.peak, 0) : 0);
     hours.push(est);
   }
@@ -407,6 +479,15 @@ function planProfilingMesurePacing(
  * cluster (index-aligned), who was assigned and who was cap-excluded while
  * walking for it. Only ORDER and the held-back set come from the plan:
  * every assignment is made by the unchanged assignPoolToWindow.
+ *
+ * Walks by COVERAGE GROUP (groupCoverableClusters), not by raw cluster: two
+ * clusters the same catalog code covers (e.g. a morning and a mid-morning
+ * bank both inside one MT03 shift) are walked ONCE and share the resulting
+ * assigned set, rather than each independently claiming its own peak's
+ * worth of preferred/drawn-in people. Before this, a day's Σ-of-all-peaks
+ * share split starved a later, genuinely DISTINCT-shift-needing cluster
+ * (e.g. an evening AP01 bank) of people who were really only needed once
+ * for the earlier, already-double-counted morning banks.
  */
 function assignPacedProfilingMesureDay(
   pool: Employee[],
@@ -430,20 +511,36 @@ function assignPacedProfilingMesureDay(
     usageHours
   );
   const offered = new Set([...preferredLeft, ...drawInLeft].map((e) => e.id));
-  const out = clusters.map(() => ({ assigned: [] as { employeeId: string; shiftCode: string }[], capExcluded: [] as { employeeId: string; reason: HardCapExclusionReason }[] }));
-  const walk = (clusterIndex: number, from: Employee[], headcount: number) => {
+  const groups = groupCoverableClusters(clusters, minimumRestHours, preferExtended, date);
+  const groupOut = groups.map(() => ({ assigned: [] as { employeeId: string; shiftCode: string }[], capExcluded: [] as { employeeId: string; reason: HardCapExclusionReason }[] }));
+  const walk = (groupIndex: number, from: Employee[], headcount: number) => {
     if (headcount <= 0 || from.length === 0) return;
-    const r = assignPoolToWindow(from, clusters[clusterIndex], headcount, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
+    const r = assignPoolToWindow(from, groups[groupIndex].window, headcount, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
     const taken = new Set(r.assigned.map((a) => a.employeeId));
-    out[clusterIndex].assigned.push(...r.assigned);
-    for (const x of r.capExcluded) if (!out[clusterIndex].capExcluded.some((y) => y.employeeId === x.employeeId)) out[clusterIndex].capExcluded.push(x);
+    groupOut[groupIndex].assigned.push(...r.assigned);
+    for (const x of r.capExcluded) if (!groupOut[groupIndex].capExcluded.some((y) => y.employeeId === x.employeeId)) groupOut[groupIndex].capExcluded.push(x);
     preferredLeft = preferredLeft.filter((e) => !taken.has(e.id));
     drawInLeft = drawInLeft.filter((e) => !taken.has(e.id));
   };
-  // Ties rotate with the day so no single cluster always gets the spare unit.
-  const shares = allocateProportionally(preferred.length, clusters.map((c) => c.peak), clusters.map((c) => c.peak), dayIndex);
-  clusters.forEach((_, k) => walk(k, preferredLeft, shares[k]));
-  clusters.forEach((c, k) => walk(k, [...preferredLeft, ...drawInLeft], c.peak - out[k].assigned.length));
+  // Ties rotate with the day so no single group always gets the spare unit.
+  // Weighted by each group's real (deduped) headcount need so a group
+  // spanning several clusters no longer draws a share for each cluster it
+  // covers — but NOT capped at that headcount (unlike a plain per-cluster
+  // split): the day's `preferred` set was already sized by the (necessarily
+  // coarser, Σ-raw-peaks) weekly plan, so on a day where the true distinct
+  // need is even lower than that, the honest leftover still has to go
+  // somewhere today rather than being silently benched — leaving preferred
+  // members unplaced would understate this team's real worked days against
+  // the weekly pacing plan's own target. Any true surplus is spread
+  // proportionally to the same weights, same as the shortfall itself.
+  const shares = allocateProportionally(preferred.length, groups.map((g) => g.headcount), groups.map(() => preferred.length), dayIndex);
+  groups.forEach((_, k) => walk(k, preferredLeft, shares[k]));
+  groups.forEach((g, k) => walk(k, [...preferredLeft, ...drawInLeft], g.headcount - groupOut[k].assigned.length));
+
+  const out = clusters.map(() => ({ assigned: [] as { employeeId: string; shiftCode: string }[], capExcluded: [] as { employeeId: string; reason: HardCapExclusionReason }[] }));
+  groups.forEach((g, k) => {
+    for (const ci of g.clusterIndices) out[ci] = groupOut[k];
+  });
   return { perCluster: out, heldBack: pool.filter((e) => !offered.has(e.id)).map((e) => e.id) };
 }
 
@@ -562,7 +659,16 @@ export function generateProfilingMesureShifts(
       });
 
       teamAssignmentsByDay[day] = dayAssignments;
-      for (const a of dayAssignments) {
+      // A cap-paced coverage group spanning multiple clusters (see
+      // assignPacedProfilingMesureDay) puts the SAME employee+shiftCode into
+      // dayAssignments once per covered cluster (one groupKey each, all
+      // legitimately counting toward that cluster's own coverage) — dedupe
+      // by employee here so their one real shift's hours are only counted
+      // once (every duplicate entry for a given employee this day shares
+      // the same shiftCode, so which one is kept doesn't matter).
+      const uniqueDayAssignments = new Map<string, RepairSlotAssignment>();
+      for (const a of dayAssignments) uniqueDayAssignments.set(a.employeeId, a);
+      for (const a of uniqueDayAssignments.values()) {
         usageHours.set(a.employeeId, (usageHours.get(a.employeeId) ?? 0) + getShiftDurationHours(a.shiftCode, date));
       }
 
@@ -601,7 +707,13 @@ export function generateProfilingMesureShifts(
 
     for (const day of daysOrder) {
       if (!generatedShiftsByDay[day]) generatedShiftsByDay[day] = [];
+      // Same dedupe as usageHours above: a coverage-group employee appears
+      // once per cluster's groupKey in finalAssignmentsByDay, but is one
+      // real person on one real shift — exactly one roster row per day.
+      const seen = new Set<string>();
       for (const a of finalAssignmentsByDay[day] ?? []) {
+        if (seen.has(a.employeeId)) continue;
+        seen.add(a.employeeId);
         const g: GeneratedShiftAssignment = { employeeId: a.employeeId, dayOfWeek: day, shiftCode: a.shiftCode, coversRoles: [team] };
         const reason = repairReasonFor(teamRepairs, team, a.employeeId, day);
         if (reason) g.hardCapRepairReason = reason;
