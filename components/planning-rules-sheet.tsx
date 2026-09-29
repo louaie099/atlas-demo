@@ -121,6 +121,7 @@ export function PlanningRulesSheet({
             normalWeeklyOffDays: rules.normalWeeklyOffDays,
             normalWeeklyWorkDays: rules.normalWeeklyWorkDays,
             normalOffDaysConsecutive: rules.normalOffDaysConsecutive,
+            minimumOffDaysPerPlanningWeek: rules.minimumOffDaysPerPlanningWeek,
             renfortWeeklyOffDays: rules.renfortWeeklyOffDays,
             maxConsecutiveOffDays: rules.maxConsecutiveOffDays,
             maximumAverageWeeklyWorkingHours: rules.maximumAverageWeeklyWorkingHours,
@@ -169,13 +170,27 @@ export function PlanningRulesSheet({
           <RuleRow label="Normal work days per week" severity={sev.normalWeeklyWorkDays}>
             <NumberField value={rules.normalWeeklyWorkDays} onChange={(v) => set("normalWeeklyWorkDays", v ?? rules.normalWeeklyWorkDays)} />
           </RuleRow>
-          <RuleRow label="Normal OFF days per week" severity={sev.normalWeeklyOffDays}>
+          <RuleRow
+            label="Minimum OFF days per planning week"
+            severity={sev.minimumOffDaysPerPlanningWeek}
+            hint="A FLOOR: how many OFF days must be granted, at minimum, in every Monday-Sunday planning week. Applies to the flexible pool, Profiling, Mesure and foreign-company teams (not the fixed JR → NT → OFF → OFF cycle). A week below it is flagged as a hard violation."
+          >
+            <NumberField
+              value={rules.minimumOffDaysPerPlanningWeek}
+              onChange={(v) => set("minimumOffDaysPerPlanningWeek", v ?? rules.minimumOffDaysPerPlanningWeek)}
+            />
+          </RuleRow>
+          <RuleRow
+            label="Normal OFF days per week"
+            severity={sev.normalWeeklyOffDays}
+            hint="The normal TARGET when there is no shortage — usually equal to or above the minimum above, never the floor itself."
+          >
             <NumberField value={rules.normalWeeklyOffDays} onChange={(v) => set("normalWeeklyOffDays", v ?? rules.normalWeeklyOffDays)} />
           </RuleRow>
           <RuleRow
             label="OFF days scheduled consecutively"
             severity={sev.normalOffDaysConsecutive}
-            hint="Normal automatic flexible-ACE generation must place the normal OFF pair together (OO WWWWW, W OO WWWW, ...) — it is never silently split just to improve coverage. A genuine shortage that would require splitting surfaces as an honest gap for a human to approve (Find Agent), not an automatic override."
+            hint="Whether this week's OFF days (however many — never fewer than the minimum) must form ONE consecutive block (OO WWWWW, W OO WWWW, ...). They are never silently split, and never cut below the minimum, just to improve coverage. A genuine shortage that would require either surfaces as an honest gap for a human to approve (Find Agent), not an automatic override."
           >
             <label className="flex items-center gap-1.5 text-sm">
               <input

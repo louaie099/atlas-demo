@@ -275,10 +275,13 @@ describe("full pipeline — a normal flexible ACE gets 5 WORK + 2 CONSECUTIVE OF
 
       // The old Stage 6 (bias off) leaves at least one ACE with a split OFF block.
       expect(aces.some((a) => !isFiveWorkTwoConsecutiveOff(patternFor(before, a.id)))).toBe(true);
-      expect(before.issues.filter((i) => i.type === "separated_off_days").length).toBeGreaterThan(0);
+      // OFF/OFF phase 1 (2026-09-29): with normal_off_days_consecutive on (CONFIG), a
+      // generation-driven employee's split block is now the HARD
+      // `off_days_not_consecutive` rather than the soft `separated_off_days`.
+      expect(before.issues.filter((i) => i.type === "off_days_not_consecutive").length).toBeGreaterThan(0);
 
       for (const a of aces) expect(isFiveWorkTwoConsecutiveOff(patternFor(after, a.id))).toBe(true);
-      expect(after.issues.filter((i) => i.type === "separated_off_days")).toHaveLength(0);
+      expect(after.issues.filter((i) => i.type === "separated_off_days" || i.type === "off_days_not_consecutive")).toHaveLength(0);
 
       // Coverage: never worse than before (only Profiling — unqualified — may stay unfilled).
       const unfilled = (p: typeof after) => p.issues.filter((i) => i.type === "unfilled_duty");
@@ -381,8 +384,21 @@ describe("separated OFF is no longer the normal-case outcome — but stays legal
       const after = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, "W", weekStart);
       const count = (p: typeof after, type: string) => p.issues.filter((i) => i.type === type).length;
 
-      expect(count(before, "separated_off_days")).toBeGreaterThan(0);
-      expect(count(after, "separated_off_days") * 4).toBeLessThanOrEqual(count(before, "separated_off_days"));
+      // OFF/OFF phase 1 (2026-09-29): a flexible ACE's split block is now the HARD
+      // `off_days_not_consecutive` (CONFIG has normal_off_days_consecutive on);
+      // either type counts as the split this fix is about. The redesigned check
+      // also looks at split weeks with MORE than normal_weekly_off_days OFF days
+      // (the old one bailed out unless the count was exact); those are outside
+      // what this Stage 6 fix measured, so only exact-count splits are counted
+      // here, exactly as before.
+      const split = (p: typeof after) =>
+        p.issues.filter(
+          (i) =>
+            (i.type === "separated_off_days" || i.type === "off_days_not_consecutive") &&
+            (i.description.match(/OFF days \((.*?)\)/)?.[1].split(", ").length ?? 0) === CONFIG.normal_weekly_off_days
+        ).length;
+      expect(split(before)).toBeGreaterThan(0);
+      expect(split(after) * 4).toBeLessThanOrEqual(split(before));
       expect(count(after, "unfilled_duty")).toBeLessThanOrEqual(count(before, "unfilled_duty"));
       expect(count(after, "rest_violation")).toBe(0);
 

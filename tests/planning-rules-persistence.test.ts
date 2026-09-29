@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { loadLaborRules, saveLaborRuleEdit, resolveEffectiveConfig, loadFatigueConfig, saveFatigueConfig } from "../lib/planning/rules-service";
-import { DEFAULT_LABOR_RULES, resolveDefaultLaborRules } from "../lib/labor-rules";
+import { DEFAULT_LABOR_RULES, resolveDefaultLaborRules, LABOR_RULE_SEVERITY } from "../lib/labor-rules";
+import { buildConfigFromResolvedRules } from "../lib/seed-data";
 import { DEFAULT_FATIGUE_CONFIG } from "../lib/fatigue-config";
 
 /**
@@ -134,6 +135,60 @@ describe("Planning Rules persistence (lib/planning/rules-service.ts)", () => {
     const resolved = resolveDefaultLaborRules("2026-06-01", await loadLaborRules(supabase));
     expect(resolved).not.toHaveProperty("hardWeeklyHoursCap");
     expect(await resolveEffectiveConfig(supabase, "2026-06-01")).not.toHaveProperty("hard_weekly_hours_cap");
+  });
+
+  it("OFF/OFF phase 1: minimumOffDaysPerPlanningWeek defaults to 2 (HARD) and round-trips saveLaborRuleEdit -> loadLaborRules -> resolveDefaultLaborRules -> buildConfigFromResolvedRules, independently of normalWeeklyOffDays", async () => {
+    const defaults = resolveDefaultLaborRules();
+    expect(defaults.minimumOffDaysPerPlanningWeek).toBe(2);
+    expect(defaults.minimumOffDaysPerPlanningWeekSource).toBe("confirmed_management_policy");
+    expect(LABOR_RULE_SEVERITY.minimumOffDaysPerPlanningWeek).toBe("hard");
+    expect(buildConfigFromResolvedRules(defaults).minimum_off_days_per_planning_week).toBe(2);
+
+    const supabase = new FakeSupabase() as any;
+    // Edit ONLY the floor: the soft normal target must not move with it.
+    await saveLaborRuleEdit(supabase, { minimumOffDaysPerPlanningWeek: 1 }, "2026-06-01");
+    let rows = await loadLaborRules(supabase);
+    expect(rows[rows.length - 1].minimumOffDaysPerPlanningWeek).toEqual({ value: 1, source: "confirmed_management_policy" });
+    let resolved = resolveDefaultLaborRules("2026-06-01", rows);
+    expect(resolved.minimumOffDaysPerPlanningWeek).toBe(1);
+    expect(resolved.normalWeeklyOffDays).toBe(2);
+    let config = buildConfigFromResolvedRules(resolved);
+    expect(config.minimum_off_days_per_planning_week).toBe(1);
+    expect(config.normal_weekly_off_days).toBe(2);
+
+    // Edit ONLY the normal target: the floor edited above must survive.
+    await saveLaborRuleEdit(supabase, { normalWeeklyOffDays: 3 }, "2026-07-01");
+    rows = await loadLaborRules(supabase);
+    resolved = resolveDefaultLaborRules("2026-07-01", rows);
+    expect(resolved.normalWeeklyOffDays).toBe(3);
+    expect(resolved.minimumOffDaysPerPlanningWeek).toBe(1);
+    config = buildConfigFromResolvedRules(resolved);
+    expect(config.normal_weekly_off_days).toBe(3);
+    expect(config.minimum_off_days_per_planning_week).toBe(1);
+    expect((await resolveEffectiveConfig(supabase, "2026-07-01")).minimum_off_days_per_planning_week).toBe(1);
+  });
+
+  it("OFF/OFF phase 1: a row persisted BEFORE minimumOffDaysPerPlanningWeek existed resolves it to the static default (never a crash), and keeps its own edited values", async () => {
+    const supabase = new FakeSupabase() as any;
+    const { id: _id, scope: _scope, effectiveFrom: _from, effectiveTo: _to, minimumOffDaysPerPlanningWeek: _missing, ...legacyRules } = DEFAULT_LABOR_RULES[0];
+    void _id; void _scope; void _from; void _to; void _missing;
+    await supabase.from("planning_labor_rules").insert({
+      id: "legacy-row",
+      scope: {},
+      effective_from: "2026-05-01",
+      effective_to: null,
+      rules: { ...legacyRules, minimumRestHours: { value: 16, source: "confirmed_management_policy" } },
+    });
+    const resolved = resolveDefaultLaborRules("2026-05-15", await loadLaborRules(supabase));
+    expect(resolved.minimumRestHours).toBe(16);
+    expect(resolved.minimumOffDaysPerPlanningWeek).toBe(2);
+    expect(resolved.minimumOffDaysPerPlanningWeekSource).toBe("confirmed_management_policy");
+
+    // Editing on top of the legacy row closes it and carries the floor forward explicitly.
+    await saveLaborRuleEdit(supabase, { minimumOffDaysPerPlanningWeek: 3 }, "2026-06-01");
+    const after = resolveDefaultLaborRules("2026-06-01", await loadLaborRules(supabase));
+    expect(after.minimumOffDaysPerPlanningWeek).toBe(3);
+    expect(after.minimumRestHours).toBe(16);
   });
 
   it("fatigue config: empty table falls back to DEFAULT_FATIGUE_CONFIG (disabled); saving persists and resolveEffectiveConfig reflects it", async () => {

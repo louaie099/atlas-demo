@@ -15,12 +15,20 @@ const WARNING_LABELS: Partial<Record<PlanIssueType, string>> = {
   consecutive_off_violation: "Consecutive-OFF violation",
   cross_week_continuity_uncertain: "Cross-week continuity uncertain",
   separated_off_days: "Separated OFF days (recommendation)",
+  insufficient_off_days: "Below minimum OFF days (hard)",
+  off_days_not_consecutive: "OFF days not consecutive (hard)",
   consecutive_work_history_unknown: "Consecutive-day history unknown (info)",
   roster_target_shortfall: "Below own roster target (recommendation)",
 };
 
 function issueTone(type: PlanIssueType): "bad" | "warn" {
-  return type === "rest_violation" || type === "weekly_hours_violation" || type === "consecutive_off_violation" ? "bad" : "warn";
+  return type === "rest_violation" ||
+    type === "weekly_hours_violation" ||
+    type === "consecutive_off_violation" ||
+    type === "insufficient_off_days" ||
+    type === "off_days_not_consecutive"
+    ? "bad"
+    : "warn";
 }
 
 /**
@@ -74,6 +82,8 @@ export function SummaryDrilldownSheet({
     "consecutive_off_violation",
     "cross_week_continuity_uncertain",
     "separated_off_days",
+    "insufficient_off_days",
+    "off_days_not_consecutive",
     "consecutive_work_history_unknown",
     "roster_target_shortfall",
   ];

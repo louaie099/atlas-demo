@@ -79,16 +79,18 @@ describe("checkOffDaysSeparated / checkSeparatedOffDays (Part 2 — soft consecu
     expect(checkSeparatedOffDays(employee, DAYS, CONFIG)).toBeNull();
   });
 
-  it("flags (but never blocks) a legal separated-OFF pattern, e.g. WORK-OFF-WORK-WORK-OFF-WORK-WORK", () => {
+  it("flags a separated-OFF pattern, e.g. WORK-OFF-WORK-WORK-OFF-WORK-WORK — only a soft recommendation when normal_off_days_consecutive is off (HARD when on: see tests/off-off-minimum-and-consecutive.test.ts)", () => {
     const pattern = ["W", "O", "W", "W", "O", "W", "W"] as const;
     const employee = makeEmployee(
       DAYS.map((d, i) => ({ day_of_week: d, shift_code: pattern[i] === "W" ? "MT01" : null, status: pattern[i] === "W" ? "working" : "off" }))
     );
-    const finding = checkOffDaysSeparated(employee, DAYS, CONFIG.normal_weekly_off_days);
+    const finding = checkOffDaysSeparated(employee, DAYS, CONFIG.minimum_off_days_per_planning_week);
     expect(finding).not.toBeNull();
     expect(finding!.offDays).toEqual(["Tuesday", "Friday"]);
-    const issue = checkSeparatedOffDays(employee, DAYS, CONFIG);
+    const issue = checkSeparatedOffDays(employee, DAYS, { ...CONFIG, normal_off_days_consecutive: false });
     expect(issue?.type).toBe("separated_off_days");
+    // OFF/OFF phase 1 (2026-09-29): with the hard recovery-block rule on (the default), the same shape is a hard finding.
+    expect(checkSeparatedOffDays(employee, DAYS, CONFIG)?.type).toBe("off_days_not_consecutive");
   });
 
   it("never flags a Transit/Leaders (fixed-cycle) employee — governed by their own confirmed rotation, not this general preference", () => {
@@ -100,11 +102,11 @@ describe("checkOffDaysSeparated / checkSeparatedOffDays (Part 2 — soft consecu
     expect(checkSeparatedOffDays(employee, DAYS, CONFIG)).toBeNull();
   });
 
-  it("does not flag an employee whose OFF-day count differs from the confirmed normal target (out of scope for this preference)", () => {
+  it("does not flag separation for an employee BELOW the minimum OFF-day floor — that root cause is checkMinimumOffDays' insufficient_off_days, never double-flagged", () => {
     const employee = makeEmployee(
       DAYS.map((d, i) => ({ day_of_week: d, shift_code: i < 6 ? "MT01" : null, status: i < 6 ? "working" : "off" })) // only 1 OFF day
     );
-    expect(checkOffDaysSeparated(employee, DAYS, CONFIG.normal_weekly_off_days)).toBeNull();
+    expect(checkOffDaysSeparated(employee, DAYS, CONFIG.minimum_off_days_per_planning_week)).toBeNull();
   });
 });
 

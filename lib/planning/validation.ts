@@ -4,7 +4,7 @@ import { flightDateFor, shiftWeek } from "../flight-date";
 import { restHoursBetween } from "../roster-generation";
 import { evaluateAverageWorkingHours } from "./average-hours";
 import { usesFixedCycleRotation } from "../teams";
-import { checkConsecutiveOffCyclic, checkOffDaysSeparated } from "./consecutive-off";
+import { checkConsecutiveOffCyclic, checkOffDaysSeparated, checkOffDaysBelowMinimum } from "./consecutive-off";
 // JR_NT_OFF_OFF_CYCLE is imported directly (not looked up per-team) because
 // every fixed-cycle team today shares this one confirmed cycle definition
 // (see lib/teams.ts's FIXED_CYCLE_TEAMS and lib/employee-generator.ts's
@@ -39,9 +39,11 @@ import { isGenerationDrivenPopulation } from "./workforce-pools";
 // "separated_off_days" is a NEW, SOFT, non-blocking recommendation (Part
 // 2 of the product owner's confirmed guidance) — distinct from the hard
 // `consecutive_off_violation` above (the unrelated max-2-consecutive-OFF
-// ceiling, unchanged). It flags a normal flexible employee whose two
-// (config.normal_weekly_off_days) OFF days in this displayed window are
-// legal but SEPARATED rather than one consecutive block — never a
+// ceiling, unchanged). It flags an employee whose OFF days (at least
+// config.minimum_off_days_per_planning_week) in this displayed window are
+// SEPARATED rather than one consecutive block, whenever that is NOT the
+// hard "off_days_not_consecutive" below (normal_off_days_consecutive off,
+// or a still-static non-fixed-cycle team) — never a
 // validation failure, just a recommendation surfaced in Plan Warnings so
 // a planner can see it and decide whether operational reality justifies
 // it (see lib/planning/consecutive-off.ts's checkOffDaysSeparated and
@@ -54,6 +56,21 @@ export type PlanIssueType =
   | "consecutive_off_violation"
   | "cross_week_continuity_uncertain"
   | "separated_off_days"
+  // OFF/OFF PHASE 1 (2026-09-29): two HARD findings for generation-driven
+  // employees (flexible pool, Profiling, Mesure, foreign-company — see
+  // workforce-pools.ts's isGenerationDrivenPopulation; fixed-cycle JR/NT/
+  // OFF/OFF teams exempt). Same treatment as the other hard labor-rule
+  // finding `consecutive_off_violation` (shown as a violation, never a
+  // recommendation), split so one root cause is never flagged twice:
+  //   - "insufficient_off_days": FEWER than config.minimum_off_days_per_
+  //     planning_week OFF days this Monday-Sunday week (checkMinimumOffDays).
+  //     Previously entirely silent (the old exactly-N bail-out below).
+  //   - "off_days_not_consecutive": the floor IS met but, with
+  //     config.normal_off_days_consecutive true, the OFF days are not ONE
+  //     consecutive (cyclic) block (checkSeparatedOffDays). With that flag
+  //     false the same shape is only the soft `separated_off_days` above.
+  | "insufficient_off_days"
+  | "off_days_not_consecutive"
   // HARD WORK CAPS (2026-09-25, hard-constraints milestone phase 1): a
   // NON-BLOCKING informational note — never a violation. Emitted once per
   // plan by generate-draft-plan.ts when some generation-driven employee's
@@ -389,23 +406,77 @@ export function checkConsecutiveOff(employee: Employee, config: Config): PlanIss
 }
 
 /**
- * SOFT recommendation (Part 2, confirmed): a normal flexible employee's
- * two OFF days are legal either way, but consecutive is preferred where
- * operationally possible. Fixed-cycle teams (Transit/Leaders/Duty
- * Officers) are excluded, exactly like checkConsecutiveOff above — their
- * own confirmed rotation shape governs them, not this general preference.
- * Never returns anything for an employee outside the confirmed
- * normal-OFF-day count (see checkOffDaysSeparated's own doc comment).
+ * Whether the OFF-day HARD rules (minimum_off_days_per_planning_week and,
+ * when enabled, normal_off_days_consecutive) apply to this employee on this
+ * window: generation-driven populations only (flexible pool, Profiling,
+ * Mesure, foreign-company — workforce-pools.ts's isGenerationDrivenPopulation,
+ * the same predicate checkRestBetweenDays already branches on), with
+ * fixed-cycle JR/NT/OFF/OFF teams exempted by the same
+ * usesFixedCycleRotation guard checkConsecutiveOff/checkSeparatedOffDays
+ * already use (isGenerationDrivenPopulation already excludes them today;
+ * the explicit guard keeps the exemption from ever depending on that).
+ * Only on a FULL 7-day Monday-Sunday planning week — the floor is defined
+ * per planning week, and the cyclic block check wraps Sunday onto Monday,
+ * which is only meaningful for the full week (same convention as
+ * checkRestBetweenDays' week-boundary pair).
+ */
+function offDayHardRulesApply(employee: Employee, daysOrder: string[]): boolean {
+  return daysOrder.length === 7 && !usesFixedCycleRotation(employee.assignment) && isGenerationDrivenPopulation(employee);
+}
+
+/**
+ * HARD (2026-09-29, OFF/OFF phase 1): a generation-driven employee must
+ * receive at least config.minimum_off_days_per_planning_week OFF days in the
+ * Monday-Sunday planning week. Before this check existed, a week giving
+ * someone only 1 (or 0) OFF days produced NO finding at all — the old
+ * separation check bailed out unless the count was exactly
+ * normal_weekly_off_days, and nothing checked a floor. This is the single
+ * owner of the "too few OFF days" root cause; checkSeparatedOffDays
+ * deliberately does not look below the floor (see checkOffDaysSeparated's
+ * doc comment), so one missing OFF day is never reported twice.
+ */
+export function checkMinimumOffDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue | null {
+  if (!offDayHardRulesApply(employee, daysOrder)) return null;
+  const finding = checkOffDaysBelowMinimum(employee, daysOrder, config.minimum_off_days_per_planning_week);
+  if (!finding) return null;
+  const which = finding.offDays.length === 0 ? "no OFF day" : `only ${finding.offDays.length} OFF day(s) (${finding.offDays.join(", ")})`;
+  return {
+    type: "insufficient_off_days",
+    employeeId: employee.id,
+    description: `${employee.name}: ${which} this planning week — below the hard minimum of ${finding.minimumOffDays} OFF days per planning week. The generator must never produce fewer; a human must restore the missing OFF day(s) or explicitly approve the exception.`,
+  };
+}
+
+/**
+ * The ONE-CONSECUTIVE-BLOCK check, for an employee whose OFF-day count
+ * already meets the floor (below it, see checkMinimumOffDays instead —
+ * never double-flagged). Fixed-cycle teams (Transit/Leaders/Duty Officers)
+ * are excluded, exactly like checkConsecutiveOff above — their own
+ * confirmed rotation shape governs them.
+ *
+ *   - Generation-driven employee, full planning week, and
+ *     config.normal_off_days_consecutive true: a split block is a HARD
+ *     `off_days_not_consecutive` violation (2026-09-29, OFF/OFF phase 1).
+ *   - Otherwise (the flag is false, or a still-static non-fixed-cycle team
+ *     such as Caisse/BCB whose weekly_shifts are its own authoritative
+ *     commitment, or a partial window): the pre-existing SOFT
+ *     `separated_off_days` recommendation — a split pattern stays valid.
  */
 export function checkSeparatedOffDays(employee: Employee, daysOrder: string[], config: Config): PlanIssue | null {
   if (usesFixedCycleRotation(employee.assignment)) return null;
   // 2026-09-29: this used to also exempt a week whose target an HOURS-based
   // cap had lowered below normal (roster-target.ts) — removed, not
   // relabeled, along with that mechanism (see hard-work-caps.ts's removal
-  // note). Every generation-driven employee's target is now unconditionally
-  // the normal one, so that exemption is no longer reachable.
-  const finding = checkOffDaysSeparated(employee, daysOrder, config.normal_weekly_off_days);
+  // note).
+  const finding = checkOffDaysSeparated(employee, daysOrder, config.minimum_off_days_per_planning_week);
   if (!finding) return null;
+  if (config.normal_off_days_consecutive && offDayHardRulesApply(employee, daysOrder)) {
+    return {
+      type: "off_days_not_consecutive",
+      employeeId: employee.id,
+      description: `${employee.name}: OFF days (${finding.offDays.join(", ")}) are split rather than one consecutive block — the hard recovery-block rule requires this planning week's OFF days to be together. A human must re-form the block or explicitly approve the exception.`,
+    };
+  }
   return {
     type: "separated_off_days",
     employeeId: employee.id,
@@ -492,6 +563,8 @@ export function validateWeeklyPlan(
     if (hoursIssue) issues.push(hoursIssue);
     const consecutiveOffIssue = checkConsecutiveOff(employee, config);
     if (consecutiveOffIssue) issues.push(consecutiveOffIssue);
+    const minimumOffIssue = checkMinimumOffDays(employee, daysOrder, config);
+    if (minimumOffIssue) issues.push(minimumOffIssue);
     const separatedOffIssue = checkSeparatedOffDays(employee, daysOrder, config);
     if (separatedOffIssue) issues.push(separatedOffIssue);
     const targetIssue = checkRosterTargetShortfall(employee, daysOrder, config, capClosedFreeDaysByEmployee?.get(employee.id));

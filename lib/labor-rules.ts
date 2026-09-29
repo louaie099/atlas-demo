@@ -82,6 +82,9 @@ export interface LaborRules {
   // maxConsecutiveWorkDays, per the 2026-09-29 correction: "5 WORK" is not
   // merely "not-2-OFF", and is a genuinely different concept from the hard
   // consecutive-work-day cap). A normal week has exactly 2 OFF/rest days.
+  // This is the SOFT normal TARGET when there is no shortage — never the
+  // hard floor, which is minimumOffDaysPerPlanningWeek below (usually equal
+  // to or below this target).
   normalWeeklyOffDays: RuleValue<number>;
   // The confirmed NORMAL weekly roster structure, part 2 of 2 — how many
   // days a normal flexible ACE works in a normal week (5). Deliberately its
@@ -95,28 +98,50 @@ export interface LaborRules {
   // per employee yet (that's future, explicitly out of scope for this
   // milestone); it exists here only so the rule is representable.
   renfortWeeklyOffDays: RuleValue<number>;
-  // The confirmed RECOVERY-BLOCK POLICY: for NORMAL automatic flexible-ACE
-  // generation, the 2 normal OFF days must be scheduled CONSECUTIVELY (a
-  // "OO WWWWW" / "W OO WWWW" / ... shape), never silently split into
-  // separated single OFF days just because that happens to improve
-  // coverage. This is a genuinely DIFFERENT concept from maxConsecutiveOffDays
-  // below (2026-09-29 correction, point 4): this field says the normal
-  // pair must be TOGETHER; maxConsecutiveOffDays says a run of OFF days
-  // must never be LONGER than some ceiling — a week could violate either
-  // one without violating the other. Engine effect: lib/planning/shift-
-  // generation.ts's generateFlexiblePoolShifts hard-excludes a flexible
-  // ACE from Stage 6 on the days inside their own planned OFF/OFF window
-  // (lib/planning/off-window.ts's planPreferredOffWindows, which already
-  // SEARCHES every candidate window position for one demand can actually
-  // support) when this is true — never a mere scoring tie-break a
-  // sufficiently-good coverage score can silently outrank. When demand
-  // genuinely cannot support ANY OFF/OFF placement without a coverage gap,
-  // that gap is reported honestly (unfilled_duty) rather than the pair
-  // being silently split — a human then explicitly APPROVES the exception
-  // by manually assigning the employee via Find Agent, exactly as this
-  // app's existing "ATLAS recommends, humans approve" convention already
-  // works for every other genuine shortage (see duty-generation.ts).
+  // The confirmed RECOVERY-BLOCK POLICY (HARD): a generation-driven
+  // employee's OFF days for the Monday-Sunday planning week — however many
+  // they receive, never fewer than minimumOffDaysPerPlanningWeek below —
+  // must form ONE consecutive block (a "OO WWWWW" / "W OO WWWW" / ...
+  // shape, evaluated cyclically so Sun+Mon counts as one block, exactly
+  // like lib/planning/consecutive-off.ts's maxConsecutiveOffCyclic), never
+  // split into separated OFF days just because that happens to improve
+  // coverage. Paired with minimumOffDaysPerPlanningWeek, this also means
+  // the automatic generator must never silently produce FEWER than
+  // minimumOffDaysPerPlanningWeek OFF days to keep the block "together" —
+  // both halves are checked by lib/planning/validation.ts
+  // (checkMinimumOffDays / checkSeparatedOffDays), for every generation-
+  // driven population (flexible pool, Profiling, Mesure, foreign-company —
+  // see lib/planning/workforce-pools.ts's isGenerationDrivenPopulation);
+  // fixed-cycle JR/NT/OFF/OFF teams are governed by their own cycle
+  // instead. When false, a split block is only a soft `separated_off_days`
+  // recommendation. This is a genuinely DIFFERENT concept from
+  // maxConsecutiveOffDays below (2026-09-29 correction, point 4): this
+  // field says the OFF days must be TOGETHER; maxConsecutiveOffDays says a
+  // run of OFF days must never be LONGER than some ceiling — a week could
+  // violate either one without violating the other. Engine effect:
+  // lib/planning/shift-generation.ts's generateFlexiblePoolShifts hard-
+  // excludes a flexible ACE from Stage 6 on the days inside their own
+  // planned OFF/OFF window (lib/planning/off-window.ts's
+  // planPreferredOffWindows) when this is true — never a mere scoring
+  // tie-break. When demand genuinely cannot support ANY OFF/OFF placement
+  // without a coverage gap, that gap is reported honestly (unfilled_duty)
+  // rather than the block being silently split — a human then explicitly
+  // APPROVES the exception by manually assigning the employee via Find
+  // Agent, exactly as this app's existing "ATLAS recommends, humans
+  // approve" convention already works for every other genuine shortage
+  // (see duty-generation.ts).
   normalOffDaysConsecutive: RuleValue<boolean>;
+  // HARD FLOOR (2026-09-29, OFF/OFF phase 1): the MINIMUM number of OFF
+  // days a generation-driven employee (flexible pool, Profiling, Mesure,
+  // foreign-company — never a fixed-cycle JR/NT/OFF/OFF team) must receive
+  // in the Monday-Sunday planning week. A genuinely distinct concept from
+  // both normalWeeklyOffDays (the SOFT normal target when there is no
+  // shortage — usually equal to or above this floor) and
+  // maxConsecutiveOffDays (a CEILING on how long one OFF run may get). A
+  // week below this floor is a hard violation, surfaced by
+  // lib/planning/validation.ts's checkMinimumOffDays as an
+  // `insufficient_off_days` PlanIssue — never silently accepted.
+  minimumOffDaysPerPlanningWeek: RuleValue<number>;
   // The confirmed rule: an employee must never have more than this many
   // CONSECUTIVE OFF days, evaluated across week boundaries (never a
   // single Monday-Sunday snapshot in isolation) — a CEILING, unrelated to
@@ -202,8 +227,8 @@ export interface LaborRules {
  * separate facts (see the module doc comment above).
  *
  * normalWeeklyOffDays (2), normalWeeklyWorkDays (5), normalOffDaysConsecutive
- * (true), renfortWeeklyOffDays (1), and maxConsecutiveOffDays (2) remain
- * confirmed. maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
+ * (true), minimumOffDaysPerPlanningWeek (2), renfortWeeklyOffDays (1), and
+ * maxConsecutiveOffDays (2) remain confirmed. maxConsecutiveOffDays governs BOTH the ordinary weekly-roster
  * consecutive-OFF check and the hard feasibility gate the Rotation
  * Feasibility Engine applies to candidate rotations (see
  * lib/rotation-feasibility.ts) — one resolved number, one source of truth,
@@ -224,6 +249,7 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     normalWeeklyOffDays: { value: 2, source: "confirmed_management_policy" },
     normalWeeklyWorkDays: { value: 5, source: "confirmed_management_policy" },
     normalOffDaysConsecutive: { value: true, source: "confirmed_management_policy" },
+    minimumOffDaysPerPlanningWeek: { value: 2, source: "confirmed_management_policy" },
     renfortWeeklyOffDays: { value: 1, source: "confirmed_management_policy" },
     maxConsecutiveOffDays: { value: 2, source: "confirmed_management_policy" },
     maximumAverageWeeklyWorkingHours: { value: 42, source: "confirmed_management_policy" },
@@ -243,6 +269,8 @@ export interface ResolvedLaborRules {
   normalWeeklyWorkDaysSource: LaborRuleSource;
   normalOffDaysConsecutive: boolean;
   normalOffDaysConsecutiveSource: LaborRuleSource;
+  minimumOffDaysPerPlanningWeek: number;
+  minimumOffDaysPerPlanningWeekSource: LaborRuleSource;
   renfortWeeklyOffDays: number;
   renfortWeeklyOffDaysSource: LaborRuleSource;
   maxConsecutiveOffDays: number;
@@ -328,6 +356,8 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     normalWeeklyWorkDaysSource: rule.normalWeeklyWorkDays.source,
     normalOffDaysConsecutive: rule.normalOffDaysConsecutive.value,
     normalOffDaysConsecutiveSource: rule.normalOffDaysConsecutive.source,
+    minimumOffDaysPerPlanningWeek: rule.minimumOffDaysPerPlanningWeek.value,
+    minimumOffDaysPerPlanningWeekSource: rule.minimumOffDaysPerPlanningWeek.source,
     renfortWeeklyOffDays: rule.renfortWeeklyOffDays.value,
     renfortWeeklyOffDaysSource: rule.renfortWeeklyOffDays.source,
     maxConsecutiveOffDays: rule.maxConsecutiveOffDays.value,
@@ -390,6 +420,7 @@ export type LaborRuleKey =
   | "normalWeeklyOffDays"
   | "normalWeeklyWorkDays"
   | "normalOffDaysConsecutive"
+  | "minimumOffDaysPerPlanningWeek"
   | "renfortWeeklyOffDays"
   | "maxConsecutiveOffDays"
   | "maximumAverageWeeklyWorkingHours"
@@ -407,6 +438,9 @@ export const LABOR_RULE_SEVERITY: Record<LaborRuleKey, RuleSeverity> = {
   // window days rather than merely penalizing the score — see this field's
   // own doc comment in the LaborRules interface above.
   normalOffDaysConsecutive: "hard",
+  // HARD floor — lib/planning/validation.ts's checkMinimumOffDays reports
+  // any generation-driven employee below it as `insufficient_off_days`.
+  minimumOffDaysPerPlanningWeek: "hard",
   renfortWeeklyOffDays: "soft",
   maxConsecutiveOffDays: "hard",
   maximumAverageWeeklyWorkingHours: "not_evaluable",

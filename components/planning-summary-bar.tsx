@@ -87,6 +87,8 @@ export function PlanningSummaryBar({
       i.type === "consecutive_off_violation" ||
       i.type === "cross_week_continuity_uncertain" ||
       i.type === "separated_off_days" ||
+      i.type === "insufficient_off_days" ||
+      i.type === "off_days_not_consecutive" ||
       i.type === "consecutive_work_history_unknown" ||
       i.type === "roster_target_shortfall"
   ).length;

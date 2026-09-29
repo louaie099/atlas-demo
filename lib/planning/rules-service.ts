@@ -33,11 +33,18 @@ interface PlanningLaborRuleRow {
 }
 
 function rowToLaborRules(row: PlanningLaborRuleRow): LaborRules {
+  // A row persisted BEFORE a RuleValue field existed (e.g.
+  // minimumOffDaysPerPlanningWeek, added 2026-09-29 OFF/OFF phase 1) has no
+  // key for it in its `rules` jsonb blob -- that field falls back to the
+  // static default rule's own value+source (never a guessed number, and
+  // never a crash in labor-rules.ts's unwrap). Every field the row DOES
+  // carry wins, so an old edit is never overwritten by a default.
   return {
     id: row.id,
     scope: row.scope,
     effectiveFrom: row.effective_from,
     effectiveTo: row.effective_to,
+    ...STATIC_DEFAULT_RULE_VALUES,
     ...row.rules,
   };
 }
@@ -46,6 +53,9 @@ function laborRulesToRow(rules: LaborRules): PlanningLaborRuleRow {
   const { id, scope, effectiveFrom, effectiveTo, ...rest } = rules;
   return { id, scope, effective_from: effectiveFrom, effective_to: effectiveTo, rules: rest };
 }
+
+/** The static default rule's RuleValue fields -- the per-field fallback rowToLaborRules applies to rows persisted before a field existed. */
+const STATIC_DEFAULT_RULE_VALUES: PlanningLaborRuleRow["rules"] = laborRulesToRow(DEFAULT_LABOR_RULES[0]).rules;
 
 /**
  * Loads every persisted LaborRules entry, oldest first. Falls back to the
@@ -143,6 +153,7 @@ export async function saveLaborRuleEdit(
     normalWeeklyOffDays: wrap(merged.normalWeeklyOffDays),
     normalWeeklyWorkDays: wrap(merged.normalWeeklyWorkDays),
     normalOffDaysConsecutive: wrap(merged.normalOffDaysConsecutive),
+    minimumOffDaysPerPlanningWeek: wrap(merged.minimumOffDaysPerPlanningWeek),
     renfortWeeklyOffDays: wrap(merged.renfortWeeklyOffDays),
     maxConsecutiveOffDays: wrap(merged.maxConsecutiveOffDays),
     maximumAverageWeeklyWorkingHours: wrap(merged.maximumAverageWeeklyWorkingHours),

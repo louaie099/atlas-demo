@@ -53,26 +53,63 @@ export interface SeparatedOffDaysFinding {
   offDays: string[];
 }
 
+/** One employee's per-day working/off status over `daysOrder` (a missing entry counts as OFF, the long-standing convention here), plus the OFF days themselves. */
+function offDayStatus(employee: Employee, daysOrder: string[]): { statusByDay: { status: "working" | "off" }[]; offDays: string[] } {
+  const statusByDay = daysOrder.map((day) => {
+    const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
+    return { status: (entry?.status ?? "off") as "working" | "off" };
+  });
+  const offDays = daysOrder.filter((_day, i) => statusByDay[i].status === "off");
+  return { statusByDay, offDays };
+}
+
+export interface InsufficientOffDaysFinding {
+  employeeId: string;
+  employeeName: string;
+  offDays: string[];
+  minimumOffDays: number;
+}
+
 /**
- * SOFT preference check (Part 2 of the product owner's confirmed
- * guidance): a normal flexible employee's `normalWeeklyOffDays` OFF days
- * should normally form ONE CONSECUTIVE block within the displayed window
- * (e.g. Sat/Sun) — but a legal SEPARATED pattern (e.g. Tue + Fri) must
- * remain fully valid, never blocked. This function only ever FLAGS, never
- * fails, that softer case — see lib/planning/validation.ts's
- * `separated_off_days` PlanIssue, wired in as a non-blocking Plan Warning
- * distinct from `consecutive_off_violation` (the unrelated, unchanged,
- * hard max-2-consecutive-OFF ceiling).
+ * HARD FLOOR check (2026-09-29, OFF/OFF phase 1): does this employee have
+ * FEWER than `minimumOffDays` (Config.minimum_off_days_per_planning_week —
+ * see lib/labor-rules.ts's minimumOffDaysPerPlanningWeek) OFF days in
+ * `daysOrder`? Population scoping (generation-driven only, fixed-cycle
+ * exempt) and the full-week requirement live in lib/planning/validation.ts's
+ * checkMinimumOffDays, not here — this is the pure counting half.
+ */
+export function checkOffDaysBelowMinimum(employee: Employee, daysOrder: string[], minimumOffDays: number): InsufficientOffDaysFinding | null {
+  const { offDays } = offDayStatus(employee, daysOrder);
+  if (offDays.length >= minimumOffDays) return null;
+  return { employeeId: employee.id, employeeName: employee.name, offDays, minimumOffDays };
+}
+
+/**
+ * ONE-CONSECUTIVE-BLOCK check: do this employee's OFF days in `daysOrder`
+ * form a single consecutive block (cyclic — Sun+Mon is one block)?
  *
- * Deliberately scoped to EXACTLY `normalWeeklyOffDays` OFF days in this
- * window: an employee with a different OFF-day count already has a
- * different, more specific finding elsewhere (an obligation shortfall,
- * an unfilled_duty, or a consecutive_off_violation) — this preference is
- * only meaningful once the normal 5-worked/`normalWeeklyOffDays`-OFF
- * shape itself is already met.
+ * 2026-09-29 (OFF/OFF phase 1) REDESIGN: this used to bail out unless the
+ * OFF-day count was EXACTLY the normal target (`offDays.length !==
+ * normalWeeklyOffDays`), so an employee with 3+ OFF days — or, combined
+ * with nothing else checking the floor, 0 or 1 — was never checked at all.
+ * Now it checks EVERY employee whose count meets the floor
+ * (`offDays.length >= minimumOffDays`, Config.minimum_off_days_per_planning_week).
+ *
+ * Deliberately NOT checked below the floor — that is not a gap: a count
+ * below the floor is reported by checkOffDaysBelowMinimum (validation.ts's
+ * `insufficient_off_days`) instead, and the two are split so ONE root
+ * cause is never double-flagged two different ways. Below the floor the
+ * root cause is "an OFF day is missing"; once it is restored, the block's
+ * shape is re-evaluated here on the corrected week. (With a floor of 2,
+ * 0 or 1 OFF day can't be "split" in any case.)
+ *
+ * Whether a finding is HARD (`off_days_not_consecutive`) or a SOFT
+ * recommendation (`separated_off_days`) is decided by validation.ts's
+ * checkSeparatedOffDays (population + Config.normal_off_days_consecutive),
+ * not here.
  *
  * Reuses maxConsecutiveOffCyclic (the same wraparound-aware run-length
- * convention as the hard check above) rather than a separate ad-hoc
+ * convention as the ceiling check below) rather than a separate ad-hoc
  * adjacency test: the OFF days are consecutive, in the cyclic sense this
  * whole module already uses, exactly when the longest OFF run equals the
  * total OFF-day count (i.e. every OFF day belongs to the same one run).
@@ -80,17 +117,13 @@ export interface SeparatedOffDaysFinding {
 export function checkOffDaysSeparated(
   employee: Employee,
   daysOrder: string[],
-  normalWeeklyOffDays: number
+  minimumOffDays: number
 ): SeparatedOffDaysFinding | null {
-  const statusByDay = daysOrder.map((day) => {
-    const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
-    return { status: (entry?.status ?? "off") as "working" | "off" };
-  });
-  const offDays = daysOrder.filter((day, i) => statusByDay[i].status === "off");
-  if (offDays.length !== normalWeeklyOffDays) return null; // out of scope for this preference — see doc comment above
+  const { statusByDay, offDays } = offDayStatus(employee, daysOrder);
+  if (offDays.length === 0 || offDays.length < minimumOffDays) return null; // below the floor: checkOffDaysBelowMinimum's finding, never double-flagged — see doc comment above
 
   const longestRun = maxConsecutiveOffCyclic(statusByDay);
-  if (longestRun >= offDays.length) return null; // already one consecutive block — compliant with the preference
+  if (longestRun >= offDays.length) return null; // already one consecutive block
 
   return { employeeId: employee.id, employeeName: employee.name, offDays };
 }

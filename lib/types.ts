@@ -387,6 +387,13 @@ export interface Config {
   // (lib/planning/off-window.ts) — a genuinely different concept from
   // max_consecutive_off_days below.
   normal_off_days_consecutive: boolean;
+  // HARD FLOOR (2026-09-29, OFF/OFF phase 1) — see lib/labor-rules.ts's
+  // minimumOffDaysPerPlanningWeek doc comment. The minimum number of OFF
+  // days every generation-driven employee must receive in the Monday-Sunday
+  // planning week; distinct from normal_weekly_off_days (soft target) and
+  // max_consecutive_off_days (ceiling on one run). Checked by
+  // lib/planning/validation.ts's checkMinimumOffDays.
+  minimum_off_days_per_planning_week: number;
   max_consecutive_off_days: number;
   renfort_weekly_off_days: number;
   // NOT YET CONFIRMED — mirrors working_hours_reference_period_days'

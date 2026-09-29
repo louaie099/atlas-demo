@@ -82,7 +82,8 @@ export function PlanningRulesBar() {
     <div className="flex flex-col items-end gap-1.5">
       <div className="flex items-center gap-2 flex-wrap justify-end">
         <p className="text-xs text-muted text-right">
-          {resolved.normalWeeklyWorkDays} WORK / {resolved.normalWeeklyOffDays} OFF{resolved.normalOffDaysConsecutive ? " together" : ""} · Min rest{" "}
+          {resolved.normalWeeklyWorkDays} WORK / {resolved.normalWeeklyOffDays} OFF{resolved.normalOffDaysConsecutive ? " together" : ""} · Min{" "}
+          {resolved.minimumOffDaysPerPlanningWeek} OFF/week · Min rest{" "}
           {resolved.minimumRestHours}h · {obligation} · Fatigue {data.fatigue.enabled ? "On" : "Off"}
         </p>
         <Button variant="ghost" onClick={() => setOpen(true)} className="!px-2 !py-1 !shadow-none text-xs underline">

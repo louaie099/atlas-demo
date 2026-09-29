@@ -46,6 +46,7 @@ export function buildConfigFromResolvedRules(resolved: ResolvedLaborRules): Conf
     normal_weekly_off_days: resolved.normalWeeklyOffDays,
     normal_weekly_work_days: resolved.normalWeeklyWorkDays,
     normal_off_days_consecutive: resolved.normalOffDaysConsecutive,
+    minimum_off_days_per_planning_week: resolved.minimumOffDaysPerPlanningWeek,
     max_consecutive_off_days: resolved.maxConsecutiveOffDays,
     renfort_weekly_off_days: resolved.renfortWeeklyOffDays,
     // HARD cap on consecutive work days (2026-09-25, hard-constraints
