@@ -14,6 +14,7 @@ import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
 import { CapPacedRestPlan, allocateProportionally, planAllowsDrawIn, planCapPacedRestDays } from "./cap-paced-rest";
+import { planDemandAwareOffWindows } from "./off-window";
 
 /**
  * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
@@ -54,6 +55,125 @@ interface PoolDayHardCaps {
 /** The streak map entering the next day: +1 for each pool member who worked today, 0 otherwise. */
 function advanceStreaks(pool: Employee[], streaks: Map<string, number>, workedIds: ReadonlySet<string>): void {
   for (const e of pool) streaks.set(e.id, nextConsecutiveWorkDayStreak(streaks.get(e.id) ?? 0, workedIds.has(e.id)));
+}
+
+/**
+ * OFF/OFF PHASE 2 (2026-09-29) — the weekly OFF-day HARD rules for the
+ * specialized generation-driven populations (Profiling, Mesure, foreign
+ * companies), resolved from Config by the caller (generate-draft-plan.ts):
+ *   - minimumOffDaysPerWeek: Config.minimum_off_days_per_planning_week (hard floor);
+ *   - normalWeeklyOffDays:   Config.normal_weekly_off_days (preferred target when demand allows);
+ *   - consecutive:           Config.normal_off_days_consecutive (one cyclic block).
+ * `priorDayOffEmployeeIds`: members KNOWN (real persisted predecessor plan
+ * only) to have been OFF the day before daysOrder[0] — the same guard
+ * planPreferredOffWindows applies to the flexible pool (a window containing
+ * daysOrder[0] would extend that real OFF run across the boundary).
+ * `windowsOut` receives every member's planned OFF window (day labels), for
+ * transparency and for callers/tests that need the plan itself.
+ *
+ * Omitted (direct unit callers) = no OFF-day planning at all — the exact
+ * pre-phase-2 behaviour, byte-for-byte.
+ */
+export interface SpecializedOffDayRules {
+  minimumOffDaysPerWeek: number;
+  normalWeeklyOffDays: number;
+  consecutive: boolean;
+  priorDayOffEmployeeIds?: ReadonlySet<string>;
+  windowsOut?: Map<string, ReadonlySet<string>>;
+}
+
+/** One (sub-)team's OFF plan: the OFF-day count targeted and, per member, the planned consecutive window. */
+interface SpecializedOffPlan {
+  offTarget: number;
+  windows: Map<string, ReadonlySet<string>>;
+  starts: Map<string, number>;
+}
+
+function byEmployeeId(a: Employee, b: Employee): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Whether a member who already works the day indices in `worked` could ALSO
+ * work day `day` and still have at least one cyclic block of `blockLength`
+ * consecutive days they do not work this week (days not yet decided count as
+ * free — they can still be left OFF). The sparse-week guard of
+ * generateProfilingMesureShifts' WEEKLY OFF BLOCK paragraph.
+ */
+function consecutiveOffBlockStillPossible(worked: ReadonlySet<number>, day: number, n: number, blockLength: number): boolean {
+  for (let start = 0; start < n; start++) {
+    let free = true;
+    for (let k = 0; k < blockLength && free; k++) {
+      const i = (start + k) % n;
+      if (i === day || worked.has(i)) free = false;
+    }
+    if (free) return true;
+  }
+  return false;
+}
+
+/**
+ * Plans a (sub-)team's weekly OFF windows from its OWN per-day required
+ * headcount — the SAME water-filling search the flexible pool uses
+ * (off-window.ts's planDemandAwareOffWindows; planPreferredOffWindows is the
+ * flexible pool's wrapper around it), fed with this team's demand shape
+ * instead of Stage 6's estimate. Only on a full 7-day planning week (the
+ * floor is defined per Monday-Sunday week — the same scope validation.ts's
+ * offDayHardRulesApply uses); null otherwise.
+ *
+ * TARGET: Config.normal_weekly_off_days when demand allows it, never below
+ * the hard floor — both lengths are tried (longest first) and the first one
+ * with the smallest estimated deficit wins, so the week only falls back to
+ * the floor when the normal target would leave strictly more demand short.
+ * (With today's defaults both are 2, so exactly one plan is computed.)
+ *
+ * STREAK GUARD: a window is skipped for a member when the work run BEFORE it
+ * (their real incoming streak + the days in front of the window) would
+ * exceed the hard consecutive-work-day cap — a window that forces a cap
+ * breach earlier in the week would just produce an extra, scattered OFF day.
+ * If every window is skipped the unrestricted best window is used (same
+ * "never leave someone without a window" fallback as the flexible planner).
+ * Members are walked in id order (deterministic, independent of pool order;
+ * all members start the week with equal usage, so this is also exactly the
+ * order sortByLeastUsedFirst's stable tie-break would give an id-sorted pool).
+ */
+function planSpecializedOffWindows(
+  daysOrder: string[],
+  members: Employee[],
+  requiredByDay: number[],
+  rules: SpecializedOffDayRules,
+  hardCaps: SpecializedHardCaps | undefined
+): SpecializedOffPlan | null {
+  const n = daysOrder.length;
+  if (n !== 7 || members.length === 0) return null;
+  const floor = Math.max(0, rules.minimumOffDaysPerWeek);
+  const lengths = [...new Set([Math.max(rules.normalWeeklyOffDays, floor), floor])].filter((l) => l >= 0 && l < n);
+  const ids = [...members].sort(byEmployeeId).map((e) => e.id);
+  const cap = hardCaps?.caps.maxConsecutiveWorkDays;
+  let best: { plan: SpecializedOffPlan | null; deficit: number } | null = null;
+  for (const offTarget of lengths) {
+    let candidate: { plan: SpecializedOffPlan | null; deficit: number };
+    if (offTarget === 0) {
+      // A floor of 0 (only reachable when configured so): "no OFF plan" is a
+      // legitimate option — chosen only if the normal target would leave
+      // strictly more demand short.
+      candidate = { plan: null, deficit: requiredByDay.reduce((sum, r) => sum + Math.max(0, r - members.length), 0) };
+    } else {
+      const startAllowed = (id: string, start: number) => {
+        if (rules.priorDayOffEmployeeIds?.has(id)) {
+          for (let k = 0; k < offTarget; k++) if ((start + k) % n === 0) return false;
+        }
+        if (cap === undefined) return true;
+        const wraps = start + offTarget > n;
+        const before = wraps ? 0 : (hardCaps!.incomingStreakByEmployee.get(id) ?? 0) + start;
+        return before <= cap;
+      };
+      const plan = planDemandAwareOffWindows({ daysOrder, employeeIds: ids, requiredByDay, offDaysTarget: offTarget, isAllowedStart: startAllowed, refineDeficit: true });
+      candidate = { plan: { offTarget, windows: plan.windows, starts: plan.starts }, deficit: plan.deficit };
+    }
+    if (!best || candidate.deficit < best.deficit) best = candidate;
+  }
+  return best?.plan ?? null;
 }
 
 /**
@@ -181,6 +301,16 @@ export interface DemandConflict {
    * (e.g. a team smaller than its headcount) keeps its original shape.
    */
   capPacing?: { teamCapacityDays: number; weekDemandDays: number; heldBack: string[] };
+  /**
+   * OFF/OFF PHASE 2 (2026-09-29): team members who were NOT offered this
+   * day's work because it is inside their protected weekly OFF block (or,
+   * with normal_off_days_consecutive off, because they already reached
+   * daysOrder.length - their OFF target worked days). Present only when at
+   * least one such member existed on a short day — the shortfall is then the
+   * honest price of the hard weekly OFF floor, reported here rather than
+   * silently splitting someone's OFF/OFF pair.
+   */
+  offDayProtected?: string[];
 }
 
 /**
@@ -541,6 +671,40 @@ function assignPacedProfilingMesureDay(
 }
 
 /**
+ * One Profiling/Mesure day under a weekly OFF-window plan (OFF/OFF phase 2 —
+ * see generateProfilingMesureShifts' WEEKLY OFF BLOCK paragraph). `pool` is
+ * already the day's offered members (window members removed) in
+ * least-used-first order. Walks by COVERAGE GROUP exactly like
+ * assignPacedProfilingMesureDay (groupCoverableClusters: clusters one
+ * catalog code covers share the same people), but with no pacing plan: each
+ * group takes up to its own deduped headcount from whoever is left, in
+ * order. Without the dedup, the hard OFF windows would cost more coverage
+ * than they must — the plain per-cluster greedy spends a separate person on
+ * every cluster even when one shift covers two of them.
+ */
+function assignGroupedProfilingMesureDay(
+  pool: Employee[],
+  clusters: { start: string; end: string; peak: number }[],
+  priorDayShift: PriorDayShiftMap,
+  minimumRestHours: number,
+  preferExtended: boolean,
+  date: string,
+  dayCaps: PoolDayHardCaps | undefined
+): { assigned: { employeeId: string; shiftCode: string }[]; capExcluded: { employeeId: string; reason: HardCapExclusionReason }[] }[] {
+  let left = pool;
+  const groups = groupCoverableClusters(clusters, minimumRestHours, preferExtended, date);
+  const out = clusters.map(() => ({ assigned: [] as { employeeId: string; shiftCode: string }[], capExcluded: [] as { employeeId: string; reason: HardCapExclusionReason }[] }));
+  for (const g of groups) {
+    const r = assignPoolToWindow(left, g.window, g.headcount, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
+    const taken = new Set(r.assigned.map((a) => a.employeeId));
+    left = left.filter((e) => !taken.has(e.id));
+    const result = { assigned: r.assigned, capExcluded: r.capExcluded };
+    for (const ci of g.clusterIndices) out[ci] = result;
+  }
+  return out;
+}
+
+/**
  * Profiling and Mesure: demand comes from the SAME weekly demand
  * aggregation Stage 6 already computes for the whole week
  * (aggregateDailyDemand, called once in generate-draft-plan.ts) — this
@@ -561,7 +725,10 @@ export function generateProfilingMesureShifts(
   weekStart: string,
   priorWeekBoundaryContext: PriorDayShiftMap = new Map(),
   // HARD WORK CAPS (2026-09-25, phase 1) — see SpecializedHardCaps.
-  hardCaps?: SpecializedHardCaps
+  hardCaps?: SpecializedHardCaps,
+  // OFF/OFF PHASE 2 (2026-09-29) — see SpecializedOffDayRules and the
+  // "WEEKLY OFF BLOCK" paragraph below. Omitted = exact prior behaviour.
+  offDayRules?: SpecializedOffDayRules
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
@@ -588,7 +755,64 @@ export function generateProfilingMesureShifts(
     // decided up front from this team's real weekly demand. Inactive (and
     // the day loop below takes its original branch, byte-identical) unless
     // the team's capacity under the hard caps is below the week's demand.
-    const pacing = hardCaps && hardCaps.capPacing !== false
+    //
+    // WEEKLY OFF BLOCK (2026-09-29, OFF/OFF phase 2). Before this, nothing
+    // here placed OFF days at all: a member was OFF only on a day nobody
+    // happened to pick them, so a busy week gave most of the team a single
+    // OFF day (the reported Ayoub Chafik week, 2026-10-05). Now each member
+    // gets a weekly OFF target (normal target when demand allows, never below
+    // the hard floor — planSpecializedOffWindows) and the daily greedy never
+    // takes it away. Two regimes, decided per team from its own week:
+    //
+    //  - DENSE week (the team's average demanded work days per member exceed
+    //    daysOrder.length - offTarget - 1; least-used-first rotation keeps
+    //    members within about a day of each other, so from there the busiest
+    //    members would lose their block): each member gets ONE demand-aware
+    //    consecutive window (the flexible pool's own water-filling search, fed
+    //    with this team's Σ-cluster-peak headcount per day) and it is a HARD
+    //    exclusion, exactly like Stage 6's hardExclude gate: the member is
+    //    not offered work on their window days. Days are walked by coverage
+    //    group (assignGroupedProfilingMesureDay) so the windows cost no more
+    //    coverage than they must, and the window plan SUPERSEDES cap-paced
+    //    rest planning — it already is a staggered, demand-aware weekly rest
+    //    plan (at most 5 consecutive work days inside the week by
+    //    construction, incoming streak respected by the window search), and
+    //    pacing's extra hold-backs would add scattered OFF days on top of it.
+    //    Tried and rejected: a SOFT window (window members offered last) plus
+    //    the feasibility guard below — on the real 2026-10-05 week it let the
+    //    whole team keep working early and forced everyone's block onto the
+    //    weekend together (Saturday/Sunday fell to 0-2 of 12), the exact
+    //    lockstep cap-paced-rest.ts exists to prevent.
+    //  - SPARSE week: no window — members already get well over the floor in
+    //    OFF days, and forcing specific days would only reshuffle who works
+    //    (tried: it created new >max_consecutive_off_days OFF runs on the demo
+    //    week's Mesure team). The original branches run unchanged, with one
+    //    HARD guard: a member is not offered a day if working it would leave
+    //    no possible block of offTarget consecutive non-worked days this week
+    //    (cyclic) — so the floor and the block can never be lost silently.
+    //
+    // With normal_off_days_consecutive off there is no block to protect, only
+    // the count: a member stops being offered work once they reach
+    // daysOrder.length - offTarget worked days. In every regime, demand this
+    // leaves uncovered is the SAME honest DemandConflict as any other
+    // shortfall (BLOCKING in generate-draft-plan.ts), carrying
+    // `offDayProtected` so its wording says why — never a silently split pair.
+    const requiredByDay = daysOrder.map((day) => demandClustersForRole(demandByDay[day], team).reduce((sum, c) => sum + c.peak, 0));
+    const offPlan = offDayRules ? planSpecializedOffWindows(daysOrder, pool, requiredByDay, offDayRules, hardCaps) : null;
+    const denseWeek =
+      offPlan !== null &&
+      requiredByDay.reduce((sum, r) => sum + Math.min(r, pool.length), 0) / Math.max(1, pool.length) > daysOrder.length - offPlan.offTarget - 1;
+    const windowsActive = offPlan !== null && offDayRules!.consecutive && denseWeek;
+    if (windowsActive) for (const [id, w] of offPlan!.windows) offDayRules!.windowsOut?.set(id, w);
+    const workedDays = new Map<string, number>(pool.map((e) => [e.id, 0]));
+    const workedOn = new Map<string, Set<number>>(pool.map((e) => [e.id, new Set<number>()]));
+    const offProtectedOn = (e: Employee, day: string): boolean => {
+      if (!offPlan) return false;
+      if (!offDayRules!.consecutive) return (workedDays.get(e.id) ?? 0) >= daysOrder.length - offPlan.offTarget;
+      if (windowsActive) return offPlan.windows.get(e.id)?.has(day) ?? false;
+      return !consecutiveOffBlockStillPossible(workedOn.get(e.id)!, daysOrder.indexOf(day), daysOrder.length, offPlan.offTarget);
+    };
+    const pacing = hardCaps && hardCaps.capPacing !== false && !windowsActive
       ? planProfilingMesurePacing(pool, team, daysOrder, demandByDay, weekStart, minimumRestHours, preferExtended, hardCaps)
       : null;
 
@@ -596,17 +820,48 @@ export function generateProfilingMesureShifts(
       const date = flightDateFor(weekStart, day);
       const clusters = demandClustersForRole(demandByDay[day], team);
       const dayAssignments: RepairSlotAssignment[] = [];
-      let remainingPool = sortByLeastUsedFirst(pool, usageHours);
+      const offProtected = pool.filter((e) => offProtectedOn(e, day)).map((e) => e.id);
+      const offProtectedIds = new Set(offProtected);
+      const dayPool = offProtected.length > 0 ? pool.filter((e) => !offProtectedIds.has(e.id)) : pool;
+      const offNote = offProtected.length > 0 ? { offDayProtected: offProtected } : {};
+      let remainingPool = sortByLeastUsedFirst(dayPool, usageHours);
       teamGroupsByDay[day] = [];
 
-      if (pacing?.active) {
+      if (windowsActive) {
+        // WEEKLY OFF BLOCK: the day's offered members (window members already
+        // removed), least-used first, walked by coverage group.
+        const grouped = assignGroupedProfilingMesureDay(remainingPool, clusters, priorDayShift, minimumRestHours, preferExtended, date, dayCaps);
+        clusters.forEach((cluster, clusterIndex) => {
+          const groupKey = `${team}-${day}-${clusterIndex}`;
+          teamGroupsByDay[day].push({ key: groupKey, window: { start: cluster.start, end: cluster.end }, needed: cluster.peak, eligibleIds: poolIds });
+          const { assigned, capExcluded } = grouped[clusterIndex];
+          dayAssignments.push(...assigned.map((a) => ({ ...a, groupKey })));
+          for (const x of capExcluded) hardCaps?.exclusionsOut?.push({ employeeId: x.employeeId, dayOfWeek: day, population: "profiling_mesure", reason: x.reason });
+          if (capExcluded.length > 0) teamCapExclusionSeen = true;
+          const shortfall = Math.max(0, cluster.peak - assigned.length);
+          if (shortfall > 0) {
+            teamConflicts.push({
+              groupKey,
+              conflict: {
+                team,
+                dayOfWeek: day,
+                window: { start: cluster.start, end: cluster.end },
+                needed: cluster.peak,
+                covered: cluster.peak - shortfall,
+                ...(capExcluded.length > 0 ? { capExcluded } : {}),
+                ...offNote,
+              },
+            });
+          }
+        });
+      } else if (pacing?.active) {
         // Preferred workers first (least-used among them), shared across the
         // day's clusters in proportion to each cluster's peak; then every
         // cluster's remaining need from any preferred worker left over and
         // the members the plan lets be drawn in. Members held back to rest
         // are never offered today's work. Every walk is the unchanged
         // assignPoolToWindow — the same rest/hard-cap filter as always.
-        const paced = assignPacedProfilingMesureDay(pool, clusters, day, dayIndex, pacing, usageHours, streaks, priorDayShift, minimumRestHours, preferExtended, date, dayCaps!);
+        const paced = assignPacedProfilingMesureDay(dayPool, clusters, day, dayIndex, pacing, usageHours, streaks, priorDayShift, minimumRestHours, preferExtended, date, dayCaps!);
         clusters.forEach((cluster, clusterIndex) => {
           const groupKey = `${team}-${day}-${clusterIndex}`;
           teamGroupsByDay[day].push({ key: groupKey, window: { start: cluster.start, end: cluster.end }, needed: cluster.peak, eligibleIds: poolIds });
@@ -626,6 +881,7 @@ export function generateProfilingMesureShifts(
                 covered: cluster.peak - shortfall,
                 ...(capExcluded.length > 0 ? { capExcluded } : {}),
                 ...(paced.heldBack.length > 0 ? { capPacing: { teamCapacityDays: pacing.capacityDays, weekDemandDays: pacing.demandDays, heldBack: paced.heldBack } } : {}),
+                ...offNote,
               },
             });
           }
@@ -649,6 +905,7 @@ export function generateProfilingMesureShifts(
               needed: cluster.peak,
               covered: cluster.peak - shortfall,
               ...(capExcluded.length > 0 ? { capExcluded } : {}),
+              ...offNote,
             },
           });
         }
@@ -675,6 +932,10 @@ export function generateProfilingMesureShifts(
       }
       priorDayShift = nextPriorDayShift;
       advanceStreaks(pool, streaks, new Set(dayAssignments.map((a) => a.employeeId)));
+      for (const id of uniqueDayAssignments.keys()) {
+        workedDays.set(id, (workedDays.get(id) ?? 0) + 1);
+        workedOn.get(id)?.add(dayIndex);
+      }
     });
 
     // HARD-CAP REPAIR (2026-09-25, phase 2 part B — hard-cap-repair.ts): only
@@ -694,6 +955,7 @@ export function generateProfilingMesureShifts(
         names: new Map(pool.map((e) => [e.id, e.name])),
         groupsByDay: teamGroupsByDay,
         assignmentsByDay: teamAssignmentsByDay,
+        ...(offDayRules ? { offDayRules: { minimumOffDays: offDayRules.minimumOffDaysPerWeek, consecutive: offDayRules.consecutive } } : {}),
       });
       teamRepairs = result.repairs;
       hardCaps.repairsOut?.push(...result.repairs);
@@ -843,7 +1105,7 @@ export function generateForeignCompanyShifts(
   // cares about the flight-driven roster keeps working byte-for-byte
   // unchanged (the top-up is a strict, additive no-op without a config to
   // read `normal_weekly_off_days` from).
-  config?: Pick<Config, "normal_weekly_off_days"> & Partial<Pick<Config, "max_consecutive_off_days">>,
+  config?: Pick<Config, "normal_weekly_off_days"> & Partial<Pick<Config, "max_consecutive_off_days" | "minimum_off_days_per_planning_week" | "normal_off_days_consecutive">>,
   // FATIGUE-AWARE DISTRIBUTION (2026-09-24, part 2) — see
   // ForeignFatigueOptions and the "FATIGUE" paragraph of this function's
   // doc comment. Optional; omitted or disabled = exact prior behaviour.
@@ -851,11 +1113,24 @@ export function generateForeignCompanyShifts(
   // HARD WORK CAPS (2026-09-25, phase 1) — see SpecializedHardCaps. Applied
   // to flight days (selectCompatibleShiftCodes' filter) AND to the normal
   // RAM roster top-up (computeEmployeeDayCountTopUp's legalCodesAt).
-  hardCaps?: SpecializedHardCaps
+  hardCaps?: SpecializedHardCaps,
+  // OFF/OFF PHASE 2 (2026-09-29) — see the "WEEKLY OFF WINDOW" paragraph in
+  // the body. Only meaningful together with `config` (the top-up it feeds);
+  // when omitted but `config` is given, the rules are read from `config`
+  // (floor defaulting to normal_weekly_off_days, consecutive to true — the
+  // confirmed defaults). No `config` = no OFF planning, exact prior output.
+  offDayRules?: SpecializedOffDayRules
 ): { generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]>; conflicts: DemandConflict[] } {
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   const conflicts: DemandConflict[] = [];
   const fatigueActive = fatigue?.config.enabled === true;
+  const foreignOffRules: SpecializedOffDayRules | undefined = config
+    ? offDayRules ?? {
+        minimumOffDaysPerWeek: config.minimum_off_days_per_planning_week ?? config.normal_weekly_off_days,
+        normalWeeklyOffDays: config.normal_weekly_off_days,
+        consecutive: config.normal_off_days_consecutive ?? true,
+      }
+    : undefined;
 
   for (const company of configuredCompanies) {
     const pool = employees.filter((e) => e.active && e.assignment === company);
@@ -903,6 +1178,41 @@ export function generateForeignCompanyShifts(
     const pacing = hardCaps && hardCaps.capPacing !== false && headcount !== undefined
       ? planForeignCompanyPacing(pool, roleConfig, headcount, daysOrder, dayPlans, weekStart, minimumRestHours, preferExtended, hardCaps)
       : null;
+    // WEEKLY OFF WINDOW (2026-09-29, OFF/OFF phase 2). Before this, the
+    // top-up below was handed `preferredOffWindowStart: undefined`, so a
+    // foreign-company member's OFF block was only ever the earliest of the
+    // equally-free windows left over after flight days — never demand-aware.
+    // Now each role sub-team (ACE / Leader for a confirmed split, else the
+    // whole team) gets the SAME demand-aware water-filling windows as every
+    // other generation-driven population (planSpecializedOffWindows), with the
+    // company's confirmed headcount on each real flight day as that day's
+    // requirement (0 on a non-flight day — so OFF blocks land on non-flight
+    // days first, spread across the team). The window is used twice:
+    //   - flight days: a member whose window contains today is offered the
+    //     company commitment LAST (after every other offered member). This is
+    //     ordering only — the walk still tries everyone until the confirmed
+    //     headcount is met, so a protected commitment is never left short to
+    //     protect an OFF day (an unavoidable breach is then flagged by
+    //     validation.ts as insufficient_off_days / off_days_not_consecutive,
+    //     never hidden);
+    //   - the top-up: its start index is computeEmployeeDayCountTopUp's
+    //     `preferredOffWindowStart`, i.e. chooseTopUpReservedOffDays'
+    //     tie-break among the equally-free candidate blocks.
+    let foreignOffPlan: SpecializedOffPlan | null = null;
+    if (foreignOffRules && headcount !== undefined) {
+      const { aces, leaders } = partitionPoolByRole(pool, roleConfig);
+      const subTeams = roleConfig ? [{ members: aces, need: roleConfig.aceCount }, { members: leaders, need: roleConfig.leaderCount }] : [{ members: pool, need: headcount }];
+      for (const { members, need } of subTeams) {
+        const sub = planSpecializedOffWindows(daysOrder, members, daysOrder.map((d) => (dayPlans.get(d) ? need : 0)), foreignOffRules, hardCaps);
+        if (!sub) continue;
+        if (!foreignOffPlan) foreignOffPlan = { offTarget: sub.offTarget, windows: new Map(), starts: new Map() };
+        foreignOffPlan.offTarget = Math.max(foreignOffPlan.offTarget, sub.offTarget);
+        for (const [id, w] of sub.windows) foreignOffPlan.windows.set(id, w);
+        for (const [id, st] of sub.starts) foreignOffPlan.starts.set(id, st);
+      }
+      if (foreignOffPlan && foreignOffRules.consecutive) for (const [id, w] of foreignOffPlan.windows) foreignOffRules.windowsOut?.set(id, w);
+    }
+    const inOwnWindow = (id: string, day: string) => Boolean(foreignOffRules?.consecutive && foreignOffPlan?.windows.get(id)?.has(day));
 
     for (const day of daysOrder) {
       const date = flightDateFor(weekStart, day);
@@ -947,6 +1257,12 @@ export function generateForeignCompanyShifts(
           const offered = new Set(orderedPool.map((e) => e.id));
           heldBack = pool.filter((e) => !offered.has(e.id)).map((e) => e.id);
           segmentOf = new Map<string, number>([...preferred.map((e) => [e.id, 0] as [string, number]), ...drawIn.map((e) => [e.id, 1] as [string, number])]);
+        }
+        // WEEKLY OFF WINDOW: members inside their own window go last (stable).
+        if (orderedPool.some((e) => inOwnWindow(e.id, day))) {
+          orderedPool = [...orderedPool.filter((e) => !inOwnWindow(e.id, day)), ...orderedPool.filter((e) => inOwnWindow(e.id, day))];
+          const seg = new Map<string, number>(orderedPool.map((e) => [e.id, (segmentOf?.get(e.id) ?? 0) + (inOwnWindow(e.id, day) ? 2 : 0)]));
+          segmentOf = seg;
         }
         const baseOrder = orderedPool;
         const projections = new Map<string, FatigueCandidateProjection>();
@@ -1053,6 +1369,7 @@ export function generateForeignCompanyShifts(
         names: new Map(pool.map((e) => [e.id, e.name])),
         groupsByDay: companyGroupsByDay,
         assignmentsByDay,
+        ...(foreignOffRules ? { offDayRules: { minimumOffDays: foreignOffRules.minimumOffDaysPerWeek, consecutive: foreignOffRules.consecutive } } : {}),
       });
       hardCaps.repairsOut?.push(...result.repairs);
       if (result.assignmentsByDay !== assignmentsByDay) {
@@ -1106,8 +1423,10 @@ export function generateForeignCompanyShifts(
         // target. REMOVED 2026-09-29 (see hard-work-caps.ts's removal
         // note): the fixed normal target is used unconditionally now,
         // exactly as the no-hard-caps case always did.
-        const targetWorkingDaysThisWindow = normalTargetWorkDays;
-        const offWindowLength = config.normal_weekly_off_days;
+        // OFF/OFF phase 2: the planned OFF target (normal when demand allows,
+        // never below the hard floor) sizes both the target and the block.
+        const targetWorkingDaysThisWindow = foreignOffPlan ? Math.max(0, daysOrder.length - foreignOffPlan.offTarget) : normalTargetWorkDays;
+        const offWindowLength = foreignOffPlan ? foreignOffPlan.offTarget : config.normal_weekly_off_days;
         const getExistingShift = (d: string) => (generatedShiftsByDay[d] ?? []).find((x) => x.employeeId === employee.id);
         const topUpReasons = fatigueActive ? new Map<string, string[]>() : undefined;
         const capShortfall: { day: string; reason: HardCapExclusionReason }[] = [];
@@ -1131,8 +1450,10 @@ export function generateForeignCompanyShifts(
           targetWorkingDaysThisWindow,
           offWindowLength,
           null, // targetHoursThisWindow — always unconfirmed/gated for this population, same as the flexible pool default
-          undefined,
-          undefined,
+          undefined, // t1PeakDemandMinuteByDay — not applicable to a foreign-company team
+          // OFF/OFF phase 2: this member's demand-aware window (see WEEKLY OFF
+          // WINDOW above) — previously always undefined.
+          foreignOffPlan?.starts.get(employee.id),
           topUpReasons ? { config: fatigue!.config, reasonsOut: topUpReasons } : undefined,
           hardCaps
             ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employee.id) ?? 0, shortfallOut: capShortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }

@@ -86,6 +86,16 @@ import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
  * fully-legal state — never half-repaired — and the remaining gap is
  * reported exactly as phase 1 does, noting that the search ran.
  *
+ * OFF/OFF PHASE 2 (2026-09-29): the slot gap repair (Profiling/Mesure,
+ * foreign companies) also refuses any move that would break a filler's or a
+ * stand-in's weekly OFF-day rules (breaksOffDayRules: dropping below
+ * minimum_off_days_per_planning_week, or splitting a complete consecutive
+ * OFF block when normal_off_days_consecutive is on) — with no last-resort
+ * exception, since that would trade a reported coverage gap for an
+ * unreported hard OFF-rule breach. Rejections are counted in
+ * HardCapRepairSearch.offDayRuleRejections for the BLOCKING wording.
+ * repairFlexiblePoolWeek is unchanged (its own OFF-run phase already exists).
+ *
  * WHAT IT CANNOT DO (by design): chains longer than one hand-off (Y may not
  * in turn hand one of their own days to a Z), moves between populations, or
  * inventing capacity. A structural shortfall — e.g. Gulf Air, where the whole
@@ -130,6 +140,59 @@ export interface HardCapRepairSearch {
   attemptsUsed: number;
   budget: number;
   budgetExhausted: boolean;
+  /**
+   * OFF/OFF phase 2 (2026-09-29): how many otherwise-legal candidate moves
+   * were rejected because they would have broken someone's protected weekly
+   * OFF block (see RepairOffDayRules). Present only when the caller supplied
+   * OFF-day rules, so a search without them keeps its exact prior shape.
+   */
+  offDayRuleRejections?: number;
+}
+
+/**
+ * OFF/OFF PHASE 2 (2026-09-29) — the weekly OFF-day HARD rules a slot-repair
+ * move must not break (Config.minimum_off_days_per_planning_week and
+ * Config.normal_off_days_consecutive — the same two rules validation.ts's
+ * checkMinimumOffDays / checkSeparatedOffDays enforce for every
+ * generation-driven employee). Checked only on a full 7-day planning week,
+ * exactly the scope offDayHardRulesApply gives those checks.
+ */
+export interface RepairOffDayRules {
+  minimumOffDays: number;
+  consecutive: boolean;
+}
+
+/**
+ * The three OFF-day properties of a whole-week pattern that validation.ts
+ * checks, as booleans (true = satisfied):
+ *   [0] at least `minimumOffDays` OFF days (insufficient_off_days);
+ *   [1] consecutive rule only: some cyclic OFF run is at least
+ *       `minimumOffDays` long — "a complete OFF/OFF block exists";
+ *   [2] consecutive rule only: every OFF day is in that one cyclic run
+ *       (off_days_not_consecutive).
+ * Same wraparound convention as maxConsecutiveOffCyclic (Sunday->Monday).
+ */
+function offDayRuleFlags(pattern: WeekPattern, rules: RepairOffDayRules): boolean[] {
+  const offCount = pattern.filter((c) => !c).length;
+  if (!rules.consecutive) return [offCount >= rules.minimumOffDays];
+  const run = maxConsecutiveOffCyclic(pattern.map((c) => ({ status: c ? ("working" as const) : ("off" as const) })));
+  return [offCount >= rules.minimumOffDays, run >= rules.minimumOffDays, offCount === 0 || run >= offCount];
+}
+
+/**
+ * True when changing `before` into `after` turns a satisfied OFF-day rule
+ * into a violated one — i.e. the move would split an already-complete
+ * consecutive OFF block, or drop the employee below the weekly floor. A rule
+ * already violated before the move is not "broken" by it (the move cannot
+ * make that finding worse in kind, and forbidding it would block repairs
+ * that change nothing about it). Only on a full 7-day week (see
+ * RepairOffDayRules); `rules` omitted = never (the pre-phase-2 behaviour).
+ */
+export function breaksOffDayRules(before: WeekPattern, after: WeekPattern, rules: RepairOffDayRules | undefined): boolean {
+  if (!rules || before.length !== 7) return false;
+  const a = offDayRuleFlags(before, rules);
+  const b = offDayRuleFlags(after, rules);
+  return a.some((ok, i) => ok && !b[i]);
 }
 
 type Times = { shift_start: string; shift_end: string };
@@ -243,6 +306,14 @@ export interface SlotRepairInput {
   groupsByDay: Record<string, RepairSlotGroup[]>;
   assignmentsByDay: Record<string, RepairSlotAssignment[]>;
   budget?: number;
+  /**
+   * OFF/OFF phase 2 (2026-09-29): when supplied, no move may break an
+   * employee's weekly OFF-day rules (breaksOffDayRules) — neither the filler
+   * X's (who gains the short day and, in a hand-off, frees another) nor the
+   * stand-in Y's (who gains X's day). Omitted = the pre-phase-2 search,
+   * byte-for-byte.
+   */
+  offDayRules?: RepairOffDayRules;
 }
 
 export interface SlotRepairResult {
@@ -281,6 +352,7 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
   let attempts = 0;
   let exhausted = false;
   let changed = false;
+  let offDayRuleRejections = 0;
   const repairs: HardCapRepair[] = [];
   const spend = (): boolean => {
     if (attempts >= budget) {
@@ -288,6 +360,23 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
       return false;
     }
     attempts++;
+    return true;
+  };
+  /**
+   * OFF/OFF phase 2: would giving `id` the pattern `after` break their weekly
+   * OFF-day rules? Counted when it does. There is deliberately NO "last
+   * resort" exception: the floor and the consecutive block are HARD rules
+   * (validation.ts flags a breach as a hard PlanIssue), so trading a coverage
+   * gap for a silent OFF-rule breach would only swap one hard violation for
+   * another that nobody asked to approve. The gap stays reported honestly
+   * (the caller's BLOCKING DemandConflict, with this search's
+   * offDayRuleRejections so its wording can say why) — the same "never
+   * fabricate, report the honest gap" convention the rest of this module
+   * follows for rest and the hard caps.
+   */
+  const offRuleBlocks = (id: string, after: WeekPattern): boolean => {
+    if (!breaksOffDayRules(patterns.get(id)!, after, input.offDayRules)) return false;
+    offDayRuleRejections++;
     return true;
   };
 
@@ -324,6 +413,7 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
         if (!spend()) return false;
         const code = pickCode(x, u, g.window, patterns.get(x)!, true);
         if (!code) continue;
+        if (offRuleBlocks(x, withDay(patterns.get(x)!, u, code))) continue;
         place(x, u, code, g.key);
         repairs.push({
           population: input.population, team: input.team, kind: "direct_fill_after_reallocation", targetDay: dayU,
@@ -352,6 +442,7 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
         const freed = withDay(base, d, null);
         const codeX = pickCode(x, u, g.window, freed, true);
         if (!codeX) continue;
+        if (offRuleBlocks(x, withDay(freed, u, codeX))) continue;
         const dayD = ctx.daysOrder[d];
         const hoursOf = (id: string) => patternHours(ctx, patterns.get(id)!);
         const candidatesY = poolIds
@@ -363,6 +454,7 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
           if (!spend()) return false;
           const codeY = pickCode(y, d, groupD.window, patterns.get(y)!, true);
           if (!codeY) continue;
+          if (offRuleBlocks(y, withDay(patterns.get(y)!, d, codeY))) continue;
           // Apply atomically: X leaves d, Y takes d (same position), X takes u.
           const idx = assignments[dayD].findIndex((a) => a.employeeId === x);
           assignments[dayD].splice(idx, 1, { employeeId: y, shiftCode: codeY, groupKey: groupD.key });
@@ -401,7 +493,7 @@ export function repairSlotPopulationGaps(input: SlotRepairInput): SlotRepairResu
   return {
     assignmentsByDay: changed ? assignments : input.assignmentsByDay,
     repairs,
-    search: { attemptsUsed: attempts, budget, budgetExhausted: exhausted },
+    search: { attemptsUsed: attempts, budget, budgetExhausted: exhausted, ...(input.offDayRules ? { offDayRuleRejections } : {}) },
   };
 }
 

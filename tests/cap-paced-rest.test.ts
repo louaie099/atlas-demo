@@ -248,7 +248,20 @@ describe("TEST 1 — the lockstep bug at small scale: late-week coverage no long
     expect(Math.min(...DAYS.map((d) => count(before, d)))).toBeGreaterThan(0); // no collapse even unpaced
     const after = stressPlan(true);
     const perDay = DAYS.map((d) => count(after, d));
-    expect(Math.min(...perDay)).toBeGreaterThanOrEqual(15);
+    // 2026-09-29 (OFF/OFF phase 2): 15 -> 14. This week is the reported bug's
+    // own week: before the fix every one of these 24 members worked 6 days
+    // (only 1 OFF day — now a hard insufficient_off_days finding), i.e. 144
+    // person-days; with the hard 2-OFF floor enforced by the generator they
+    // work at most 5, i.e. <= 120 (~17/day), and Wednesday's rest-constrained
+    // morning-after-evening pattern lands at 14. That lower floor is the
+    // intended price of the hard OFF rule, not a coverage regression: the
+    // remaining gap is reported as honest BLOCKING conflicts, and nobody
+    // collapses to 0 (the original lockstep shape this test guards against).
+    expect(Math.min(...perDay)).toBeGreaterThanOrEqual(14);
+    for (const id of PROF_MESURE_IDS) {
+      const off = DAYS.filter((d) => !after.generatedShiftsByDay[d].some((g) => g.employeeId === id)).length;
+      expect(off, id).toBeGreaterThanOrEqual(CONFIG.minimum_off_days_per_planning_week);
+    }
     // Nobody in the team breaks the real hard cap (consecutive work days); weekly hours are no longer a ceiling.
     for (const id of PROF_MESURE_IDS) {
       expect(maxRun(DAYS.map((d) => after.generatedShiftsByDay[d].some((g) => g.employeeId === id))), id).toBeLessThanOrEqual(5);

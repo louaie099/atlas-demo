@@ -5,7 +5,7 @@ import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap,
 import { planPreferredOffWindows, Stage6OffWindowContext } from "./off-window";
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
-import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict } from "./specialized-team-generation";
+import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
 import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
@@ -591,8 +591,11 @@ export function generateDraftWeeklyPlan(
   // Stage 6 gets a strictly-bounded structural tie-break against rostering
   // someone inside their own window (stage6-score-tiers.ts tier 3), and the
   // Stage-6.5 top-up below reuses the SAME map as its reservation tie-break,
-  // so both passes steer toward the same block. Fixed-cycle, foreign,
-  // Profiling/Mesure employees never get a window (isFlexibleGeneralPool).
+  // so both passes steer toward the same block. Fixed-cycle employees never
+  // get a window; Profiling/Mesure and foreign-company teams get theirs from
+  // the SAME search inside their own generators (OFF/OFF phase 2 —
+  // specialized-team-generation.ts's planSpecializedOffWindows, fed with
+  // their own demand shape), not from this flexible-pool-only map.
   const priorDayOffEmployeeIds = new Set<string>();
   if (priorWeekBoundaryProvenance === "prior_plan") {
     for (const [employeeId, shift] of priorWeekBoundaryContext) if (shift === null) priorDayOffEmployeeIds.add(employeeId);
@@ -679,6 +682,18 @@ export function generateDraftWeeklyPlan(
   // the prior-week boundary — never on Stage 6 — so it runs here, first,
   // letting the flexible repair know which days their dedicated team fully
   // covers Profiling/Mesure demand (see FlexibleRepairInput.dedicatedRoleCovered).
+  // OFF/OFF PHASE 2 (2026-09-29): the weekly OFF-day hard rules for the
+  // specialized generation-driven populations (see specialized-team-
+  // generation.ts's SpecializedOffDayRules) — the same Config fields
+  // validation.ts's checkMinimumOffDays / checkSeparatedOffDays enforce, and
+  // the same known-prior-day-OFF guard the flexible pool's window planner
+  // gets. One object per generator call (windowsOut is per call).
+  const specializedOffDayRules = (): SpecializedOffDayRules => ({
+    minimumOffDaysPerWeek: config.minimum_off_days_per_planning_week,
+    normalWeeklyOffDays: config.normal_weekly_off_days,
+    consecutive: config.normal_off_days_consecutive,
+    priorDayOffEmployeeIds,
+  });
   const profilingMesureExclusions: HardCapExclusion[] = [];
   const profilingMesureRepairs: HardCapRepair[] = [];
   const { generatedShiftsByDay: profilingMesureShiftsByDay, conflicts: profilingMesureConflicts } = generateProfilingMesureShifts(
@@ -688,7 +703,8 @@ export function generateDraftWeeklyPlan(
     config.minimum_rest_hours,
     weekStart,
     priorWeekBoundaryContext,
-    { ...stageHardCaps, ...specializedPacing, exclusionsOut: profilingMesureExclusions, repairsOut: profilingMesureRepairs, repair: hardCapRepairEnabled }
+    { ...stageHardCaps, ...specializedPacing, exclusionsOut: profilingMesureExclusions, repairsOut: profilingMesureRepairs, repair: hardCapRepairEnabled },
+    specializedOffDayRules()
   );
   const dedicatedTeamShortDays = new Set(profilingMesureConflicts.map((c) => `${c.team}|${c.dayOfWeek}`));
   const dedicatedRoleCovered = (day: string, role: string) =>
@@ -759,7 +775,8 @@ export function generateDraftWeeklyPlan(
     // constrained (not replaced) by their company's real flight days.
     config,
     stageFatigue,
-    { ...stageHardCaps, ...specializedPacing, exclusionsOut: hardCapExclusions, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled }
+    { ...stageHardCaps, ...specializedPacing, exclusionsOut: hardCapExclusions, repairsOut: hardCapRepairs, repair: hardCapRepairEnabled },
+    specializedOffDayRules()
   );
 
   // Every population whose day is decided by generation this run, merged
@@ -1034,6 +1051,14 @@ export function generateDraftWeeklyPlan(
         ? `The bounded cross-employee repair pass (hard-constraints milestone phase 2) exhausted its budget of ${c.capRepair.budget} candidate moves without finding a legal reallocation that frees one of them.`
         : `The bounded cross-employee repair pass (hard-constraints milestone phase 2) evaluated ${c.capRepair.attemptsUsed} candidate move(s) and found no legal reallocation that frees one of them — no eligible colleague could take over one of their other days without breaking 15h rest or a hard cap themselves.`
       : "The cross-employee repair pass (hard-constraints milestone phase 2) was not run for this plan.";
+    // OFF/OFF phase 2: members held OFF by their protected weekly OFF block,
+    // and repair moves refused because they would have broken one.
+    const offRejections = c.capRepair?.offDayRuleRejections ?? 0;
+    const offNote = c.offDayProtected && c.offDayProtected.length > 0
+      ? ` ${c.offDayProtected.length} team member(s) were not offered this day because it is inside their protected weekly OFF block (hard minimum of ${config.minimum_off_days_per_planning_week} OFF days per planning week${config.normal_off_days_consecutive ? ", as one consecutive block" : ""}): ${c.offDayProtected.map((id) => employeesById.get(id)?.name ?? id).join(", ")}. ATLAS reports the gap rather than silently splitting or removing anyone's OFF days.${offRejections > 0 ? ` The repair pass also rejected ${offRejections} candidate move(s) that would have broken someone's OFF block.` : ""}`
+      : offRejections > 0
+        ? ` The repair pass rejected ${offRejections} candidate move(s) that would have broken someone's protected weekly OFF block.`
+        : "";
     const capNote = c.capExcluded && c.capExcluded.length > 0
       ? ` ${c.capExcluded.length} otherwise rested, compatible team member(s) were excluded by a HARD cap: ${c.capExcluded
           .map((x) => `${employeesById.get(x.employeeId)?.name ?? x.employeeId} (would be a ${hardWorkCaps.maxConsecutiveWorkDays + 1}th consecutive work day)`)
@@ -1048,12 +1073,12 @@ export function generateDraftWeeklyPlan(
     if (c.capPacing) {
       return {
         requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
-        description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered within the hard work caps. This team can legally work about ${c.capPacing.teamCapacityDays} person-day(s) this week under the hard consecutive-work-day cap (${hardWorkCaps.maxConsecutiveWorkDays} consecutive work days) against ${c.capPacing.weekDemandDays} person-day(s) of real demand, so ATLAS spread that capacity across the week (cap-paced rest planning): each day carries a proportional share of the unavoidable shortfall, instead of the whole team reaching a cap together and leaving a later day with no coverage at all. ${c.capPacing.heldBack.length} team member(s) rested today to keep their remaining hard-cap capacity for their other planned days: ${c.capPacing.heldBack.map((id) => employeesById.get(id)?.name ?? id).join(", ")}.${capNote}${capNote ? "" : ` ${repairNote}`} The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+        description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered within the hard work caps. This team can legally work about ${c.capPacing.teamCapacityDays} person-day(s) this week under the hard consecutive-work-day cap (${hardWorkCaps.maxConsecutiveWorkDays} consecutive work days) against ${c.capPacing.weekDemandDays} person-day(s) of real demand, so ATLAS spread that capacity across the week (cap-paced rest planning): each day carries a proportional share of the unavoidable shortfall, instead of the whole team reaching a cap together and leaving a later day with no coverage at all. ${c.capPacing.heldBack.length} team member(s) rested today to keep their remaining hard-cap capacity for their other planned days: ${c.capPacing.heldBack.map((id) => employeesById.get(id)?.name ?? id).join(", ")}.${capNote}${capNote ? "" : ` ${repairNote}`}${offNote} The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment. Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
       };
     }
     return {
       requirementId: `specialized-demand-conflict-${c.team}-${c.dayOfWeek}`,
-      description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window${capNote ? " within the hard work caps" : ""}. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment.${capNote} Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
+      description: `BLOCKING: ${c.team} needed ${c.needed} staff member(s) for its ${c.dayOfWeek} operation (${c.window.start}–${c.window.end}) but only ${c.covered} could be legally covered — no other ${c.offDayProtected && c.offDayProtected.length > 0 ? "available " : ""}team member was both rested (${config.minimum_rest_hours}h confirmed minimum) and held a compatible catalog shift for this window${capNote ? " within the hard work caps" : ""}. The plan is intentionally incomplete here rather than persisting an illegal or fabricated assignment.${capNote}${offNote} Resolve with a workforce-design decision (headcount, or a confirmed shift-code policy for this team) — not something ATLAS can fix automatically.`,
     };
   });
 

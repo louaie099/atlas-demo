@@ -601,15 +601,26 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
  * Any drift in default behaviour anywhere in Stage 6, the top-up, the
  * foreign roster, scoreCandidates or the full pipeline changes a hash.
  */
+// 2026-09-29 (OFF/OFF phase 2) RE-PIN of the four foreign:/plan: hashes only:
+// foreign-company members' roster top-up now receives a demand-aware
+// preferred OFF window (previously always undefined — see
+// specialized-team-generation.ts's WEEKLY OFF WINDOW paragraph), and
+// Profiling/Mesure enforce the weekly OFF floor, so the foreign roster and
+// the whole plan legitimately changed. stage6:/topup:/score: are untouched.
+// The property this block protects — fatigue omitted == fatigue disabled —
+// is also asserted directly below, independent of any pinned hash.
+// (Previous values: plan:2026-08-31 d2277084b9c8a568, foreign:2026-08-31
+// 44f17c92cb58a252, plan:2026-09-21 6774cc598245b782, foreign:2026-09-21
+// f1f168a3dcc70052.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "d2277084b9c8a568",
+  "plan:2026-08-31": "f28bcaf7a27e12c4",
   "stage6:2026-08-31": "765613e53f0d2c61",
   "topup:2026-08-31": "796fa5d0f3bc9033",
-  "foreign:2026-08-31": "44f17c92cb58a252",
-  "plan:2026-09-21": "6774cc598245b782",
+  "foreign:2026-08-31": "e6999dcc5728d50d",
+  "plan:2026-09-21": "88e7fbb50c327f54",
   "stage6:2026-09-21": "35e4ca6007983334",
   "topup:2026-09-21": "14206ef5e76dbc39",
-  "foreign:2026-09-21": "f1f168a3dcc70052",
+  "foreign:2026-09-21": "cb7c11e486d15733",
   "score:Boarding:0": "a37c5bb9e85fdb75",
   "score:Qatar:0": "88eedf7072a15efc",
   "score:Boarding:1": "37bb3c051860cb4d",
@@ -722,6 +733,10 @@ describe("(f) regression — at the default, Stage 6, the top-up, the foreign ro
 
   it("fatigue arguments passed but disabled (DEFAULT_FATIGUE_CONFIG / fatigueWeight 0): still every fingerprint equals the pre-wiring commit's", () => {
     expect(fingerprints("disabled-config")).toEqual(PRE_WIRING_FINGERPRINTS);
+  });
+
+  it("fatigue omitted and fatigue disabled produce identical fingerprints (the no-op property itself, independent of the pinned hashes)", () => {
+    expect(fingerprints("disabled-config")).toEqual(fingerprints("omitted"));
   });
 
   it("the fingerprints are non-trivial (the scored pools and plans are non-empty)", () => {

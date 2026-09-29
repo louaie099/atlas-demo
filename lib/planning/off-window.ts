@@ -220,24 +220,100 @@ export interface PlanPreferredOffWindowsInput {
  */
 export function planPreferredOffWindows(input: PlanPreferredOffWindowsInput): Map<string, ReadonlySet<string>> {
   const { daysOrder, weekStart, employees, demandByDay, t1DemandByBucketByDay, offDaysTarget, roles } = input;
-  const result = new Map<string, ReadonlySet<string>>();
   const n = daysOrder.length;
-  if (offDaysTarget <= 0 || n <= offDaysTarget) return result;
+  if (offDaysTarget <= 0 || n <= offDaysTarget) return new Map();
 
   const flexible = employees.filter(isFlexibleGeneralPool).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  if (flexible.length === 0) return result;
+  if (flexible.length === 0) return new Map();
 
-  const offCapacity = daysOrder.map(
-    (day) =>
-      flexible.length -
+  return planDemandAwareOffWindows({
+    daysOrder,
+    employeeIds: flexible.map((e) => e.id),
+    requiredByDay: daysOrder.map((day) =>
       estimateDailyRequiredHeadcount(demandByDay[day], t1DemandByBucketByDay?.[day], flightDateFor(weekStart, day), roles)
-  );
+    ),
+    offDaysTarget,
+    priorDayOffEmployeeIds: input.priorDayOffEmployeeIds,
+  }).windows;
+}
+
+/**
+ * GENERALIZED WATER-FILLING CORE (2026-09-29, OFF/OFF phase 2). The exact
+ * algorithm planPreferredOffWindows always ran (steps 1-3 of its doc
+ * comment), with the one thing that was Stage-6-specific — HOW a day's
+ * required headcount is estimated — lifted out into a pre-computed
+ * `requiredByDay` array. planPreferredOffWindows is now a thin wrapper that
+ * computes that array with estimateDailyRequiredHeadcount (byte-identical
+ * windows for the flexible pool); the specialized generators
+ * (specialized-team-generation.ts) compute it from their OWN demand shape —
+ * Profiling/Mesure from demandClustersForRole for their own team, a foreign
+ * company from its confirmed headcount on its real flight days — and reuse
+ * the same search, rather than a second, drifting copy of it.
+ *
+ * `employeeIds` is walked IN THE GIVEN ORDER (callers pass a deterministic
+ * order — planPreferredOffWindows sorts by id). `capacity` is how many people
+ * the requirement is shared among (default: employeeIds.length).
+ */
+export interface DemandAwareOffWindowInput {
+  daysOrder: string[];
+  employeeIds: readonly string[];
+  requiredByDay: readonly number[];
+  offDaysTarget: number;
+  capacity?: number;
+  /** See PlanPreferredOffWindowsInput.priorDayOffEmployeeIds — same guard, same fallback. */
+  priorDayOffEmployeeIds?: ReadonlySet<string>;
+  /**
+   * Optional extra per-employee window filter, applied together with the
+   * prior-day guard and with the SAME fallback (every start rejected -> the
+   * unrestricted best window). Omitted = no extra filter.
+   */
+  isAllowedStart?: (employeeId: string, start: number) => boolean;
+  /**
+   * Opt-in DEFICIT REFINEMENT (see planDemandAwareOffWindows). Only runs when
+   * the greedy placement leaves `deficit > 0`, so a feasible greedy result is
+   * returned unchanged. Default false — planPreferredOffWindows (Stage 6)
+   * does not opt in, so the flexible pool's windows stay byte-identical.
+   */
+  refineDeficit?: boolean;
+}
+
+/** Max improving moves the deficit refinement may apply (each strictly lowers the deficit, so it also terminates on its own). */
+export const OFF_WINDOW_REFINEMENT_MOVE_BUDGET = 64;
+
+export interface DemandAwareOffWindowPlan {
+  /** Each employee's window (day labels). Empty when there is nothing to place (see planPreferredOffWindows' return note). */
+  windows: Map<string, ReadonlySet<string>>;
+  /** Each employee's window start index into daysOrder (the form computeEmployeeDayCountTopUp's preferredOffWindowStart takes). */
+  starts: Map<string, number>;
+  /**
+   * Per day, how many MORE people could still be OFF after every window was
+   * placed without that day running short of `requiredByDay`. A NEGATIVE
+   * value means the placed windows leave that day short by that many people
+   * by this (coarse) estimate — the week cannot give everyone this many
+   * consecutive OFF days AND cover that day.
+   */
+  remainingOffCapacity: number[];
+  /** Σ max(0, -remainingOffCapacity[d]): the estimated person-day shortfall the windows imply (0 = feasible by the estimate). */
+  deficit: number;
+}
+
+export function planDemandAwareOffWindows(input: DemandAwareOffWindowInput): DemandAwareOffWindowPlan {
+  const { daysOrder, employeeIds, requiredByDay, offDaysTarget } = input;
+  const n = daysOrder.length;
+  const windows = new Map<string, ReadonlySet<string>>();
+  const starts = new Map<string, number>();
+  const capacity = input.capacity ?? employeeIds.length;
+  const offCapacity = daysOrder.map((_, i) => capacity - (requiredByDay[i] ?? 0));
+  if (offDaysTarget <= 0 || n <= offDaysTarget || employeeIds.length === 0) {
+    return { windows, starts, remainingOffCapacity: offCapacity, deficit: offCapacity.reduce((s, c) => s + Math.max(0, -c), 0) };
+  }
 
   const windowKey = (indices: number[]) => [Math.min(...indices.map((i) => offCapacity[i])), indices.reduce((s, i) => s + offCapacity[i], 0)];
 
-  for (const employee of flexible) {
-    const avoidFirstDay = input.priorDayOffEmployeeIds?.has(employee.id) ?? false;
+  for (const id of employeeIds) {
+    const avoidFirstDay = input.priorDayOffEmployeeIds?.has(id) ?? false;
     const allowed = (start: number) => {
+      if (input.isAllowedStart && !input.isAllowedStart(id, start)) return false;
       if (!avoidFirstDay) return true;
       for (let k = 0; k < offDaysTarget; k++) if ((start + k) % n === 0) return false;
       return true;
@@ -245,9 +321,94 @@ export function planPreferredOffWindows(input: PlanPreferredOffWindowsInput): Ma
     let start = chooseBestCyclicWindowStart(n, offDaysTarget, windowKey, undefined, allowed);
     if (start < 0) start = chooseBestCyclicWindowStart(n, offDaysTarget, windowKey); // every window excluded — never leave someone without a preference
     for (let k = 0; k < offDaysTarget; k++) offCapacity[(start + k) % n]--;
-    result.set(employee.id, new Set(cyclicWindowDays(daysOrder, start, offDaysTarget)));
+    windows.set(id, new Set(cyclicWindowDays(daysOrder, start, offDaysTarget)));
+    starts.set(id, start);
   }
-  return result;
+  if (input.refineDeficit) refineWindowDeficit(input, offCapacity, starts);
+  for (const [id, start] of starts) windows.set(id, new Set(cyclicWindowDays(daysOrder, start, offDaysTarget)));
+  return { windows, starts, remainingOffCapacity: offCapacity, deficit: offCapacity.reduce((s, c) => s + Math.max(0, -c), 0) };
+}
+
+/**
+ * DEFICIT REFINEMENT (2026-09-29, OFF/OFF phase 2). The water-filling greedy
+ * is not an exact tiler: on an exactly-feasible week (e.g. 7 members, 5
+ * needed every day — 14 OFF person-days into 7 days x 2 spare) it can place
+ * an early window so that the last member's only options overlap a day with
+ * no spare capacity, leaving a one-person gap while another day has an unused
+ * spare. When that happens (deficit > 0), this local search moves windows to
+ * remove the deficit: first single moves (one member's window to another
+ * allowed start), then pair moves (two members at once — the smallest move
+ * that fixes the tiling case above). A move is applied only if it STRICTLY
+ * lowers the total deficit; members and starts are scanned in a fixed order
+ * and the first improving move is taken, so the result is deterministic.
+ * Every candidate start still passes the employee's own isAllowedStart /
+ * prior-day guard. Bounded by OFF_WINDOW_REFINEMENT_MOVE_BUDGET applied moves
+ * (and each move strictly lowers a non-negative integer, so it terminates).
+ * Mutates `offCapacity` and `starts` in place.
+ */
+function refineWindowDeficit(input: DemandAwareOffWindowInput, offCapacity: number[], starts: Map<string, number>): void {
+  const n = input.daysOrder.length;
+  const L = input.offDaysTarget;
+  const ids = input.employeeIds.filter((id) => starts.has(id));
+  const allowed = (id: string, start: number) => {
+    if (input.isAllowedStart && !input.isAllowedStart(id, start)) return false;
+    if (input.priorDayOffEmployeeIds?.has(id)) for (let k = 0; k < L; k++) if ((start + k) % n === 0) return false;
+    return true;
+  };
+  const shift = (start: number, delta: number) => {
+    for (let k = 0; k < L; k++) offCapacity[(start + k) % n] += delta;
+  };
+  const deficit = () => offCapacity.reduce((s, c) => s + Math.max(0, -c), 0);
+  const trySingle = (current: number): boolean => {
+    for (const id of ids) {
+      const from = starts.get(id)!;
+      for (let to = 0; to < n; to++) {
+        if (to === from || !allowed(id, to)) continue;
+        shift(from, +1);
+        shift(to, -1);
+        if (deficit() < current) {
+          starts.set(id, to);
+          return true;
+        }
+        shift(to, +1);
+        shift(from, -1);
+      }
+    }
+    return false;
+  };
+  const tryPair = (current: number): boolean => {
+    for (let a = 0; a < ids.length; a++) {
+      for (let b = a + 1; b < ids.length; b++) {
+        const fromA = starts.get(ids[a])!;
+        const fromB = starts.get(ids[b])!;
+        for (let toA = 0; toA < n; toA++) {
+          if (!allowed(ids[a], toA)) continue;
+          for (let toB = 0; toB < n; toB++) {
+            if ((toA === fromA && toB === fromB) || !allowed(ids[b], toB)) continue;
+            shift(fromA, +1);
+            shift(fromB, +1);
+            shift(toA, -1);
+            shift(toB, -1);
+            if (deficit() < current) {
+              starts.set(ids[a], toA);
+              starts.set(ids[b], toB);
+              return true;
+            }
+            shift(toB, +1);
+            shift(toA, +1);
+            shift(fromB, -1);
+            shift(fromA, -1);
+          }
+        }
+      }
+    }
+    return false;
+  };
+  for (let moves = 0; moves < OFF_WINDOW_REFINEMENT_MOVE_BUDGET; moves++) {
+    const current = deficit();
+    if (current === 0) return;
+    if (!trySingle(current) && !tryPair(current)) return;
+  }
 }
 
 /**

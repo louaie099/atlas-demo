@@ -23,6 +23,7 @@ import { auditAverageWeeklyHoursFeasibility, checkRestBetweenDays, checkRosterTa
 import { repairSlotPopulationGaps, HARD_CAP_REPAIR_ATTEMPT_BUDGET, SlotRepairInput } from "../lib/planning/hard-cap-repair";
 import { resolveDefaultLaborRules } from "../lib/labor-rules";
 import { usesFixedCycleRotation } from "../lib/teams";
+import { CONFIGURED_COMPANIES } from "../lib/company-config";
 import { getShiftDurationHours } from "../lib/shift-templates";
 import { flightDateFor } from "../lib/flight-date";
 import { EMPLOYEES, FLIGHTS, CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_START, CURRENT_WEEK_LABEL } from "../lib/seed-data";
@@ -75,8 +76,16 @@ const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
 // exercised the removed hours cap) is gone — see
 // docs/known-limitations/roster-planning-vs-duty-allocation.md's
 // 2026-09-29 "hard 42h cap removed" addendum for the full audit trail.
-const CAPS_OFF: Config = { ...CONFIG, max_consecutive_work_days: 999, normal_off_days_consecutive: false };
-const CONSECUTIVE_ONLY: Config = { ...CONFIG, normal_off_days_consecutive: false };
+//
+// 2026-09-29 (OFF/OFF phase 2): the generators now ENFORCE the weekly OFF
+// floor (minimum_off_days_per_planning_week) for Profiling/Mesure/foreign
+// companies too, so the same isolation sets that floor to 0 here — with it,
+// a one-person Profiling "team" facing daily demand would be held OFF two
+// days by the OFF rules, masking exactly the cap behaviour this file pins.
+// The floor's own generator behaviour is covered by
+// tests/off-off-generator-placement.test.ts.
+const CAPS_OFF: Config = { ...CONFIG, max_consecutive_work_days: 999, normal_off_days_consecutive: false, minimum_off_days_per_planning_week: 0 };
+const CONSECUTIVE_ONLY: Config = { ...CONFIG, normal_off_days_consecutive: false, minimum_off_days_per_planning_week: 0 };
 
 function makeEmployee(overrides: Partial<Employee>): Employee {
   return {
@@ -492,10 +501,39 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
   const atDefault = demo(CONFIG);
   const defaultRoster = rosterOf(atDefault);
 
-  it("E7 — with both caps non-binding (999h / 999 days) the demo roster AND every duty are byte-identical to the pre-phase output", () => {
+  it("E7 — with both caps non-binding (999h / 999 days) the demo roster AND every duty are byte-identical to the pre-phase output (foreign-company OFF blocks excepted: OFF/OFF phase 2)", () => {
+    // 2026-09-29 (OFF/OFF phase 2): foreign-company members' roster top-up
+    // now receives a demand-aware preferred OFF window
+    // (computeEmployeeDayCountTopUp's preferredOffWindowStart, previously
+    // always undefined). The pre-phase fixture put almost every foreign
+    // member's OFF block on Monday-Tuesday purely from the earliest-start
+    // tie-break; those blocks now move (spread across each team), which also
+    // moves WHICH member holds a company-team duty. That is the intended
+    // change and has nothing to do with the hard caps this test isolates, so:
+    // every other row and every other duty stays byte-identical, and each
+    // foreign row keeps its worked-day count and one consecutive OFF block.
     const p = demo(CAPS_OFF);
-    expect(rosterOf(p)).toEqual(fixture.roster);
-    expect(dutiesOf(p)).toEqual(fixture.duties);
+    const roster = rosterOf(p);
+    const isForeign = (id: string) => CONFIGURED_COMPANIES.includes(EMPLOYEES.find((e) => e.id === id)!.assignment);
+    for (const e of EMPLOYEES) {
+      if (!isForeign(e.id) || roster[e.id] === fixture.roster[e.id]) {
+        expect(roster[e.id], e.id).toBe(fixture.roster[e.id]);
+        continue;
+      }
+      const worked = roster[e.id].split("|").map((c) => c !== "OFF");
+      expect(worked.filter(Boolean).length, e.id).toBe(fixture.roster[e.id].split("|").filter((c) => c !== "OFF").length);
+      const off = worked.map((w) => !w);
+      const offCount = off.filter(Boolean).length;
+      const longest = maxRun([...off, ...off].slice(0, 13)); // cyclic run
+      expect(Math.min(longest, offCount), e.id).toBe(offCount); // one consecutive (cyclic) block
+    }
+    const companyDuty = (d: string) => d.split("|")[1].endsWith("-company-team");
+    const duties = dutiesOf(p);
+    // Same duties, same holders; only their order within a day may move (Stage 9 walks requirements in a
+    // capacity-dependent order and the foreign members above are on different days now).
+    expect(duties.filter((d) => !companyDuty(d)).sort()).toEqual(fixture.duties.filter((d) => !companyDuty(d)).sort());
+    const slots = (list: string[]) => list.filter(companyDuty).map((d) => d.split("|").slice(0, 2).join("|")).sort();
+    expect(slots(duties)).toEqual(slots(fixture.duties));
     expect(p.hardCapExclusions).toEqual([]);
   });
 
