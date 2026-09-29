@@ -17,6 +17,7 @@ import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
+import { Button } from "@/components/ui";
 import { shiftWeek } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
@@ -103,6 +104,18 @@ export default function PlanningPage() {
   // this page.
   const [weekStart, setWeekStart] = useState<string | null>(null);
 
+  // Failure-safe loading (2026-09-29 fix): loadWeeklyPlan's fetch chain
+  // previously had NO .catch() anywhere, so a rejected fetch, a non-2xx
+  // response, or a response body that failed to parse as JSON left every
+  // state above (plan/flights/weekStart/...) stuck at its initial
+  // "loading" sentinel forever -- the page showed LOADING.../"Loading
+  // flight schedule..."/"Select week" permanently, with no error and no
+  // way to retry. loadError is set on any such failure and read below to
+  // render an explicit error/retry state instead. It is deliberately NOT
+  // conflated with `plan === null` ("no plan generated yet for this
+  // week") -- that is a normal, successful response, not a failure.
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Single fetch, single computed plan: Flight Coverage, the summary bar,
   // and Agent Schedule all come from the same /api/planning/weekly-view
   // response -- one generateDraftWeeklyPlan() run per load, not two
@@ -127,23 +140,52 @@ export default function PlanningPage() {
   // Planning itself just persisted before it will show success.
   function loadWeeklyPlan(targetWeekStart?: string): Promise<WeeklyPlan | null> {
     const url = targetWeekStart ? `/api/planning/weekly-view?week_start=${targetWeekStart}` : "/api/planning/weekly-view";
+    setLoadError(null);
     return fetch(url, { cache: "no-store" })
-      .then((r) => r.json())
+      .then(async (r) => {
+        // A non-2xx response (eg. the 500 this route returns when a
+        // dependent query -- including resolveEffectiveConfig's
+        // planning_labor_rules/planning_fatigue_config lookups -- throws,
+        // such as a missing table from an unapplied migration) must not be
+        // parsed as if it were the normal payload: surface its message and
+        // stop, rather than setting state from whatever shape the error
+        // body happens to have.
+        let body: { error?: string; [key: string]: unknown };
+        try {
+          body = await r.json();
+        } catch {
+          throw new Error(`Server returned ${r.status} ${r.statusText || ""}.`.trim());
+        }
+        if (!r.ok) throw new Error(body.error ?? `Server returned ${r.status}.`);
+        return body;
+      })
       .then((data) => {
-        setWeekStart(data.weekStart ?? targetWeekStart ?? null);
-        setFlights(data.flights ?? []);
-        setRoster(data.roster ?? []);
-        setSchedule(data.schedule ?? []);
-        setZoneCoverage(data.zoneCoverage ?? []);
-        setIssues(data.issues ?? []);
-        setPlan(data.plan ?? null);
+        setWeekStart((data.weekStart as string | undefined) ?? targetWeekStart ?? null);
+        setFlights((data.flights as Flight[]) ?? []);
+        setRoster((data.roster as RosterRequirementView[]) ?? []);
+        setSchedule((data.schedule as AgentScheduleEntry[]) ?? []);
+        setZoneCoverage((data.zoneCoverage as ZoneCoverageView[]) ?? []);
+        setIssues((data.issues as PlanIssue[]) ?? []);
+        setPlan((data.plan as WeeklyPlan | null) ?? null);
         setIsStale(Boolean(data.isStale));
-        return (data.plan ?? null) as WeeklyPlan | null;
+        return (data.plan as WeeklyPlan | null) ?? null;
+      })
+      .catch((err) => {
+        setLoadError(err instanceof Error ? err.message : "Unable to load the weekly plan.");
+        // Re-thrown so a caller that specifically needs to know this
+        // refetch failed (MakePlanningButton's read-after-write check)
+        // still sees a rejection -- loadError above is what drives this
+        // page's own UI, independent of whether a given caller awaits it.
+        throw err;
       });
   }
 
   useEffect(() => {
-    loadWeeklyPlan();
+    // Fire-and-forget from the page's own perspective -- the failure is
+    // already reflected in loadError/the UI below; this .catch just stops
+    // an unhandled-rejection warning for the one caller (this effect) that
+    // never awaits the promise.
+    loadWeeklyPlan().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -156,8 +198,20 @@ export default function PlanningPage() {
         <div>
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-semibold text-ink">Weekly Planning</h1>
-            <span className="px-2.5 py-1 rounded-full bg-gray-100 text-gray-600 text-xs font-medium uppercase tracking-wide">
-              {plan === undefined ? "Loading…" : plan === null ? "No Plan Yet" : plan.status === "published" ? "Published Plan" : "Draft Weekly Plan"}
+            <span
+              className={`px-2.5 py-1 rounded-full text-xs font-medium uppercase tracking-wide ${
+                plan === undefined && loadError ? "bg-bad-50 text-bad-700" : "bg-gray-100 text-gray-600"
+              }`}
+            >
+              {plan === undefined
+                ? loadError
+                  ? "Unable To Load"
+                  : "Loading…"
+                : plan === null
+                  ? "No Plan Yet"
+                  : plan.status === "published"
+                    ? "Published Plan"
+                    : "Draft Weekly Plan"}
             </span>
           </div>
           <p className="text-muted mt-1 max-w-2xl">
@@ -176,9 +230,9 @@ export default function PlanningPage() {
       <WeekNav
         weekStart={weekStart}
         hasData={(flights?.length ?? 0) > 0}
-        onPrev={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, -1))}
-        onNext={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, 1))}
-        onSelectWeek={(target) => loadWeeklyPlan(target)}
+        onPrev={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, -1)).catch(() => {})}
+        onNext={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, 1)).catch(() => {})}
+        onSelectWeek={(target) => loadWeeklyPlan(target).catch(() => {})}
       />
 
       {plan && plan.status === "draft" && isStale && (
@@ -187,7 +241,23 @@ export default function PlanningPage() {
         </div>
       )}
 
-      <>
+      {loadError && (
+        <div className="bg-bad-50 border border-bad-500/30 text-bad-700 rounded-xl2 px-4 py-3 text-sm flex items-center justify-between gap-3">
+          <span>Unable to load the weekly plan -- {loadError}</span>
+          <Button variant="secondary" className="!py-1.5 text-xs shrink-0" onClick={() => loadWeeklyPlan(weekStart ?? undefined).catch(() => {})}>
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {/* Once a load has failed and NOTHING has ever loaded successfully
+          (weekStart is still null), none of the tables below have any data
+          to show anyway -- render the retry banner above in place of the
+          whole workspace rather than a page full of permanent "Loading..."
+          placeholders underneath it. A failure on a LATER refetch (weekStart
+          already set from an earlier success) instead keeps showing the
+          last-known-good data beneath the banner. */}
+      {!(loadError && weekStart === null) && <>
           {flights && roster && (
             <PlanningSummaryBar flights={flights} roster={roster} issues={issues} zoneCoverage={zoneCoverage ?? []} onSelectMetric={setOpenMetric} />
           )}
@@ -226,8 +296,8 @@ export default function PlanningPage() {
                 Flight Coverage or Agent Schedule. */}
             {tab === "flights" && weekStart && (
               <div className="flex gap-2">
-                <ImportFlightsDialog weekStart={weekStart} onImported={() => loadWeeklyPlan(weekStart)} />
-                <AddFlightForm weekStart={weekStart} onAdded={(newFlightWeekStart) => loadWeeklyPlan(newFlightWeekStart)} />
+                <ImportFlightsDialog weekStart={weekStart} onImported={() => loadWeeklyPlan(weekStart).catch(() => {})} />
+                <AddFlightForm weekStart={weekStart} onAdded={(newFlightWeekStart) => loadWeeklyPlan(newFlightWeekStart).catch(() => {})} />
               </div>
             )}
           </div>
@@ -236,7 +306,7 @@ export default function PlanningPage() {
             <>
               {flights === null && <p className="text-sm text-muted">Loading flight schedule...</p>}
               {flights && weekStart && (
-                <FlightScheduleView flights={flights} onChanged={(newWeekStart) => loadWeeklyPlan(newWeekStart ?? weekStart)} />
+                <FlightScheduleView flights={flights} onChanged={(newWeekStart) => loadWeeklyPlan(newWeekStart ?? weekStart).catch(() => {})} />
               )}
               {flights && flights.length === 0 && (
                 <div className="bg-white border border-border rounded-xl2 px-4 py-6 text-center text-sm text-muted">
@@ -292,7 +362,7 @@ export default function PlanningPage() {
               {schedule && <AgentScheduleTable schedule={schedule} focus={scheduleFocus} />}
             </>
           )}
-      </>
+      </>}
 
       {openMetric && flights && roster && (
         <SummaryDrilldownSheet
@@ -342,7 +412,7 @@ export default function PlanningPage() {
           // week, while the currently-viewed week's own view went stale.
           // Explicitly re-passing the real `weekStart` keeps the refetch
           // scoped to whatever week is actually open.
-          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined)}
+          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined).catch(() => {})}
         />
       )}
 
@@ -350,7 +420,7 @@ export default function PlanningPage() {
         <ZoneFindAgentSheet
           zoneRequirementId={openZoneRequirementId}
           onClose={() => setOpenZoneRequirementId(null)}
-          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined)}
+          onAssigned={() => loadWeeklyPlan(weekStart ?? undefined).catch(() => {})}
         />
       )}
     </div>

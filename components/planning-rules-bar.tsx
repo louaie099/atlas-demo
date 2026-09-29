@@ -29,14 +29,44 @@ export interface RulesResponse {
 export function PlanningRulesBar() {
   const [data, setData] = useState<RulesResponse | null>(null);
   const [open, setOpen] = useState(false);
+  // Failure-safe loading (2026-09-29 fix): load()'s fetch chain previously
+  // had no .catch() anywhere, so any failure -- including GET
+  // /api/planning/rules' own 500 when loadLaborRules/loadFatigueConfig
+  // throw on a missing planning_labor_rules/planning_fatigue_config table
+  // (an unapplied migration 0016) -- left `data` stuck at `null` forever,
+  // with "Loading planning rules…" shown permanently and no error or way
+  // to retry.
+  const [error, setError] = useState<string | null>(null);
 
   function load() {
+    setError(null);
     fetch("/api/planning/rules", { cache: "no-store" })
-      .then((r) => r.json())
-      .then(setData);
+      .then(async (r) => {
+        let body: RulesResponse & { error?: string };
+        try {
+          body = await r.json();
+        } catch {
+          throw new Error(`Server returned ${r.status} ${r.statusText || ""}.`.trim());
+        }
+        if (!r.ok) throw new Error(body.error ?? `Server returned ${r.status}.`);
+        return body;
+      })
+      .then(setData)
+      .catch((err) => setError(err instanceof Error ? err.message : "Unable to load planning rules."));
   }
 
   useEffect(load, []);
+
+  if (error) {
+    return (
+      <div className="flex items-center gap-2">
+        <p className="text-xs text-bad-700">Unable to load planning rules -- {error}</p>
+        <Button variant="ghost" onClick={load} className="!px-2 !py-1 !shadow-none text-xs underline">
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (!data) {
     return <p className="text-xs text-muted">Loading planning rules…</p>;

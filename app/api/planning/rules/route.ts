@@ -28,9 +28,26 @@ import { FatigueConfig } from "@/lib/fatigue-config";
  */
 export async function GET() {
   const supabase = getSupabaseServerClient();
-  const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
-  const resolved = resolveDefaultLaborRules(undefined, rules);
-  return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+  // 2026-09-29 fix: this previously had no try/catch, so a genuine
+  // Supabase error from loadLaborRules/loadFatigueConfig (eg. a missing
+  // planning_labor_rules/planning_fatigue_config table when migration 0016
+  // has not been applied) propagated as an UNCAUGHT exception out of this
+  // route handler -- Next.js then returns its own generic, non-JSON 500
+  // page, which the client couldn't parse into an error message at all.
+  // This still throws (never silently falls back to defaults -- that
+  // distinction lives in rules-service.ts and is unchanged), it is simply
+  // now turned into a proper JSON error response, exactly like PUT below
+  // already does for its own write path.
+  try {
+    const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
+    const resolved = resolveDefaultLaborRules(undefined, rules);
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 }
 
 /**
@@ -69,7 +86,17 @@ export async function PUT(req: Request) {
     );
   }
 
-  const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
-  const resolved = resolveDefaultLaborRules(undefined, rules);
-  return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+  // The write itself succeeded at this point -- but this reload (like GET
+  // above) can still throw its own genuine Supabase error, and that must
+  // not escape as an uncaught, non-JSON 500 either.
+  try {
+    const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
+    const resolved = resolveDefaultLaborRules(undefined, rules);
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 }

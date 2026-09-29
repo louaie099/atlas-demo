@@ -52,9 +52,26 @@ export async function GET(req: Request) {
     .eq("week_start", weekStart)
     .order("flight_date")
     .order("scheduled_departure");
-  if (flightsErr) return NextResponse.json({ error: flightsErr.message }, { status: 500 });
+  if (flightsErr) return NextResponse.json({ error: flightsErr.message }, { status: 500, headers: { "Cache-Control": "no-store" } });
 
-  const view = await loadPersistedPlanView(supabase, weekStart, DAYS_WITH_DATA);
+  // 2026-09-29 fix: loadPersistedPlanView throws a real Error on any
+  // underlying Supabase error (a missing/misnamed table, a bad query --
+  // see its own throws in weekly-plan-service.ts), and nothing here used
+  // to catch that: it escaped this route as an uncaught exception, which
+  // Next.js turns into its own generic, non-JSON 500 page. The client
+  // couldn't parse that into a message, and (before app/planning/page.tsx's
+  // own fix) it also left every piece of page state stuck on "loading"
+  // forever. This still fails loudly on a genuine error -- it is turned
+  // into a normal JSON error response, not swallowed.
+  let view: Awaited<ReturnType<typeof loadPersistedPlanView>>;
+  try {
+    view = await loadPersistedPlanView(supabase, weekStart, DAYS_WITH_DATA);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
   if (!view) {
     return NextResponse.json(
       {
@@ -92,9 +109,33 @@ export async function GET(req: Request) {
       // rule change. This is what makes editing a rule surface the same
       // "schedule changed, click Make Planning" banner a flight-schedule
       // change already does, via the same existing mechanism.
-      const currentConfig = await resolveEffectiveConfig(supabase);
-      const currentHash = hashPlanInputs(weekFlights ?? [], allEmployees, currentConfig);
-      isStale = currentHash !== view.plan.generated_from_hash;
+      //
+      // 2026-09-29 fix: resolveEffectiveConfig genuinely throws on a
+      // Supabase error (eg. a missing planning_labor_rules/
+      // planning_fatigue_config table when migration 0016 has not been
+      // applied -- see rules-service.ts's own doc comment; that behavior
+      // is correct and unchanged). Previously nothing here caught it, so
+      // it propagated as an uncaught exception out of this whole route --
+      // meaning a DRAFT week's normal view (not just the rules bar) failed
+      // outright the moment that migration was missing. Staleness is a
+      // secondary, best-effort signal (see the same pattern already used
+      // two lines up for the employees query, `if (!empErr && ...)`): if
+      // it can't be computed, this route still returns the real, already-
+      // loaded plan/flights/roster/schedule -- it just skips the "schedule
+      // changed" banner rather than failing the entire page for it.
+      try {
+        const currentConfig = await resolveEffectiveConfig(supabase);
+        const currentHash = hashPlanInputs(weekFlights ?? [], allEmployees, currentConfig);
+        isStale = currentHash !== view.plan.generated_from_hash;
+      } catch (err) {
+        // Logged, not hidden -- this is still a real problem (most likely
+        // migration 0016 missing from this database), just not one that
+        // should take down the whole Weekly Planning view for it. The
+        // Planning Rules bar's own GET /api/planning/rules call surfaces
+        // the same underlying error to the planner directly.
+        console.error("weekly-view: could not resolve current config for staleness check:", err);
+        isStale = false;
+      }
     }
   }
 
