@@ -10,7 +10,9 @@ import { repairSlotPopulationGaps, breaksOffDayRules, RepairSlotAssignment, Repa
 import { maxConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
 import { validateImportFile } from "../lib/flight-import";
 import { flightDateFor } from "../lib/flight-date";
-import { EMPLOYEES, CONFIG } from "../lib/seed-data";
+import { EMPLOYEES, CONFIG, FLIGHTS, CURRENT_WEEK_START } from "../lib/seed-data";
+import { shiftCatalogForDate, getShiftTimesAs } from "../lib/shift-templates";
+import { restHoursBetween } from "../lib/roster-generation";
 import { Employee, Flight, StaffingRequirement } from "../lib/types";
 import type { GeneratedShiftAssignment } from "../lib/planning/shift-generation";
 
@@ -172,14 +174,21 @@ describe("A — Profiling/Mesure: the reported Chafik week now gets real OFF/OFF
     expect(start === 6 || 4 + start <= CAPS.maxConsecutiveWorkDays).toBe(true);
   });
 
-  it("sparse week: no window is forced (a lightly-demanded team keeps the original rotation), yet nobody can drop below the floor", () => {
+  it("sparse week: no window is forced (a lightly-demanded team keeps the original demand rotation), yet nobody can drop below the floor", () => {
     const { pool, demandByDay } = profilingWeek("2026-09-21", 6, 2, ["14:30"]);
     const hardCaps = { caps: CAPS, incomingStreakByEmployee: new Map<string, number>() };
     const without = generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, "2026-09-21", new Map(), hardCaps);
     const rules = RULES();
     const withRules = generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, "2026-09-21", new Map(), hardCaps, rules);
     expect(rules.windowsOut!.size).toBe(0);
-    expect(withRules).toEqual(without);
+    // 2026-10-01 (phase 2 follow-up): with the OFF rules supplied, the normal
+    // RAM roster top-up now also runs (see section E), so the output is no
+    // longer byte-equal to the rule-less call. The DEMAND rotation still is:
+    // every team-demand row (coversRoles [team]) and every conflict is
+    // unchanged; the top-up only adds coversRoles [] rows on idle days.
+    const demandRows = (r: typeof without) => Object.fromEntries(DAYS.map((d) => [d, (r.generatedShiftsByDay[d] ?? []).filter((g) => g.coversRoles.length > 0)]));
+    expect(demandRows(withRules)).toEqual(demandRows(without));
+    expect(withRules.conflicts).toEqual(without.conflicts);
     for (const e of pool) expect(longestOffRun(pattern(withRules.generatedShiftsByDay, e.id))).toBeGreaterThanOrEqual(2);
   });
 });
@@ -351,3 +360,152 @@ describe("D — a genuinely infeasible week (the whole team needed every day) yi
     expect(plan.issues.filter((i) => ["insufficient_off_days", "off_days_not_consecutive"].includes(i.type))).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * OFF/OFF PHASE 2 FOLLOW-UP (2026-10-01) — Profiling/Mesure normal RAM roster
+ * top-up. With the floor and the max-consecutive-OFF ceiling both at 2, a
+ * member needs exactly 5 work days for a clean 2-day block. Phase 2 left the
+ * day(s) their role demand did not fill idle (a 3rd OFF day, flagged
+ * off_days_not_consecutive). Decision: top them up exactly like
+ * foreign-company members (computeEmployeeDayCountTopUp, reused unchanged):
+ * a real, rest-legal shortest-legal catalog shift with coversRoles [] —
+ * rostered available capacity Stage 9 can fill with real duties the member
+ * is qualified for — never a fabricated duty, and never inside the
+ * protected OFF block. When no legal top-up exists, the day stays idle and
+ * validation keeps flagging it.
+ */
+describe("E — Profiling/Mesure low-demand days are topped up with real, non-demand rostered work (foreign-company top-up mirrored)", () => {
+  const STRESS_WEEK = "2026-10-05";
+  const csv = readFileSync(join(__dirname, "fixtures", "atlas_stress_week_2026-10-05.csv"), "utf-8");
+  const flights = validateImportFile(csv, new Set(), STRESS_WEEK).filter((r) => r.flight !== null).map((r) => r.flight!);
+  const plan = generateDraftWeeklyPlan(flights, EMPLOYEES, [], CONFIG, DAYS, "Week of Oct 5 2026", STRESS_WEEK, new Map(), "unknown");
+  const profMesure = EMPLOYEES.filter((e) => e.active && (e.assignment === "Profiling" || e.assignment === "Mesure"));
+  const OFF_TYPES = ["insufficient_off_days", "off_days_not_consecutive", "consecutive_off_violation"];
+  // Phase 2's own report: these members had a 3rd idle OFF day this week —
+  // the first four split (off_days_not_consecutive), the last three as a
+  // 3-day run (consecutive_off_violation).
+  const PREVIOUSLY_FLAGGED = ["Marouane Chafik", "Adil Chafik", "Basma Chafik", "Mehdi Chafik", "Chaimae Chafik", "Younes Chafik", "Kenza Chafik"];
+  const byName = (n: string) => EMPLOYEES.find((e) => e.name === n)!;
+  const demandOnly = (byDay: Record<string, GeneratedShiftAssignment[]>) =>
+    Object.fromEntries(DAYS.map((d) => [d, (byDay[d] ?? []).filter((g) => g.coversRoles.length > 0)]));
+
+  it("BEFORE (the demand-driven roster alone, i.e. phase 2's output): each previously-flagged member works only 4 days with 3 OFF days", () => {
+    const demand = demandOnly(plan.generatedShiftsByDay);
+    for (const name of PREVIOUSLY_FLAGGED) {
+      const p = pattern(demand, byName(name).id);
+      expect(offCount(p), `${name} ${p}`).toBe(3);
+    }
+  });
+
+  it("AFTER: each of them gets real top-up work on the idle day (catalog shift, coversRoles []) and lands on exactly 5 work / 2 consecutive OFF, with no OFF-day finding", () => {
+    for (const name of PREVIOUSLY_FLAGGED) {
+      const e = byName(name);
+      const p = pattern(plan.generatedShiftsByDay, e.id);
+      expect(offCount(p), `${name} ${p}`).toBe(2);
+      expect(longestOffRun(p), `${name} ${p}`).toBe(2);
+      const topUps = DAYS.flatMap((d) => (plan.generatedShiftsByDay[d] ?? []).filter((g) => g.employeeId === e.id && g.coversRoles.length === 0));
+      expect(topUps.length, name).toBeGreaterThan(0);
+      for (const g of topUps) expect(shiftCatalogForDate(flightDateFor(STRESS_WEEK, g.dayOfWeek))[g.shiftCode], `${name} ${g.dayOfWeek}`).toBeDefined();
+      expect(plan.issues.filter((i) => i.employeeId === e.id && OFF_TYPES.includes(i.type)), name).toEqual([]);
+    }
+  });
+
+  it("whole team, full pipeline: every Profiling/Mesure member is now 5 work / 2 consecutive OFF on the stress week, rest still holds, and the BLOCKING demand conflicts are unchanged from phase 2 (top-up claims no demand)", () => {
+    for (const e of profMesure) {
+      const p = pattern(plan.generatedShiftsByDay, e.id);
+      expect(offCount(p), `${e.name} ${p}`).toBe(2);
+      expect(longestOffRun(p), `${e.name} ${p}`).toBe(2);
+    }
+    const ids = new Set(profMesure.map((e) => e.id));
+    expect(plan.issues.filter((i) => ids.has(i.employeeId!) && OFF_TYPES.includes(i.type))).toEqual([]);
+    expect(plan.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
+    // Same week through the generator directly: top-up rows exist, all of
+    // them non-demand (coversRoles []) — DemandConflicts are computed from
+    // team-demand rows only, before the top-up runs, so it can never mask one.
+    const demandByDay = Object.fromEntries(DAYS.map((d) => [d, aggregateDailyDemand(d, flights, plan.requirements, CONFIG.checkin_demand_policy)]));
+    const hardCaps = { caps: CAPS, incomingStreakByEmployee: new Map<string, number>() };
+    const r = generateProfilingMesureShifts(DAYS, EMPLOYEES, demandByDay, CONFIG.minimum_rest_hours, STRESS_WEEK, new Map(), hardCaps, RULES());
+    const topUpRows = DAYS.flatMap((d) => r.generatedShiftsByDay[d].filter((g) => g.coversRoles.length === 0));
+    expect(topUpRows.length).toBeGreaterThan(0);
+    const blocking = plan.configurationIssues.filter((c) => /^specialized-demand-conflict-(Profiling|Mesure)-/.test(c.requirementId));
+    // 3 = exactly what phase 2's output (HEAD 124a517, no top-up) produced
+    // on this week: the top-up never adds or removes demand coverage.
+    expect(blocking.length).toBe(3);
+  });
+
+  it("unit (dense week, windows active — 7 agents, 6 needed Mon-Fri and 1 at the weekend): the 3 idle person-days are topped up, every agent's OFF days are EXACTLY their planned window, and no demand is lost", () => {
+    const W = "2026-09-21";
+    const pool = Array.from({ length: 7 }, (_, i) => makeEmployee({ id: `p-${i}`, name: `P ${i}` }));
+    const need: Record<string, number> = { Monday: 6, Tuesday: 6, Wednesday: 6, Thursday: 6, Friday: 6, Saturday: 1, Sunday: 1 };
+    const fl = DAYS.map((d) => makeFlight(W, { id: `ram-${d}`, day_of_week: d, flight_date: flightDateFor(W, d) }));
+    const reqs: StaffingRequirement[] = fl.map((f) => ({
+      id: `r-${f.id}`, flight_id: f.id, role: "Profiling", baseline_requirement: need[f.day_of_week], additional_requirement: 0,
+      total_requirement: need[f.day_of_week], source: "fixed_rule", reasoning: "", needs_configuration: false,
+    }));
+    const demandByDay = Object.fromEntries(DAYS.map((d) => [d, aggregateDailyDemand(d, fl, reqs)]));
+    const rules = RULES();
+    const r = generateProfilingMesureShifts(DAYS, pool, demandByDay, 15, W, new Map(), { caps: CAPS, incomingStreakByEmployee: new Map() }, rules);
+    expect(rules.windowsOut!.size).toBe(7); // dense regime: phase 2's hard windows are in force
+    expect(r.conflicts).toEqual([]);
+    const demand = demandOnly(r.generatedShiftsByDay);
+    expect(DAYS.reduce((s, d) => s + demand[d].length, 0)).toBe(32); // all demand covered by team-demand rows
+    let topUps = 0;
+    for (const e of pool) {
+      const p = pattern(r.generatedShiftsByDay, e.id);
+      expect(offCount(p), `${e.id} ${p}`).toBe(2);
+      expect(DAYS.filter((_, i) => p[i] === "O"), e.id).toEqual(DAYS.filter((d) => rules.windowsOut!.get(e.id)!.has(d)));
+      topUps += DAYS.filter((d) => r.generatedShiftsByDay[d].some((g) => g.employeeId === e.id && g.coversRoles.length === 0)).length;
+    }
+    expect(topUps).toBe(35 - 32); // 7 x 5 work days minus the 32 demand person-days
+  });
+
+  it("the top-up day is real, assignable capacity: on the demo week Stage 9 gives real team duties to members on their topped-up days", () => {
+    const demo = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS, "W", CURRENT_WEEK_START);
+    const pmIds = new Set(profMesure.map((e) => e.id));
+    const onTopUpDay = DAYS.flatMap((d) =>
+      demo.dutiesByDay[d].filter((duty) => pmIds.has(duty.employeeId) && demo.generatedShiftsByDay[d].some((g) => g.employeeId === duty.employeeId && g.coversRoles.length === 0))
+    );
+    expect(onTopUpDay.length).toBeGreaterThan(0);
+    for (const duty of onTopUpDay) expect(EMPLOYEES.find((e) => e.id === duty.employeeId)!.skills).toContain(duty.role);
+  });
+});
+
+describe("F — honest fallback: when no legal top-up exists the day stays idle and is still flagged (never fabricated)", () => {
+  // One Profiling agent. Monday's late RAM flight (21:30) puts them on an
+  // evening code; Wednesday's 07:00 flight on an early one. With the 15h
+  // minimum on both sides, NO catalog code fits Tuesday: the top-up has no
+  // real work to give, so Tuesday must stay idle and the split OFF days
+  // (Tuesday + the protected Saturday/Sunday block) must still be flagged.
+  const WEEK = "2026-09-21";
+  const agent = makeEmployee({ id: "prof-1", name: "Prof One" });
+  const fl = [
+    makeFlight(WEEK, { id: "mon", day_of_week: "Monday", flight_date: flightDateFor(WEEK, "Monday"), scheduled_departure: "21:30" }),
+    makeFlight(WEEK, { id: "wed", day_of_week: "Wednesday", flight_date: flightDateFor(WEEK, "Wednesday"), scheduled_departure: "07:00" }),
+    makeFlight(WEEK, { id: "thu", day_of_week: "Thursday", flight_date: flightDateFor(WEEK, "Thursday") }),
+    makeFlight(WEEK, { id: "fri", day_of_week: "Friday", flight_date: flightDateFor(WEEK, "Friday") }),
+  ];
+  const plan = generateDraftWeeklyPlan(fl, [agent], [], CONFIG, DAYS, "W", WEEK, new Map(), "unknown");
+
+  it("Tuesday has no rest-legal code at all between Monday's and Wednesday's real shifts", () => {
+    const mon = plan.generatedShiftsByDay["Monday"].find((g) => g.employeeId === "prof-1")!;
+    const wed = plan.generatedShiftsByDay["Wednesday"].find((g) => g.employeeId === "prof-1")!;
+    const tue = flightDateFor(WEEK, "Tuesday");
+    const m = getShiftTimesAs(mon.shiftCode, flightDateFor(WEEK, "Monday"));
+    const w = getShiftTimesAs(wed.shiftCode, flightDateFor(WEEK, "Wednesday"));
+    const legal = Object.entries(shiftCatalogForDate(tue)).filter(
+      ([, t]) => restHoursBetween(m.shift_start, m.shift_end, t.entree) >= 15 && restHoursBetween(t.entree, t.sortie, w.shift_start) >= 15
+    );
+    expect(legal).toEqual([]);
+  });
+
+  it("the agent works 4 days (no fabricated Tuesday row, and the reserved Saturday/Sunday block is NOT used to make up the count) and the split is flagged off_days_not_consecutive", () => {
+    const p = pattern(plan.generatedShiftsByDay, "prof-1");
+    expect(p).toBe("WOWWWOO");
+    expect(plan.generatedShiftsByDay["Tuesday"].some((g) => g.employeeId === "prof-1")).toBe(false);
+    expect(plan.issues.filter((i) => i.employeeId === "prof-1" && OFF_DAY_FINDINGS.includes(i.type)).map((i) => i.type)).toEqual(["off_days_not_consecutive"]);
+    expect(plan.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
+  });
+});
+const OFF_DAY_FINDINGS = ["insufficient_off_days", "off_days_not_consecutive", "consecutive_off_violation"];

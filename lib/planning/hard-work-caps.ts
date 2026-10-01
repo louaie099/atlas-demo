@@ -168,6 +168,6 @@ export type HardCapExclusionReason = "consecutive_work_days";
 export interface HardCapExclusion {
   employeeId: string;
   dayOfWeek: string;
-  population: "flexible_pool" | "flexible_pool_top_up" | "profiling_mesure" | "foreign_company" | "foreign_company_top_up";
+  population: "flexible_pool" | "flexible_pool_top_up" | "profiling_mesure" | "profiling_mesure_top_up" | "foreign_company" | "foreign_company_top_up";
   reason: HardCapExclusionReason;
 }

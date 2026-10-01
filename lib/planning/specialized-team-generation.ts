@@ -6,7 +6,7 @@ import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { getShiftTimesAs, getShiftDurationHours, LEGACY_BASELINE_DATE } from "../shift-templates";
 import { flightDateFor } from "../flight-date";
 import { isShiftExtensionPreferred } from "../teams";
-import { computeEmployeeDayCountTopUp } from "./roster-generation";
+import { computeEmployeeDayCountTopUp, chooseTopUpReservedOffDays } from "./roster-generation";
 import { FatigueConfig } from "../fatigue-config";
 import { FatigueStateOrUnknown } from "./fatigue-model";
 import { createFatigueLedger, advanceFatigueLedger, projectFatigueForShift, explainFatigueChoice, FatigueCandidateProjection } from "./fatigue-planning";
@@ -110,6 +110,12 @@ function consecutiveOffBlockStillPossible(worked: ReadonlySet<number>, day: numb
     if (free) return true;
   }
   return false;
+}
+
+/** Whether the cyclic block of `length` days starting at index `start` is entirely inside `freeDays`. */
+function cyclicBlockFree(daysOrder: string[], freeDays: ReadonlySet<string>, start: number, length: number): boolean {
+  for (let k = 0; k < length; k++) if (!freeDays.has(daysOrder[(start + k) % daysOrder.length])) return false;
+  return true;
 }
 
 /**
@@ -267,7 +273,10 @@ function sortByLeastUsedFirst(pool: Employee[], usageHours: Map<string, number>)
  * a Profiling/Mesure employee is rostered at all is decided purely by
  * that day's real demand, same as General T1 — the same future "roster
  * planning vs. duty allocation" redesign applies here too, once the
- * real working-hours obligation is confirmed.
+ * real working-hours obligation is confirmed. (2026-10-01: with OFF-day
+ * rules supplied, the day-COUNT side of that is covered — Profiling/Mesure
+ * get the same "5 WORK + 2 OFF" normal roster top-up as foreign-company
+ * members; the hours obligation stays gated.)
  */
 
 /** One day's genuine shortfall: this many fewer employees could be legally rostered than the real demand/commitment needed. */
@@ -709,10 +718,13 @@ function assignGroupedProfilingMesureDay(
  * aggregation Stage 6 already computes for the whole week
  * (aggregateDailyDemand, called once in generate-draft-plan.ts) — this
  * function only reads it, via demandClustersForRole, exactly as a future
- * Stage-6-style consumer would. A day with no Profiling/Mesure demand at
- * all means the whole team is OFF that day — no fabricated same-code
- * "just in case" work, matching the same principle already established
- * for the flexible pool.
+ * Stage-6-style consumer would. Demand alone never puts anyone on a day
+ * with no Profiling/Mesure demand — no fabricated same-code "just in case"
+ * team work. With OFF-day rules supplied (2026-10-01), a member whose
+ * demand leaves them short of daysOrder.length - offTarget work days is
+ * then topped up with a rostered, non-demand working day (coversRoles [])
+ * exactly like a foreign-company member — see the NORMAL RAM ROSTER TOP-UP
+ * paragraph in the body.
  */
 export function generateProfilingMesureShifts(
   daysOrder: string[],
@@ -976,6 +988,110 @@ export function generateProfilingMesureShifts(
         const reason = repairReasonFor(teamRepairs, team, a.employeeId, day);
         if (reason) g.hardCapRepairReason = reason;
         generatedShiftsByDay[day].push(g);
+      }
+    }
+
+    // NORMAL RAM ROSTER TOP-UP (2026-10-01, OFF/OFF phase 2 follow-up). With
+    // the hard floor and the max-consecutive-OFF ceiling both at 2, a member
+    // must work exactly daysOrder.length - offTarget days for their OFF days
+    // to be one clean block. When this team's REAL demand for the week is
+    // lower than that, the demand-driven roster above leaves the extra
+    // day(s) idle — a 3rd, non-consecutive OFF day validation.ts then flags
+    // as off_days_not_consecutive (or a 3-day run, consecutive_off_violation).
+    // Profiling/Mesure members are RAM Handling employees exactly like
+    // foreign-company ACEs, so they get the SAME top-up foreign-company
+    // already gets (generateForeignCompanyShifts' NORMAL RAM ROSTER TOP-UP):
+    // roster-generation.ts's computeEmployeeDayCountTopUp, reused UNCHANGED.
+    // A day it adds is a real, rest- and cap-legal working day on the
+    // shortest legal catalog code, with `coversRoles: []` — no team demand
+    // is claimed for it. It is not a fabricated duty: Stage 9
+    // (duty-generation.ts) puts every rostered employee in that day's
+    // candidate pool and matches them to any real requirement their own
+    // skills qualify them for (their team role, or e.g. Boarding / Profiling
+    // for the cross-qualified members), or leaves it as genuine available
+    // capacity — exactly what a foreign-company top-up day is.
+    //
+    // Two guards keep this purely additive to phase 2's OFF placement:
+    //  - the reserved OFF block is the planner's own demand-aware window
+    //    (preferredOffWindowStart, chooseTopUpReservedOffDays' tie-break;
+    //    in a dense week that window is already fully free, so it is the
+    //    block reserved);
+    //  - with normal_off_days_consecutive on, a day the top-up adds INSIDE
+    //    that reserved block is dropped (computeEmployeeDayCountTopUp's
+    //    pass-2 fallback, used when a non-reserved day had no legal code):
+    //    filling it would split or overrule the protected block rather than
+    //    close the gap. The idle day then stays idle and validation flags it
+    //    exactly as before — the honest-gap convention, never a fabricated
+    //    or rest-violating shift. Dropping a top-up day can only lengthen
+    //    the rest around its neighbours, so legality is preserved.
+    // Only with an OFF plan (offDayRules supplied, full 7-day week) — every
+    // direct caller without offDayRules keeps the exact prior output.
+    if (offPlan) {
+      const targetWorkDays = Math.max(0, daysOrder.length - offPlan.offTarget);
+      const rowsFor = (id: string, d: string) => (generatedShiftsByDay[d] ?? []).find((g) => g.employeeId === id);
+      for (const employee of [...pool].sort(byEmployeeId)) {
+        const scheduledDays = new Set(daysOrder.filter((d) => rowsFor(employee.id, d)));
+        if (scheduledDays.size >= targetWorkDays) continue;
+        const scheduledHours = [...scheduledDays].reduce((h, d) => h + getShiftDurationHours(rowsFor(employee.id, d)!.shiftCode, flightDateFor(weekStart, d)), 0);
+        const plannedStart = offPlan.starts.get(employee.id);
+        const freeDays = new Set(daysOrder.filter((d) => !scheduledDays.has(d)));
+        // One top-up attempt with `preferredStart` as the reservation
+        // tie-break: what it adds, the block it reserves, and its cap record.
+        const attempt = (preferredStart: number | undefined) => {
+          const reserved = offDayRules!.consecutive ? chooseTopUpReservedOffDays(daysOrder, freeDays, offPlan.offTarget, preferredStart) : new Set<string>();
+          const capShortfall: { day: string; reason: HardCapExclusionReason }[] = [];
+          const additions = computeEmployeeDayCountTopUp(
+            employee.id,
+            daysOrder,
+            weekStart,
+            scheduledDays,
+            hardCaps ? scheduledHours : 0,
+            (d) => rowsFor(employee.id, d),
+            priorWeekBoundaryContext,
+            minimumRestHours,
+            targetWorkDays,
+            offPlan.offTarget,
+            null, // targetHoursThisWindow — unconfirmed/gated, same as the flexible pool and foreign-company top-ups
+            undefined, // t1PeakDemandMinuteByDay — not applicable to Profiling/Mesure
+            preferredStart,
+            undefined, // fatigue — this generator has no fatigue input
+            hardCaps
+              ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employee.id) ?? 0, shortfallOut: capShortfall, maxConsecutiveOffDays: hardCaps.maxConsecutiveOffDays }
+              : undefined
+          );
+          const kept = [...additions].filter(([day]) => !reserved.has(day));
+          return { kept, capShortfall, clean: kept.length === additions.size && scheduledDays.size + kept.length >= targetWorkDays };
+        };
+        // Which block to keep OFF: in a DENSE week the planner's window is a
+        // hard exclusion already, so it is the only candidate. In a SPARSE
+        // week phase 2 placed no window (the planned one is only a
+        // tie-break), so when the planned block cannot be kept clean — a
+        // non-reserved day has no legal code, e.g. the day after a late
+        // AP02 when only overnight codes would fit — every other fully-free
+        // block is tried in order, and the first that reaches the target
+        // with nothing added inside it wins. None does: the attempt that
+        // keeps the most days (planned block first on ties).
+        const candidates = [plannedStart];
+        if (!windowsActive && offDayRules!.consecutive) {
+          for (let s = 0; s < daysOrder.length; s++) {
+            if (s !== plannedStart && cyclicBlockFree(daysOrder, freeDays, s, offPlan.offTarget)) candidates.push(s);
+          }
+        }
+        let chosen: ReturnType<typeof attempt> | null = null;
+        for (const start of candidates) {
+          const r = attempt(start);
+          if (!chosen || r.kept.length > chosen.kept.length) chosen = r;
+          if (r.clean) {
+            chosen = r;
+            break;
+          }
+        }
+        for (const { day, reason } of chosen!.capShortfall) {
+          hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "profiling_mesure_top_up", reason });
+        }
+        for (const [day, shiftCode] of chosen!.kept) {
+          generatedShiftsByDay[day].push({ employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] });
+        }
       }
     }
     conflicts.push(...finalConflicts);

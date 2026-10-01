@@ -501,7 +501,7 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
   const atDefault = demo(CONFIG);
   const defaultRoster = rosterOf(atDefault);
 
-  it("E7 — with both caps non-binding (999h / 999 days) the demo roster AND every duty are byte-identical to the pre-phase output (foreign-company OFF blocks excepted: OFF/OFF phase 2)", () => {
+  it("E7 — with both caps non-binding (999h / 999 days) the demo roster AND every duty are byte-identical to the pre-phase output (foreign-company OFF blocks and Profiling/Mesure top-up days excepted: OFF/OFF phase 2 + follow-up)", () => {
     // 2026-09-29 (OFF/OFF phase 2): foreign-company members' roster top-up
     // now receives a demand-aware preferred OFF window
     // (computeEmployeeDayCountTopUp's preferredOffWindowStart, previously
@@ -512,10 +512,28 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     // change and has nothing to do with the hard caps this test isolates, so:
     // every other row and every other duty stays byte-identical, and each
     // foreign row keeps its worked-day count and one consecutive OFF block.
+    //
+    // 2026-10-01 (OFF/OFF phase 2 follow-up): Profiling/Mesure members now get
+    // the SAME normal RAM roster top-up as foreign-company members
+    // (generateProfilingMesureShifts' NORMAL RAM ROSTER TOP-UP), so on this
+    // sparse demo week their idle days are topped up toward 5 work days.
+    // Also unrelated to the hard caps: such a row keeps every one of its
+    // pre-phase working days with the same code (the top-up only ADDS days)
+    // and never exceeds the normal 5-work-day target.
     const p = demo(CAPS_OFF);
     const roster = rosterOf(p);
     const isForeign = (id: string) => CONFIGURED_COMPANIES.includes(EMPLOYEES.find((e) => e.id === id)!.assignment);
+    const isProfMesure = (id: string) => ["Profiling", "Mesure"].includes(EMPLOYEES.find((e) => e.id === id)!.assignment);
     for (const e of EMPLOYEES) {
+      if (isProfMesure(e.id) && roster[e.id] !== fixture.roster[e.id]) {
+        const now = roster[e.id].split("|");
+        const before = fixture.roster[e.id].split("|");
+        before.forEach((code, j) => {
+          if (code !== "OFF") expect(now[j], `${e.id} ${DAYS_WITH_DATA[j]}`).toBe(code);
+        });
+        expect(now.filter((c) => c !== "OFF").length, e.id).toBeLessThanOrEqual(5);
+        continue;
+      }
       if (!isForeign(e.id) || roster[e.id] === fixture.roster[e.id]) {
         expect(roster[e.id], e.id).toBe(fixture.roster[e.id]);
         continue;
@@ -531,7 +549,16 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     const duties = dutiesOf(p);
     // Same duties, same holders; only their order within a day may move (Stage 9 walks requirements in a
     // capacity-dependent order and the foreign members above are on different days now).
-    expect(duties.filter((d) => !companyDuty(d)).sort()).toEqual(fixture.duties.filter((d) => !companyDuty(d)).sort());
+    // 2026-10-01: a Profiling/Mesure member's topped-up day puts them in Stage
+    // 9's candidate pool for that day, so WHICH team member holds a team duty
+    // may move within the same team (observed: the Tuesday/Saturday AT740
+    // Mesure slots). Same slots, held by the same team — compared that way.
+    const holderTeam = (d: string) => EMPLOYEES.find((e) => e.id === d.split("|")[2])!.assignment;
+    const profMesureDuty = (d: string) => ["Profiling", "Mesure"].includes(holderTeam(d));
+    const plain = (list: string[]) => list.filter((d) => !companyDuty(d) && !profMesureDuty(d)).sort();
+    expect(plain(duties)).toEqual(plain(fixture.duties));
+    const teamSlots = (list: string[]) => list.filter((d) => !companyDuty(d) && profMesureDuty(d)).map((d) => `${d.split("|").slice(0, 2).join("|")}|${holderTeam(d)}`).sort();
+    expect(teamSlots(duties)).toEqual(teamSlots(fixture.duties));
     const slots = (list: string[]) => list.filter(companyDuty).map((d) => d.split("|").slice(0, 2).join("|")).sort();
     expect(slots(duties)).toEqual(slots(fixture.duties));
     expect(p.hardCapExclusions).toEqual([]);

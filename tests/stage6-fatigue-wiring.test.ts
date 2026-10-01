@@ -612,12 +612,19 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // (Previous values: plan:2026-08-31 d2277084b9c8a568, foreign:2026-08-31
 // 44f17c92cb58a252, plan:2026-09-21 6774cc598245b782, foreign:2026-09-21
 // f1f168a3dcc70052.)
+// 2026-10-01 (OFF/OFF phase 2 follow-up) RE-PIN of the two plan: hashes only:
+// Profiling/Mesure members whose role demand leaves a would-be work day idle
+// now get the same normal RAM roster top-up as foreign-company members
+// (specialized-team-generation.ts's NORMAL RAM ROSTER TOP-UP in
+// generateProfilingMesureShifts), so the whole plan legitimately changed.
+// stage6:/topup:/foreign:/score: are untouched. (Previous values:
+// plan:2026-08-31 f28bcaf7a27e12c4, plan:2026-09-21 88e7fbb50c327f54.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "f28bcaf7a27e12c4",
+  "plan:2026-08-31": "c5cafd5ebd8ed431",
   "stage6:2026-08-31": "765613e53f0d2c61",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "88e7fbb50c327f54",
+  "plan:2026-09-21": "94d88b2ed59a6501",
   "stage6:2026-09-21": "35e4ca6007983334",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",

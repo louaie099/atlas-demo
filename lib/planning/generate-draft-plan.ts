@@ -1091,7 +1091,9 @@ export function generateDraftWeeklyPlan(
   // was the employee's normal week and never landed here. REMOVED
   // 2026-09-29 along with that ceiling — see hard-work-caps.ts's removal
   // note — so the target is now always the plain normal one.)
-  const topUpCapShortfalls = hardCapExclusions.filter((x) => x.population === "flexible_pool_top_up" || x.population === "foreign_company_top_up");
+  const topUpCapShortfalls = hardCapExclusions.filter(
+    (x) => x.population === "flexible_pool_top_up" || x.population === "foreign_company_top_up" || x.population === "profiling_mesure_top_up"
+  );
   const topUpShortfallEmployees = new Set(topUpCapShortfalls.map((x) => x.employeeId));
   const hardCapTopUpIssues: ConfigurationIssue[] = [];
   if (topUpShortfallEmployees.size > 0) {
