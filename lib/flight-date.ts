@@ -27,6 +27,19 @@ function formatISODate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+/**
+ * Today's real calendar date, "YYYY-MM-DD", in the server's local
+ * timezone — deliberately NOT `new Date().toISOString().slice(0, 10)`,
+ * which reports UTC and can silently roll to the wrong calendar day in a
+ * negative-UTC-offset timezone. Matches the existing local-date pattern
+ * already used by components/week-picker.tsx's own `todayISO`, centralized
+ * here so every "what is today" caller (Live Operations' default date
+ * included) shares one implementation.
+ */
+export function todayISO(): string {
+  return formatISODate(new Date());
+}
+
 /** The weekday name ("Monday", "Tuesday", ...) for a "YYYY-MM-DD" date, derived — never independently stated. */
 export function dayOfWeekFor(flightDate: string): string {
   return DAY_NAMES[parseISODate(flightDate).getDay()];

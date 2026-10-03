@@ -1,0 +1,28 @@
+-- Additive migration — run AFTER 0001 through 0016.
+-- Backs the Live Operations rebuild (see lib/live-ops-service.ts): the
+-- real Monthly Planning data (flights/staffing_requirements/assignments)
+-- is now the single source of truth for Live Operations too, replacing
+-- the old hardcoded "at201" + disconnected planned_duties toy system
+-- (lib/conflict.ts, left in place but unused — not a required cleanup
+-- for this milestone).
+--
+-- `actual_departure` is the ONE new column: a nullable "HH:mm" string,
+-- same format/convention as `scheduled_departure`. `scheduled_departure`
+-- itself must stay the immutable planning-time fact forever — nothing in
+-- this migration or the live-ops code that follows ever writes to it.
+-- NULL means "no operational departure change yet — scheduled_departure
+-- is still authoritative" (see lib/flight-operations.ts's
+-- `effectiveDeparture` helper, the one place that resolves "what time is
+-- this flight actually leaving at" from the two columns).
+--
+-- No `actual_gate` column: `gate` (added in earlier migrations' seed/
+-- generation path) is never read by any generation/planning logic
+-- (verified by grep across lib/planning — only ever set at flight
+-- creation/import/seed time and displayed), so it is already safe to
+-- treat as a freely, operationally editable field. The operational PATCH
+-- route (app/api/flights/[id]/operational/route.ts) writes directly to
+-- the existing `gate` column instead of introducing a parallel one.
+--
+-- No default, no backfill, no NOT NULL, no touching any existing column.
+
+alter table flights add column actual_departure text;

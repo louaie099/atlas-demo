@@ -102,7 +102,18 @@ export interface Flight {
   registration: string | null;
   callsign: string | null;
   terminal: string | null;
-  scheduled_departure: string; // "HH:mm"
+  scheduled_departure: string; // "HH:mm" — the immutable planning-time fact; never written by live-ops code
+  // Live Operations' operational departure override, "HH:mm" or null.
+  // null means no operational change has been made yet (scheduled_departure
+  // is still authoritative). Set only by the operational PATCH route
+  // (app/api/flights/[id]/operational/route.ts) — never by planning
+  // generation. Use lib/flight-operations.ts's `effectiveDeparture(flight)`
+  // to read "what time is this flight actually leaving at" rather than
+  // reading either field directly.
+  // Optional (not just nullable) so the dozens of existing Flight literals
+  // across seed data, generation, and tests — none of which know or care
+  // about live-ops — never need updating just to add this field.
+  actual_departure?: string | null;
   scheduled_arrival: string | null;
   gate: string | null;
   boarding_window_start: string | null;

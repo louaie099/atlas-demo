@@ -28,29 +28,27 @@ export default function OperationsPage() {
       });
   }
 
+  // TODO(UI agent): rewired to new routes — GET /api/live-ops now returns
+  // real flights/requirements for a date (see lib/live-ops-service.ts's
+  // LiveOpsView), and POST /api/live-ops/evaluate-impact + POST
+  // /api/confirm-reassignment replace the old plannedDuty-based
+  // recommendation/confirm flow. This page's old at201-shaped state
+  // (flight/assignedEmployees/conflict/recommendation) and the
+  // simulate-delay button below are stubbed out, not rebuilt, here.
   function loadRecommendation() {
-    fetch("/api/confirm-reassignment")
-      .then((r) => r.json())
-      .then((data) => setRecommendation(data.recommendation ?? null));
+    setRecommendation(null);
   }
 
   useEffect(() => {
     loadLiveOps();
-    loadRecommendation();
   }, []);
 
   async function handleSimulateDelay() {
     setSimulating(true);
     try {
-      const res = await fetch("/api/simulate-delay", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delayMinutes: 45 }),
-      });
-      const data = await res.json();
-      setFlight(data.flight);
-      setConflict(data.conflict);
-      if (data.conflict) loadRecommendation();
+      // TODO(UI agent): call PATCH /api/flights/[id]/operational with a
+      // real flightId + actual_departure, then POST
+      // /api/live-ops/evaluate-impact to get the new conflicts/candidates.
     } finally {
       setSimulating(false);
     }

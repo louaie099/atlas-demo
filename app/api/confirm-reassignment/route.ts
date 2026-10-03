@@ -1,89 +1,48 @@
 import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { recommendResolution, detectConflict } from "@/lib/conflict";
-import { Employee } from "@/lib/types";
+import { confirmReassignment } from "@/lib/live-ops-service";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  // Returns the current resolution recommendation, if a conflict is active,
-  // so the frontend can render the ResolutionPanel before the user confirms.
-  const supabase = getSupabaseServerClient();
-
-  const { data: flight } = await supabase.from("flights").select("*").eq("id", "at201").single();
-  const { data: requirement } = await supabase
-    .from("staffing_requirements")
-    .select("*")
-    .eq("flight_id", "at201")
-    .single();
-  const { data: assignments } = await supabase
-    .from("assignments")
-    .select("employee_id")
-    .eq("staffing_requirement_id", requirement?.id ?? "");
-  const { data: employees } = await supabase.from("employees").select("*");
-  const { data: plannedDuties } = await supabase.from("planned_duties").select("*");
-
-  if (!flight) return NextResponse.json({ recommendation: null });
-
-  const assignedIds = new Set((assignments ?? []).map((a) => a.employee_id));
-  const assignedEmployees = (employees as Employee[] | null)?.filter((e) => assignedIds.has(e.id)) ?? [];
-
-  const conflict = detectConflict(flight, assignedEmployees, plannedDuties ?? []);
-  if (!conflict) return NextResponse.json({ recommendation: null });
-
-  const resolution = recommendResolution(
-    conflict,
-    (employees as Employee[]) ?? [],
-    plannedDuties ?? [],
-    "Care Point"
-  );
-
-  return NextResponse.json({ recommendation: resolution });
-}
-
+/**
+ * POST /api/confirm-reassignment — the write step of the Live Operations
+ * reassignment flow, called only after a human confirms one of
+ * evaluate-impact's recommended replacement candidates (or picks another
+ * eligible employee). Repurposed from the old hardcoded
+ * plannedDuty/"at201" version: body and persistence are both new (see
+ * lib/live-ops-service.ts's confirmReassignment for the full write
+ * behavior — new Assignment row, `assignment_modifications` row with
+ * action "replaced", and a human-readable `audit_log_entries` row).
+ *
+ * Request body:
+ *   { staffingRequirementId: string, oldEmployeeId: string, newEmployeeId: string, reason: string }
+ *
+ * Response: `{ status: "confirmed", assignmentId: string }` on success,
+ * or `{ error: string }` with a 4xx/5xx status.
+ */
 export async function POST(req: Request) {
-  const supabase = getSupabaseServerClient();
-  const { plannedDutyId, newEmployeeId } = await req.json();
+  const body = await req.json().catch(() => ({}));
+  const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason } = body;
 
-  if (!plannedDutyId || !newEmployeeId) {
-    return NextResponse.json({ error: "plannedDutyId and newEmployeeId are required" }, { status: 400 });
+  if (!staffingRequirementId || !oldEmployeeId || !newEmployeeId) {
+    return NextResponse.json(
+      { error: "staffingRequirementId, oldEmployeeId and newEmployeeId are required" },
+      { status: 400 }
+    );
   }
 
-  const { data: newEmployee } = await supabase.from("employees").select("*").eq("id", newEmployeeId).single();
-  if (!newEmployee) return NextResponse.json({ error: "Employee not found" }, { status: 404 });
+  const supabase = getSupabaseServerClient();
+  const result = await confirmReassignment(supabase, {
+    staffingRequirementId,
+    oldEmployeeId,
+    newEmployeeId,
+    reason: reason ?? "",
+  });
 
-  const { error: updateErr } = await supabase
-    .from("planned_duties")
-    .update({ status: "reassigned", reassigned_to_employee_id: newEmployeeId })
-    .eq("id", plannedDutyId);
-  if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error }, { status: result.status });
+  }
 
-  const { data: lastStep } = await supabase
-    .from("audit_log_entries")
-    .select("step_number")
-    .order("step_number", { ascending: false })
-    .limit(1)
-    .single();
-  let nextStep = (lastStep?.step_number ?? 0) + 1;
-
-  await supabase.from("audit_log_entries").insert([
-    {
-      id: `audit-${nextStep}`,
-      step_number: nextStep++,
-      description: `Resolution recommended and confirmed: reassigned to ${newEmployee.name}`,
-    },
-    {
-      id: `audit-${nextStep}`,
-      step_number: nextStep++,
-      description: `Reassignment confirmed by Mohammed Alaoui`,
-    },
-    {
-      id: `audit-${nextStep}`,
-      step_number: nextStep++,
-      description: `Final state: full coverage maintained, no unresolved conflicts`,
-    },
-  ]);
-
-  return NextResponse.json({ status: "resolved" });
+  return NextResponse.json({ status: "confirmed", assignmentId: result.assignmentId });
 }
