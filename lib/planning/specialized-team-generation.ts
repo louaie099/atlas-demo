@@ -14,7 +14,7 @@ import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
 import { CapPacedRestPlan, allocateProportionally, planAllowsDrawIn, planCapPacedRestDays } from "./cap-paced-rest";
-import { planDemandAwareOffWindows } from "./off-window";
+import { planDemandAwareOffWindows, windowIncludesDayZero } from "./off-window";
 
 /**
  * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
@@ -79,6 +79,17 @@ export interface SpecializedOffDayRules {
   normalWeeklyOffDays: number;
   consecutive: boolean;
   priorDayOffEmployeeIds?: ReadonlySet<string>;
+  /**
+   * OFF/OFF BLOCK BOUNDARY (see off-block-continuity.ts): members KNOWN
+   * (real PUBLISHED predecessor plan only) to have their prior week's real
+   * last day be the FIRST, incomplete day of a 2-day OFF/OFF block
+   * ("requires_first_day_off"). For these members the window search below
+   * is constrained to windows that include daysOrder[0] -- this TAKES
+   * PRIORITY over `priorDayOffEmployeeIds` above for the same member (that
+   * guard exists to avoid extending an ALREADY-closed OFF run; this one
+   * completes a block that is explicitly still open).
+   */
+  requiresFirstDayOffEmployeeIds?: ReadonlySet<string>;
   windowsOut?: Map<string, ReadonlySet<string>>;
 }
 
@@ -166,7 +177,9 @@ function planSpecializedOffWindows(
       candidate = { plan: null, deficit: requiredByDay.reduce((sum, r) => sum + Math.max(0, r - members.length), 0) };
     } else {
       const startAllowed = (id: string, start: number) => {
-        if (rules.priorDayOffEmployeeIds?.has(id)) {
+        if (rules.requiresFirstDayOffEmployeeIds?.has(id)) {
+          if (!windowIncludesDayZero(n, offTarget, start)) return false;
+        } else if (rules.priorDayOffEmployeeIds?.has(id)) {
           for (let k = 0; k < offTarget; k++) if ((start + k) % n === 0) return false;
         }
         if (cap === undefined) return true;

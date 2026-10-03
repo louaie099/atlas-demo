@@ -18,6 +18,7 @@ import { PriorDayShiftMap } from "./shift-generation";
 import { deriveFallbackBoundaryContext, deriveTransitionContextFromPriorPlan, previousWeekStart } from "./rotation-context";
 import { deriveIncomingConsecutiveWorkDays, ConsecutiveDaysSeedInput } from "./consecutive-days-continuity";
 import { deriveIncomingFatigueState, fatigueSeedKindFor, FatigueSeedInput, IncomingFatigueSeed } from "./fatigue-continuity";
+import { deriveIncomingOffBlockState, OffBlockSeedInput, IncomingOffBlockState } from "./off-block-continuity";
 import { CheckinZoneId } from "../checkin-zones";
 
 /**
@@ -208,6 +209,14 @@ export interface BuildDraftPlanBundleInput {
   // fallback applies, which is "unknown" for every generation-driven
   // employee and is disclosed on the plan as such.
   priorPlanRosterEntries?: WeeklyPlanRosterEntry[];
+  // OFF/OFF BLOCK BOUNDARY (off-block-continuity.ts): whether
+  // `priorPlanRosterEntries` above actually belongs to a PUBLISHED
+  // predecessor plan -- never a draft (see that module's doc comment on
+  // why). The caller (lookupPriorWeekBoundaryContext below) already fetches
+  // the predecessor plan's status for free; this just carries that one bit
+  // through. Omitted/false = incomingOffBlockState is "unknown" for every
+  // employee, exactly like having no predecessor at all.
+  priorWeekPublished?: boolean;
 }
 
 /**
@@ -260,6 +269,19 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     fatigueOptions = { config: config.fatigue, incomingSeeds };
   }
 
+  // OFF/OFF BLOCK BOUNDARY (off-block-continuity.ts) -- PUBLISHED-ONLY,
+  // deliberately distinct from priorWeekBoundaryProvenance above (which
+  // also accepts a draft predecessor for the rest check -- out of scope to
+  // change here): only ever "prior_published_plan" when the caller has
+  // confirmed the predecessor's real status, else "none".
+  const offBlockSeedInput: OffBlockSeedInput =
+    input.priorWeekPublished && input.priorPlanRosterEntries
+      ? { kind: "prior_published_plan", priorPlanRosterEntries: input.priorPlanRosterEntries, weekStart, daysOrder }
+      : { kind: "none" };
+  const incomingOffBlockState = new Map<string, IncomingOffBlockState>(
+    employees.map((e) => [e.id, deriveIncomingOffBlockState(e, offBlockSeedInput)])
+  );
+
   const draft = generateDraftWeeklyPlan(
     flights,
     employees,
@@ -270,7 +292,7 @@ export function buildDraftPlanBundle(input: BuildDraftPlanBundleInput): DraftPla
     weekStart,
     priorWeekBoundaryContext,
     priorWeekBoundaryProvenance,
-    { incomingConsecutiveWorkDays, fatigue: fatigueOptions }
+    { incomingConsecutiveWorkDays, fatigue: fatigueOptions, incomingOffBlockState }
   );
 
   const plan: WeeklyPlan = {
@@ -632,6 +654,7 @@ export async function generateDraftPlan(
     daysOrder,
     priorWeekBoundaryContext: prior?.context,
     priorPlanRosterEntries: prior?.priorRosterEntries,
+    priorWeekPublished: prior?.published,
   });
   await persistDraftPlanBundle(supabase, bundle);
 
@@ -654,24 +677,37 @@ export async function generateDraftPlan(
  * never consulted. Also returns that plan's full roster rows (2026-09-25)
  * so the hard consecutive-work-day cap can count each employee's real
  * incoming streak (consecutive-days-continuity.ts).
+ *
+ * Also returns that plan's real `published` status (OFF/OFF block boundary
+ * milestone) -- fetched here for free alongside `id` rather than as a
+ * second query -- so buildDraftPlanBundle can restrict
+ * off-block-continuity.ts's "prior_published_plan" seed to an ACTUALLY
+ * published predecessor, never a draft (see that module's doc comment).
+ * This is deliberately NOT used to change what counts as a predecessor for
+ * the rest-boundary `context` above -- that existing behavior (which also
+ * accepts a draft) is intentionally left alone.
  */
 async function lookupPriorWeekBoundaryContext(
   supabase: SupabaseClient,
   weekStart: string,
   daysOrder: string[],
   employees: Employee[]
-): Promise<{ context: PriorDayShiftMap; priorRosterEntries: WeeklyPlanRosterEntry[] } | undefined> {
+): Promise<{ context: PriorDayShiftMap; priorRosterEntries: WeeklyPlanRosterEntry[]; published: boolean } | undefined> {
   const priorWeekId = planIdForWeek(previousWeekStart(weekStart));
   const { data: priorPlanRows, error: priorPlanErr } = await supabase
     .from("weekly_plans")
-    .select("id")
+    .select("id, status")
     .eq("id", priorWeekId);
   if (priorPlanErr) throw new Error(priorPlanErr.message);
   if (!priorPlanRows || priorPlanRows.length === 0) return undefined;
 
   const priorRosterEntries = await fetchAllRosterEntriesForPlan(supabase, priorWeekId);
   const priorLastDay = daysOrder[daysOrder.length - 1];
-  return { context: deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay, previousWeekStart(weekStart)), priorRosterEntries };
+  return {
+    context: deriveTransitionContextFromPriorPlan(employees, priorRosterEntries, priorLastDay, previousWeekStart(weekStart)),
+    priorRosterEntries,
+    published: (priorPlanRows[0] as { status: string }).status === "published",
+  };
 }
 
 /**
@@ -755,6 +791,7 @@ export async function regenerateDraftPlan(
     daysOrder,
     priorWeekBoundaryContext: prior?.context,
     priorPlanRosterEntries: prior?.priorRosterEntries,
+    priorWeekPublished: prior?.published,
   });
 
   const { error: updateErr } = await supabase

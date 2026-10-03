@@ -2,7 +2,7 @@ import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../ty
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest, STAGE6_DEFAULT_ROLES } from "./shift-generation";
-import { planPreferredOffWindows, Stage6OffWindowContext } from "./off-window";
+import { planPreferredOffWindows, Stage6OffWindowContext, windowIncludesDayZero } from "./off-window";
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
@@ -21,6 +21,7 @@ import { IncomingFatigueSeed } from "./fatigue-continuity";
 import { createFatigueLedger, advanceFatigueLedger, stage6FatigueContextFromLedger, CandidateFatigueInput } from "./fatigue-planning";
 import { HardWorkCaps, HardCapExclusion, resolveHardWorkCaps, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { IncomingConsecutiveWorkDaysSeed, incomingStreakForHardCap } from "./consecutive-days-continuity";
+import { IncomingOffBlockState } from "./off-block-continuity";
 import { HardCapRepair, repairFlexiblePoolWeek } from "./hard-cap-repair";
 
 /**
@@ -504,6 +505,17 @@ export function generateDraftWeeklyPlan(
     offWindowStructureBias?: boolean;
     fatigue?: DraftPlanFatigueOptions;
     incomingConsecutiveWorkDays?: ReadonlyMap<string, IncomingConsecutiveWorkDaysSeed>;
+    // OFF/OFF BLOCK BOUNDARY (off-block-continuity.ts): each generation-driven
+    // employee's real incoming OFF/OFF block state from the immediately
+    // preceding PUBLISHED week (deriveIncomingOffBlockState -- "prior_plan"
+    // or "unknown", never a static-baseline approximation -- see that
+    // module's doc comment on why). An employee whose state is
+    // "requires_first_day_off" has their window search (flexible pool,
+    // Profiling/Mesure, foreign-company -- all three call sites below)
+    // constrained to a window that completes the block on daysOrder[0].
+    // Omitted / "unknown" / "satisfied" / "none" = current behavior,
+    // unchanged.
+    incomingOffBlockState?: ReadonlyMap<string, IncomingOffBlockState>;
     // HARD-CAP REPAIR (2026-09-25, phase 2 part B): the bounded
     // cross-employee repair pass (hard-cap-repair.ts). Defaults to true;
     // false reproduces the phase-1 greedy-only output (used by tests to
@@ -600,6 +612,24 @@ export function generateDraftWeeklyPlan(
   if (priorWeekBoundaryProvenance === "prior_plan") {
     for (const [employeeId, shift] of priorWeekBoundaryContext) if (shift === null) priorDayOffEmployeeIds.add(employeeId);
   }
+  // OFF/OFF BLOCK BOUNDARY (see planningOptions.incomingOffBlockState above
+  // and off-block-continuity.ts): employees whose prior PUBLISHED week left
+  // a real OFF/OFF block open at the boundary -- daysOrder[0] (Monday) MUST
+  // be OFF to complete it.
+  const requiresFirstDayOffEmployeeIds = new Set<string>();
+  for (const [employeeId, state] of planningOptions.incomingOffBlockState ?? []) {
+    if (state.kind === "requires_first_day_off") requiresFirstDayOffEmployeeIds.add(employeeId);
+  }
+  // The flexible pool's own window search (planPreferredOffWindows) folds
+  // `priorDayOffEmployeeIds` into an unconditional "avoid daysOrder[0]"
+  // guard it cannot be told to override via `isAllowedStart` alone (that
+  // hook only NARROWS candidates, never widens past that guard) -- so for
+  // a member who must instead be REQUIRED onto daysOrder[0], this local
+  // copy simply drops them from the avoid-set the flexible pool sees,
+  // leaving the ORIGINAL set (used below by the specialized generators,
+  // which apply the same priority internally) untouched.
+  const priorDayOffEmployeeIdsForFlexiblePool = new Set(priorDayOffEmployeeIds);
+  for (const id of requiresFirstDayOffEmployeeIds) priorDayOffEmployeeIdsForFlexiblePool.delete(id);
   const preferredOffDaysByEmployee = (planningOptions.offWindowStructureBias ?? OFF_WINDOW_STRUCTURE_BIAS_ENABLED)
     ? planPreferredOffWindows({
         daysOrder,
@@ -609,7 +639,11 @@ export function generateDraftWeeklyPlan(
         t1DemandByBucketByDay,
         offDaysTarget: offWindowLength,
         roles: STAGE6_DEFAULT_ROLES,
-        priorDayOffEmployeeIds,
+        priorDayOffEmployeeIds: priorDayOffEmployeeIdsForFlexiblePool,
+        isAllowedStart:
+          requiresFirstDayOffEmployeeIds.size > 0
+            ? (employeeId, start) => !requiresFirstDayOffEmployeeIds.has(employeeId) || windowIncludesDayZero(daysOrder.length, offWindowLength, start)
+            : undefined,
       })
     : undefined;
 
@@ -693,6 +727,7 @@ export function generateDraftWeeklyPlan(
     normalWeeklyOffDays: config.normal_weekly_off_days,
     consecutive: config.normal_off_days_consecutive,
     priorDayOffEmployeeIds,
+    requiresFirstDayOffEmployeeIds,
   });
   const profilingMesureExclusions: HardCapExclusion[] = [];
   const profilingMesureRepairs: HardCapRepair[] = [];

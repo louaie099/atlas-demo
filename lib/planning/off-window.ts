@@ -105,6 +105,21 @@ export function cyclicWindowDays(daysOrder: string[], start: number, windowLengt
   return Array.from({ length: windowLength }, (_, k) => daysOrder[(start + k) % daysOrder.length]);
 }
 
+/**
+ * Whether the cyclic window of `length` consecutive positions out of `n`
+ * starting at `start` includes position 0 -- daysOrder's first day (e.g.
+ * Monday). Shared by every caller that needs to require or avoid a window
+ * touching the week's first day (see off-block-continuity.ts's
+ * "requires_first_day_off" state and this module's existing
+ * `priorDayOffEmployeeIds` guard, which do the opposite thing for the
+ * opposite reason -- one completes a real open OFF/OFF block across the
+ * boundary, the other avoids extending an already-closed one).
+ */
+export function windowIncludesDayZero(n: number, length: number, start: number): boolean {
+  for (let k = 0; k < length; k++) if ((start + k) % n === 0) return true;
+  return false;
+}
+
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
@@ -175,6 +190,17 @@ export interface PlanPreferredOffWindowsInput {
    * Omitted / empty = no cross-week information, no restriction.
    */
   priorDayOffEmployeeIds?: ReadonlySet<string>;
+  /**
+   * Optional extra per-employee window filter, passed straight through to
+   * planDemandAwareOffWindows (see that function's own doc on `isAllowedStart`).
+   * Added for the OFF/OFF block boundary milestone, so a flexible ACE whose
+   * prior PUBLISHED week left a real OFF/OFF block open (see
+   * off-block-continuity.ts's "requires_first_day_off") can have their
+   * window search constrained to windows that include daysOrder[0] --
+   * without this module's generic water-filling search needing to know
+   * anything about OFF/OFF blocks itself. Omitted = no extra filter.
+   */
+  isAllowedStart?: (employeeId: string, start: number) => boolean;
 }
 
 /**
@@ -234,6 +260,7 @@ export function planPreferredOffWindows(input: PlanPreferredOffWindowsInput): Ma
     ),
     offDaysTarget,
     priorDayOffEmployeeIds: input.priorDayOffEmployeeIds,
+    isAllowedStart: input.isAllowedStart,
   }).windows;
 }
 
