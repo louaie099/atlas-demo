@@ -1,94 +1,110 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Employee, Flight, ResolutionRecommendation } from "@/lib/types";
-import { LiveFlightCard } from "@/components/live-flight-card";
-import { AlertBanner } from "@/components/alert-banner";
-import { ResolutionPanel } from "@/components/resolution-panel";
-
-interface Conflict {
-  employeeName: string;
-  plannedDuty: { task: string };
-  overlapMinutes: number;
-}
+import { todayISO } from "@/lib/flight-date";
+import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
+import { deriveFlightState } from "@/lib/live-ops-flight-state";
+import { FlightOpsRow } from "@/components/flight-ops-row";
+import { EditFlightDrawer } from "@/components/edit-flight-drawer";
+import { Card } from "@/components/ui";
 
 export default function OperationsPage() {
-  const [flight, setFlight] = useState<Flight | null>(null);
-  const [assignedEmployees, setAssignedEmployees] = useState<Employee[]>([]);
-  const [conflict, setConflict] = useState<Conflict | null>(null);
-  const [recommendation, setRecommendation] = useState<ResolutionRecommendation | null>(null);
-  const [simulating, setSimulating] = useState(false);
+  const [date, setDate] = useState(todayISO());
+  const [view, setView] = useState<LiveOpsView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activeConflictFlightIds, setActiveConflictFlightIds] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<LiveOpsFlightView | null>(null);
 
-  function loadLiveOps() {
-    fetch("/api/live-ops")
+  function loadLiveOps(forDate: string) {
+    setLoading(true);
+    setError(null);
+    fetch(`/api/live-ops?date=${forDate}`)
       .then((r) => r.json())
-      .then((data) => {
-        setFlight(data.flight);
-        setAssignedEmployees(data.assignedEmployees ?? []);
-      });
-  }
-
-  // TODO(UI agent): rewired to new routes — GET /api/live-ops now returns
-  // real flights/requirements for a date (see lib/live-ops-service.ts's
-  // LiveOpsView), and POST /api/live-ops/evaluate-impact + POST
-  // /api/confirm-reassignment replace the old plannedDuty-based
-  // recommendation/confirm flow. This page's old at201-shaped state
-  // (flight/assignedEmployees/conflict/recommendation) and the
-  // simulate-delay button below are stubbed out, not rebuilt, here.
-  function loadRecommendation() {
-    setRecommendation(null);
+      .then((data: LiveOpsView) => setView(data))
+      .catch(() => setError("Could not load Live Operations for this date."))
+      .finally(() => setLoading(false));
   }
 
   useEffect(() => {
-    loadLiveOps();
-  }, []);
+    loadLiveOps(date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date]);
 
-  async function handleSimulateDelay() {
-    setSimulating(true);
-    try {
-      // TODO(UI agent): call PATCH /api/flights/[id]/operational with a
-      // real flightId + actual_departure, then POST
-      // /api/live-ops/evaluate-impact to get the new conflicts/candidates.
-    } finally {
-      setSimulating(false);
-    }
+  function handleConflictStateChange(flightId: string, active: boolean) {
+    setActiveConflictFlightIds((prev) => {
+      const next = new Set(prev);
+      if (active) next.add(flightId);
+      else next.delete(flightId);
+      return next;
+    });
   }
+
+  const sortedFlights = view?.flights
+    ? [...view.flights].sort((a, b) => a.effectiveDeparture.localeCompare(b.effectiveDeparture))
+    : [];
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-ink">Live Operations</h1>
-        <p className="text-muted mt-1">
-          Same flight, same assignments as Weekly Planning — this is the operational-day view of
-          decisions already made.
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-semibold text-ink">Live Operations</h1>
+          <p className="text-muted mt-1">Today&apos;s operation, scan and act — same plan Monthly Planning published.</p>
+        </div>
+        <label className="text-sm text-ink flex items-center gap-2">
+          Date
+          <input
+            type="date"
+            className="border border-border rounded-lg px-3 py-1.5 text-sm"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+          />
+        </label>
       </div>
 
-      {conflict && (
-        <AlertBanner
-          employeeName={conflict.employeeName}
-          task={conflict.plannedDuty.task}
-          overlapMinutes={conflict.overlapMinutes}
-        />
+      {error && (
+        <p className="text-sm text-bad-700 bg-bad-50 border border-bad-500/30 rounded-lg px-3 py-2">{error}</p>
       )}
 
-      {recommendation && (
-        <ResolutionPanel
-          recommendation={recommendation}
-          onConfirmed={() => {
-            setConflict(null);
-            setRecommendation(null);
-            loadLiveOps();
-          }}
-        />
+      {loading && <p className="text-sm text-muted">Loading…</p>}
+
+      {!loading && view && view.plan === null && (
+        <Card className="text-sm text-ink">
+          No plan exists for this date yet — generate and publish one in Monthly Planning first.
+        </Card>
       )}
 
-      {flight && (
-        <LiveFlightCard
-          flight={flight}
-          assignedEmployees={assignedEmployees}
-          onSimulateDelay={handleSimulateDelay}
-          simulating={simulating}
+      {!loading && view && view.plan !== null && view.plan.status !== "published" && (
+        <div className="rounded-xl border border-warn-500/30 bg-warn-50 text-warn-700 px-4 py-3 text-sm">
+          This date&apos;s plan is still a draft — operational changes here work the same way, but confirm the plan
+          is ready for live use.
+        </div>
+      )}
+
+      {!loading && view && view.plan !== null && sortedFlights.length === 0 && (
+        <Card className="text-sm text-muted">No flights scheduled for this date.</Card>
+      )}
+
+      {!loading && view && view.plan !== null && sortedFlights.length > 0 && (
+        <div className="flex flex-col gap-3">
+          {sortedFlights.map((f) => (
+            <FlightOpsRow
+              key={f.flight.id}
+              view={f}
+              state={deriveFlightState(f, activeConflictFlightIds.has(f.flight.id))}
+              onEdit={() => setEditing(f)}
+            />
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <EditFlightDrawer
+          flight={editing.flight}
+          effectiveDeparture={editing.effectiveDeparture}
+          onClose={() => setEditing(null)}
+          onSaved={() => loadLiveOps(date)}
+          onConflictStateChange={handleConflictStateChange}
         />
       )}
     </div>
