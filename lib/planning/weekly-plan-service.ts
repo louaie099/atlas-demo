@@ -900,16 +900,30 @@ export async function publishPlan(supabase: SupabaseClient, planId: string): Pro
   // Hard publish guard: a draft carrying an unresolved BLOCKING
   // configuration conflict (a specialized team's rotation or demand that
   // couldn't be made to satisfy the confirmed 15h minimum -- see
-  // generate-draft-plan.ts) or an actual persisted rest_violation
+  // generate-draft-plan.ts), an actual persisted rest_violation
   // (should never happen given the generation-time hard gate, but this is
-  // the last checkpoint, not merely a repeat of an earlier one) must
-  // never be published as if it were a healthy, operationally valid
-  // plan. Ordinary unfilled_duty staffing gaps are NOT blocked here --
-  // those may remain publishable depending on policy; only a confirmed
-  // hard labor-rule or configuration conflict blocks publication.
+  // the last checkpoint, not merely a repeat of an earlier one), or an
+  // actual persisted OFF/OFF hard-rule violation (2026-10-03, per the
+  // product owner's explicit "force the no separated off rule" demo
+  // instruction) must never be published as if it were a healthy,
+  // operationally valid plan. insufficient_off_days and
+  // off_days_not_consecutive are already documented in validation.ts as
+  // HARD findings for generation-driven employees ("same treatment as the
+  // other hard labor-rule finding consecutive_off_violation") -- this is
+  // what makes that documented severity actually enforced at the one
+  // place it matters (publish), rather than only a Plan Warning a planner
+  // could click past. consecutive_off_violation (the separate max-2-
+  // consecutive-OFF ceiling) is deliberately NOT included here -- the
+  // product owner's instruction was specifically the no-separated-OFF
+  // rule, not every hard OFF-related finding, and that ceiling has never
+  // been part of this guard. Ordinary unfilled_duty staffing gaps are NOT
+  // blocked here -- those may remain publishable depending on policy;
+  // only a confirmed hard labor-rule or configuration conflict blocks
+  // publication.
   const blockingConfigurationIssues = existing.configuration_issues.filter((c) => c.description.startsWith("BLOCKING:"));
   const restViolations = existing.issues.filter((i) => i.type === "rest_violation");
-  if (blockingConfigurationIssues.length > 0 || restViolations.length > 0) {
+  const offRuleViolations = existing.issues.filter((i) => i.type === "insufficient_off_days" || i.type === "off_days_not_consecutive");
+  if (blockingConfigurationIssues.length > 0 || restViolations.length > 0 || offRuleViolations.length > 0) {
     const parts: string[] = [];
     if (blockingConfigurationIssues.length > 0) {
       parts.push(`${blockingConfigurationIssues.length} unresolved blocking configuration conflict(s)`);
@@ -917,9 +931,12 @@ export async function publishPlan(supabase: SupabaseClient, planId: string): Pro
     if (restViolations.length > 0) {
       parts.push(`${restViolations.length} unresolved hard rest violation(s)`);
     }
+    if (offRuleViolations.length > 0) {
+      parts.push(`${offRuleViolations.length} unresolved hard OFF-day rule violation(s) (insufficient OFF days or a separated, non-consecutive OFF block)`);
+    }
     return {
       blocked: true,
-      reason: `This draft cannot be published: it still has ${parts.join(" and ")}. Resolve them (or accept the plan is intentionally incomplete for now) before publishing -- staffing gaps alone would not block this, but a confirmed hard labor-rule or configuration conflict must be resolved first.`,
+      reason: `This draft cannot be published: it still has ${parts.join(", ")}. Resolve them (or accept the plan is intentionally incomplete for now) before publishing -- staffing gaps alone would not block this, but a confirmed hard labor-rule or configuration conflict must be resolved first.`,
     };
   }
 

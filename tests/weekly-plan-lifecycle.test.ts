@@ -11,6 +11,7 @@ import {
   makePlanning,
 } from "../lib/planning/weekly-plan-service";
 import { Assignment, WeeklyPlan, WeeklyPlanRosterEntry, AssignmentModification } from "../lib/types";
+import type { PlanIssue } from "../lib/planning/validation";
 
 /**
  * A capable-enough fake Supabase for the lifecycle service: unlike the
@@ -152,22 +153,24 @@ const WEEK_LABEL = "Test Week";
 
 /**
  * Test-only helper: strips BLOCKING configuration issues and persisted
- * rest_violation issues from a plan row directly in the fake table. The
- * REAL seed data can legitimately carry a genuine BLOCKING conflict or
- * two (an honest specialized-team finding -- see the delivered audit),
- * which the publish guard (weekly-plan-service.ts's publishPlan) now
- * correctly refuses to publish. The tests below that are about the
- * PUBLISH STATE-MACHINE itself (draft -> published, already-published
- * guard, etc.) shouldn't be coupled to today's exact real-data conflict
- * count, so they call this first to get a plan the guard considers clean
- * -- the guard's own blocking behavior is covered by its own dedicated
- * test instead, using the real, unmodified draft.
+ * rest_violation/off-rule issues from a plan row directly in the fake
+ * table. The REAL seed data can legitimately carry a genuine BLOCKING
+ * conflict or two (an honest specialized-team finding -- see the
+ * delivered audit), which the publish guard (weekly-plan-service.ts's
+ * publishPlan) now correctly refuses to publish. The tests below that are
+ * about the PUBLISH STATE-MACHINE itself (draft -> published,
+ * already-published guard, etc.) shouldn't be coupled to today's exact
+ * real-data conflict count, so they call this first to get a plan the
+ * guard considers clean -- the guard's own blocking behavior is covered
+ * by its own dedicated tests instead (BLOCKING configuration conflicts,
+ * and separately the 2026-10-03 hard OFF-rule guard below), using
+ * synthetic/real-but-isolated cases.
  */
 function clearBlockingConflicts(fake: FakeSupabase, planId: string) {
   const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
   const plan = plans.find((p) => p.id === planId)!;
   plan.configuration_issues = plan.configuration_issues.filter((c) => !c.description.startsWith("BLOCKING:"));
-  plan.issues = plan.issues.filter((i) => i.type !== "rest_violation");
+  plan.issues = plan.issues.filter((i) => i.type !== "rest_violation" && i.type !== "insufficient_off_days" && i.type !== "off_days_not_consecutive");
 }
 
 describe("weekly-plan-service — Generate Draft", () => {
@@ -357,6 +360,52 @@ describe("weekly-plan-service — Publish", () => {
 
     const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
     expect(plans[0].status).toBe("draft"); // never silently published anyway
+  });
+
+  it("is blocked, with a clear explanation, when the draft carries an unresolved insufficient_off_days violation -- the 2026-10-03 'force the no separated off rule' demo instruction, enforced at publish, not just shown as a Plan Warning", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+    const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in draft) throw new Error("setup failed");
+    clearBlockingConflicts(fake, draft.plan.id);
+
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    const plan = plans.find((p) => p.id === draft.plan.id)!;
+    // Injected directly, exactly like the existing synthetic unfilled_duty
+    // case below -- this test must keep verifying the rule deterministically
+    // regardless of whether the real seed data happens to produce this
+    // violation on any given day.
+    plan.issues = [
+      ...plan.issues,
+      { type: "insufficient_off_days", employeeId: "synthetic-employee", dayOfWeek: "Monday", description: "synthetic insufficient OFF days for this test only" } as PlanIssue,
+    ];
+
+    const result = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
+    expect("blocked" in result).toBe(true);
+    if (!("blocked" in result)) throw new Error("unreachable");
+    expect(result.reason).toMatch(/hard OFF-day rule violation/);
+
+    expect(plans[0].status).toBe("draft"); // never silently published anyway
+  });
+
+  it("is blocked when the draft carries an unresolved off_days_not_consecutive violation (the separated-OFF-days case itself, distinct from insufficient_off_days)", async () => {
+    const fake = new FakeSupabase();
+    fake.seedFacts();
+    const draft = await generateDraftPlan(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
+    if ("blocked" in draft) throw new Error("setup failed");
+    clearBlockingConflicts(fake, draft.plan.id);
+
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    const plan = plans.find((p) => p.id === draft.plan.id)!;
+    plan.issues = [
+      ...plan.issues,
+      { type: "off_days_not_consecutive", employeeId: "synthetic-employee", dayOfWeek: "Monday", description: "synthetic separated OFF days for this test only" } as PlanIssue,
+    ];
+
+    const result = await publishPlan(fake as unknown as SupabaseClient, draft.plan.id);
+    expect("blocked" in result).toBe(true);
+    if (!("blocked" in result)) throw new Error("unreachable");
+    expect(result.reason).toMatch(/hard OFF-day rule violation/);
   });
 
   it("does NOT block on ordinary unfilled_duty staffing gaps alone -- only a real BLOCKING conflict or a persisted rest_violation blocks publish", async () => {
