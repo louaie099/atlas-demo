@@ -976,6 +976,16 @@ export function generateDraftWeeklyPlan(
       flightDateFor(weekStart, day),
       restHoursByEmployeeDay,
       hoursScheduledThisWindow,
+      // Task-count fairness (see duty-generation.ts's own doc comment on
+      // `tasksAssignedThisScope`): deliberately an empty seed per day,
+      // not a week-wide running tally like hoursScheduledThisWindow above
+      // — this dimension is explicitly day/shift-period scoped (the
+      // business's own example is "comparable tasks covering the same
+      // shift/time period"), not a week-long roster-fairness concern.
+      // generateDutiesForDay itself folds in that day's existingAssignments
+      // and self-balances across the day's own loop; nothing from a prior
+      // day needs to be threaded in here.
+      new Map<string, number>(),
       fatigueConfig ? ({ config: fatigueConfig, statesByEmployee: fatigueStatesEnteringDay[day] } satisfies CandidateFatigueInput) : undefined
     );
     dutiesByDay[day] = duties;

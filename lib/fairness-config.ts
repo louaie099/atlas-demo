@@ -18,13 +18,22 @@
  * unchanged; (3) the working-hours OBLIGATION, once configured (see
  * lib/planning/roster-obligation.ts) — that's a roster-GENERATION
  * concern (Stage 6/7, WHICH days someone works), not a duty-scoring
- * concern, so it does not appear as a weight here; (4) workload/
- * undesirable-shift distribution, using HOURS (workloadHoursWeight
- * below) rather than raw duty count, per the explicit instruction that a
- * fairness signal should reflect actual scheduled time, not how many
- * discrete duties happened to be split up; (5) other soft preferences
- * (continuity, shift duration — already handled elsewhere, e.g.
- * shift-generation.ts's own tie-break chain, untouched by this file).
+ * concern, so it does not appear as a weight here; (4) TASK-COUNT
+ * fairness (taskCountWeight below) — RAM Handling has explicitly
+ * confirmed this one, for the demo: distribute comparable tasks/duties
+ * for the same shift/time period evenly across equally-eligible
+ * candidates (e.g. 8 comparable tasks across 4 equally-eligible agents
+ * should land ~2/2/2/2, not 5/2/1/0), purely as a soft tie-break among
+ * candidates the hard gates already consider equally suitable — never at
+ * the cost of coverage or any constraint; (4b) workload/undesirable-shift
+ * distribution, using HOURS (workloadHoursWeight below) rather than raw
+ * duty count, per the business's own acknowledgment that a longer/harder
+ * task shouldn't count the same as a short one — this remains an
+ * unconfirmed placeholder at weight 0 until a real burden model backs it
+ * (task count is the confirmed, wanted interim proxy for the demo); (5)
+ * other soft preferences (continuity, shift duration — already handled
+ * elsewhere, e.g. shift-generation.ts's own tie-break chain, untouched by
+ * this file).
  *
  * FATIGUE BURDEN — A SEPARATE DIMENSION (2026-09-24, fatigue milestone
  * part 2). `fatigueWeight` below is NOT folded into workloadHoursWeight and
@@ -52,6 +61,17 @@
  * lib/planning/stage6-score-tiers.ts.) Neither key ever excludes,
  * downgrades or flags a candidate, and neither can move a "flagged"
  * candidate relative to a "recommended" one.
+ *
+ * TASK-COUNT fairness (taskCountWeight, 2026-10-03 demo milestone) sits
+ * AHEAD of both of the above in the sort (key (4), before hours/fatigue's
+ * (4a)/(4b)) — see scoreCandidates' own doc comment for exactly where.
+ * Unlike workloadHoursWeight/fatigueWeight, this one defaults ON
+ * (taskCountWeight: 1) because the business has explicitly confirmed raw
+ * task-count distribution as real, wanted behavior for the demo, while
+ * hours/fatigue remain unconfirmed placeholders pending a real burden
+ * model. Same guarantees as the other two: a pure tie-break within the
+ * "recommended" group only, never an exclusion, and never able to move a
+ * "flagged" candidate ahead of a "recommended" one.
  */
 export interface FairnessWeights {
   // 0 (the default) is a genuine no-op: scoreCandidates' sort is stable,
@@ -77,9 +97,25 @@ export interface FairnessWeights {
   // Requires the caller to pass scoreCandidates' `fatigue` input with an
   // enabled config (FATIGUE_MODEL_ENABLED stays false by default).
   fatigueWeight?: number;
+  // TASK-COUNT fairness (see the doc comment above) — defaults to 1
+  // (ENABLED), unlike the two weights above: RAM Handling confirmed raw
+  // comparable-task-count distribution as the wanted demo behavior, so
+  // this is the one real soft objective here rather than an unconfirmed
+  // placeholder. A positive value turns on key (4): among otherwise
+  // equally-suitable "recommended" candidates, prefer fewer comparable
+  // tasks already assigned this scope (see scoreCandidates'
+  // `tasksAssignedThisScope` parameter) — evaluated BEFORE the
+  // hours/fatigue keys below it. Optional so every persisted
+  // config_snapshot written before this field existed still parses — and
+  // for those old snapshots, `?? 0` makes the missing field behave as
+  // "count-fairness off", preserving exactly the order that snapshot was
+  // generated under. As with the other weights, only "> 0" carries
+  // meaning; relative magnitude is not used to reorder keys.
+  taskCountWeight?: number;
 }
 
 export const DEFAULT_FAIRNESS_WEIGHTS: FairnessWeights = {
   workloadHoursWeight: 0,
   fatigueWeight: 0,
+  taskCountWeight: 1,
 };

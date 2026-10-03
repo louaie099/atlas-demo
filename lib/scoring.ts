@@ -84,6 +84,21 @@ export function scoreCandidates(
   // weight is 0 (the default). Defaults to an empty map so every existing
   // caller/test keeps working unchanged.
   hoursScheduledThisWindow: Map<string, number> = new Map(),
+  // TASK-COUNT FAIRNESS (2026-10-03 demo milestone — see
+  // lib/fairness-config.ts's doc comment for the confirmed, enabled-by-
+  // default priority this sits at, ahead of the hours/fatigue keys
+  // below). Per-employee count of comparable tasks/duties ALREADY
+  // ASSIGNED in the current scope (e.g. this day/shift period) — used
+  // PURELY to break ties among otherwise equally-suitable "recommended"
+  // candidates when config.fairness_weights.taskCountWeight > 0: fewer
+  // tasks already assigned first. Never an exclusion, never consulted at
+  // all while the weight is 0, and never able to move a "flagged"
+  // candidate ahead of a "recommended" one. Defaults to an empty map so
+  // every existing caller/test keeps working unchanged (though the
+  // default weight is now 1 — see DEFAULT_FAIRNESS_WEIGHTS — an empty map
+  // still means "no known tasks yet", a neutral 0 for everyone, which is
+  // a genuine no-op whenever every candidate is equally novel).
+  tasksAssignedThisScope: Map<string, number> = new Map(),
   // FATIGUE BURDEN AS A SEPARATE SOFT DIMENSION (2026-09-24, fatigue
   // milestone part 2 — see lib/fairness-config.ts's doc comment for where
   // it sits relative to workloadHoursWeight). Each candidate's recent
@@ -179,7 +194,21 @@ export function scoreCandidates(
 
   const sorted = results.sort((a, b) => {
     if (a.status !== b.status) return a.status === "recommended" ? -1 : 1;
-    // Hours-based fairness tie-break — soft objective #4 in the priority
+    // Task-count fairness tie-break — soft objective #4, evaluated BEFORE
+    // the hours/fatigue keys below (see fairness-config.ts's priority
+    // chain; this is the one enabled-by-default dimension, since the
+    // business has confirmed raw task-count distribution as wanted demo
+    // behavior). Gated behind a non-zero weight; Array.prototype.sort is
+    // stable, so this is a genuine no-op (not an approximation) whenever
+    // the weight is 0 or every candidate's count ties. Only compares
+    // within the same status group — a "flagged" candidate never gets
+    // reordered relative to a "recommended" one by this signal.
+    if ((config.fairness_weights.taskCountWeight ?? 0) > 0) {
+      const countA = tasksAssignedThisScope.get(a.employee.id) ?? 0;
+      const countB = tasksAssignedThisScope.get(b.employee.id) ?? 0;
+      if (countA !== countB) return countA - countB; // fewer already-assigned comparable tasks first
+    }
+    // Hours-based fairness tie-break — soft objective #4b in the priority
     // chain (see fairness-config.ts). Gated behind a non-zero weight so
     // the default (0) reproduces today's stable, input-order result
     // exactly; Array.prototype.sort is stable, so returning 0 here for
@@ -192,7 +221,7 @@ export function scoreCandidates(
       const hoursB = hoursScheduledThisWindow.get(b.employee.id) ?? 0;
       if (hoursA !== hoursB) return hoursA - hoursB; // fewer scheduled hours first
     }
-    // Fatigue-burden key (4b) — a SEPARATE dimension from hours above (see
+    // Fatigue-burden key (4c) — a SEPARATE dimension from hours above (see
     // fairness-config.ts), only among recommended candidates (a flagged
     // pair keeps its stable order), never an exclusion.
     if (fatigueActive && a.status === "recommended") {

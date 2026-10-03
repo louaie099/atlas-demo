@@ -379,11 +379,11 @@ describe("(d) fatigue distributes a difficult foreign-company commitment among e
     const candidates = [rostered("q-0-heavy"), rostered("q-1-light")];
     const window = { start: "04:30", end: "09:00" };
     const fatigue: CandidateFatigueInput = { config: C, statesByEmployee: incoming };
-    const off = scoreCandidates("Company Team", window, candidates, CONFIG, {}, "Qatar Airways", new Map(), fatigue);
+    const off = scoreCandidates("Company Team", window, candidates, CONFIG, {}, "Qatar Airways", new Map(), new Map(), fatigue);
     expect(off.map((r) => r.employee.id)).toEqual(["q-0-heavy", "q-1-light"]); // fatigueWeight 0 -> input order, no reason key
     expect(off[0]).not.toHaveProperty("fatigueReason");
     const cfg = { ...CONFIG, fairness_weights: { ...CONFIG.fairness_weights, fatigueWeight: 1 } };
-    const on = scoreCandidates("Company Team", window, candidates, cfg, {}, "Qatar Airways", new Map(), fatigue);
+    const on = scoreCandidates("Company Team", window, candidates, cfg, {}, "Qatar Airways", new Map(), new Map(), fatigue);
     expect(on.map((r) => r.employee.id)).toEqual(["q-1-light", "q-0-heavy"]);
     expect(on[0].fatigueReason).toContain("Lower recent early-shift burden");
   });
@@ -420,10 +420,10 @@ describe("(c) foreign-company headcount remains covered regardless of fatigue", 
     const window = { start: "04:30", end: "09:00" };
     const fatigue: CandidateFatigueInput = { config: C, statesByEmployee: new Map([["q-heavy", HEAVY], ["q-light", LIGHT], ["q-light-flagged", LIGHT]]) };
     // q-light has an overlapping protected commitment -> hard-excluded, fatigue cannot bring it back.
-    const excluded = scoreCandidates("Company Team", window, [rostered("q-heavy"), rostered("q-light")], cfg, { "q-light": [{ start: "05:00", end: "06:00" }] }, "Qatar Airways", new Map(), fatigue);
+    const excluded = scoreCandidates("Company Team", window, [rostered("q-heavy"), rostered("q-light")], cfg, { "q-light": [{ start: "05:00", end: "06:00" }] }, "Qatar Airways", new Map(), new Map(), fatigue);
     expect(excluded.map((r) => r.employee.id)).toEqual(["q-heavy"]);
     // A flagged (under-rested) light candidate never moves ahead of a recommended heavy one.
-    const flagged = scoreCandidates("Company Team", window, [rostered("q-light-flagged", { rest_before_shift_hours: 8 }), rostered("q-heavy")], cfg, {}, "Qatar Airways", new Map(), fatigue);
+    const flagged = scoreCandidates("Company Team", window, [rostered("q-light-flagged", { rest_before_shift_hours: 8 }), rostered("q-heavy")], cfg, {}, "Qatar Airways", new Map(), new Map(), fatigue);
     expect(flagged.map((r) => [r.employee.id, r.status])).toEqual([["q-heavy", "recommended"], ["q-light-flagged", "flagged"]]);
     expect(flagged[1]).not.toHaveProperty("fatigueReason");
   });
@@ -456,20 +456,20 @@ describe("scoreCandidates — workload hours (4a) and fatigue burden (4b) stay s
   const weights = (workloadHoursWeight: number, fatigueWeight: number) => ({ ...CONFIG, fairness_weights: { workloadHoursWeight, fatigueWeight } });
 
   it("fatigue alone reorders only when fatigueWeight > 0 AND the input is enabled", () => {
-    expect(scoreCandidates("Boarding", window, candidates, weights(0, 1), {}, undefined, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["y-light", "x-heavy"]);
-    expect(scoreCandidates("Boarding", window, candidates, weights(0, 1), {}, undefined, new Map(), { ...fatigue, config: DEFAULT_FATIGUE_CONFIG }).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
-    expect(scoreCandidates("Boarding", window, candidates, weights(0, 0), {}, undefined, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(0, 1), {}, undefined, new Map(), new Map(), fatigue).map((r) => r.employee.id)).toEqual(["y-light", "x-heavy"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(0, 1), {}, undefined, new Map(), new Map(), { ...fatigue, config: DEFAULT_FATIGUE_CONFIG }).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(0, 0), {}, undefined, new Map(), new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
     // A persisted config_snapshot from before the field existed (no fatigueWeight key) is a no-op too.
-    expect(scoreCandidates("Boarding", window, candidates, { ...CONFIG, fairness_weights: { workloadHoursWeight: 0 } }, {}, undefined, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
+    expect(scoreCandidates("Boarding", window, candidates, { ...CONFIG, fairness_weights: { workloadHoursWeight: 0 } }, {}, undefined, new Map(), new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
   });
 
   it("with both on, workload hours is the first key: fatigue only breaks ties hours leave (never combined into one number)", () => {
     const heavyHasFewerHours = new Map([["x-heavy", 10], ["y-light", 30]]);
-    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1), {}, undefined, heavyHasFewerHours, fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1), {}, undefined, heavyHasFewerHours, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
     const equalHours = new Map([["x-heavy", 20], ["y-light", 20]]);
-    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1), {}, undefined, equalHours, fatigue).map((r) => r.employee.id)).toEqual(["y-light", "x-heavy"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1), {}, undefined, equalHours, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["y-light", "x-heavy"]);
     // Relative magnitude does not change the order of the keys.
-    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1000), {}, undefined, heavyHasFewerHours, fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
+    expect(scoreCandidates("Boarding", window, candidates, weights(1, 1000), {}, undefined, heavyHasFewerHours, new Map(), fatigue).map((r) => r.employee.id)).toEqual(["x-heavy", "y-light"]);
   });
 });
 
@@ -619,12 +619,24 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // generateProfilingMesureShifts), so the whole plan legitimately changed.
 // stage6:/topup:/foreign:/score: are untouched. (Previous values:
 // plan:2026-08-31 f28bcaf7a27e12c4, plan:2026-09-21 88e7fbb50c327f54.)
+// 2026-10-03 (task-count fairness demo milestone) RE-PIN of the two plan:
+// hashes only: DEFAULT_FAIRNESS_WEIGHTS.taskCountWeight is now 1 (ON) --
+// see lib/fairness-config.ts -- so generateDraftWeeklyPlan's Stage 9 duty
+// generation (lib/planning/duty-generation.ts) now breaks ties among
+// otherwise-equally-eligible candidates by preferring whoever already has
+// fewer comparable tasks assigned that day, instead of the old stable
+// input-pool order. This `score:`/`stage6:`/`topup:`/`foreign:` fixture
+// setup is unaffected because none of those calls pass a non-empty
+// `tasksAssignedThisScope` (it defaults to an empty map, a genuine no-op),
+// confirming the new signal is isolated to live Stage 9 generation, not a
+// change to scoreCandidates' own default behavior. (Previous values:
+// plan:2026-08-31 c5cafd5ebd8ed431, plan:2026-09-21 94d88b2ed59a6501.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "c5cafd5ebd8ed431",
+  "plan:2026-08-31": "e5b7eedcf1919903",
   "stage6:2026-08-31": "765613e53f0d2c61",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "94d88b2ed59a6501",
+  "plan:2026-09-21": "6642fea8786afda3",
   "stage6:2026-09-21": "35e4ca6007983334",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",
@@ -720,7 +732,7 @@ function fingerprints(mode: FingerprintMode): Record<string, string> {
   for (const w of [0, 1]) {
     const cfg = { ...CONFIG, fairness_weights: { ...CONFIG.fairness_weights, workloadHoursWeight: w } };
     const score = (role: string, window: { start: string; end: string }, auth?: string) =>
-      disabled ? scoreCandidates(role, window, EMPLOYEES, cfg, {}, auth, hours, enabledInput) : scoreCandidates(role, window, EMPLOYEES, cfg, {}, auth, hours);
+      disabled ? scoreCandidates(role, window, EMPLOYEES, cfg, {}, auth, hours, new Map(), enabledInput) : scoreCandidates(role, window, EMPLOYEES, cfg, {}, auth, hours);
     out[`score:Boarding:${w}`] = h(score("Boarding", { start: "06:00", end: "07:00" }));
     out[`score:Qatar:${w}`] = h(score("Company Team", { start: "09:00", end: "13:00" }, "Qatar Airways"));
   }

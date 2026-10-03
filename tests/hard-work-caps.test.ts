@@ -555,12 +555,47 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     // Mesure slots). Same slots, held by the same team — compared that way.
     const holderTeam = (d: string) => EMPLOYEES.find((e) => e.id === d.split("|")[2])!.assignment;
     const profMesureDuty = (d: string) => ["Profiling", "Mesure"].includes(holderTeam(d));
-    const plain = (list: string[]) => list.filter((d) => !companyDuty(d) && !profMesureDuty(d)).sort();
+    // 2026-10-03 (task-count fairness demo milestone — see
+    // lib/fairness-config.ts's taskCountWeight, now ON by default): a
+    // Profiling-ROLE requirement (req-id ending "-profiling") was
+    // previously won, on several days, by Youssef El Amrani (a General T1
+    // Pool generalist who happens to hold the Profiling skill) purely
+    // because he came first in the candidate pool's stable input order —
+    // never because he was specially preferred. With task-count fairness
+    // now breaking that tie, the SAME requirement is just as often filled
+    // by one of the dedicated Profiling-team specialists instead (who
+    // isn't excluded by profMesureDuty above when a generalist holds it).
+    // Coverage is identical either way (verified below via profilingSlots)
+    // — only WHICH equally-qualified individual holds it moves, exactly
+    // the business-confirmed behavior this milestone implements.
+    const profilingRoleDuty = (d: string) => d.split("|")[1].endsWith("-profiling");
+    const plain = (list: string[]) => list.filter((d) => !companyDuty(d) && !profMesureDuty(d) && !profilingRoleDuty(d)).sort();
+    // Same 2026-10-03 task-count fairness milestone also re-pinned 3 plain
+    // (non-Profiling, non-team) duties in the fixture itself: Wednesday's
+    // one-off AT201/AT535 requirements had a second, equally-eligible
+    // General T1 Pool candidate tied with the fixture's original holder
+    // (Sanaa Benali / Sara Bennis), and the new taskCountWeight tie-break
+    // now picks the one with fewer tasks already assigned that day (Hajar
+    // Benali, Amine Benali, Nadia Ziani) instead of the old stable-input-
+    // order winner. Verified directly: both are genuinely eligible
+    // ("recommended") candidates for that slot: this is the intended
+    // redistribution, not a coverage change, so the fixture's 3 affected
+    // duty strings were updated rather than the test loosened.
     expect(plain(duties)).toEqual(plain(fixture.duties));
-    const teamSlots = (list: string[]) => list.filter((d) => !companyDuty(d) && profMesureDuty(d)).map((d) => `${d.split("|").slice(0, 2).join("|")}|${holderTeam(d)}`).sort();
+    const teamSlots = (list: string[]) =>
+      list
+        .filter((d) => !companyDuty(d) && profMesureDuty(d) && !profilingRoleDuty(d))
+        .map((d) => `${d.split("|").slice(0, 2).join("|")}|${holderTeam(d)}`)
+        .sort();
     expect(teamSlots(duties)).toEqual(teamSlots(fixture.duties));
     const slots = (list: string[]) => list.filter(companyDuty).map((d) => d.split("|").slice(0, 2).join("|")).sort();
     expect(slots(duties)).toEqual(slots(fixture.duties));
+    // Profiling-role coverage itself never moves or drops — same (day,
+    // requirement) slots are filled in both runs, regardless of which
+    // Profiling-qualified employee now holds each one (see the comment
+    // above profilingRoleDuty).
+    const profilingSlots = (list: string[]) => list.filter(profilingRoleDuty).map((d) => d.split("|").slice(0, 2).join("|")).sort();
+    expect(profilingSlots(duties)).toEqual(profilingSlots(fixture.duties));
     expect(p.hardCapExclusions).toEqual([]);
   });
 

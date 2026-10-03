@@ -97,7 +97,27 @@ export async function GET(_req: Request, { params }: { params: { zoneRequirement
     candidatePool
   );
 
-  const candidates = scoreCandidates("Check-in", window, candidatePool, effectiveConfig, occupiedWindows);
+  // TASK-COUNT fairness for manual Find Agent (2026-10-03 demo milestone —
+  // see scoring.ts's `tasksAssignedThisScope` doc comment). Comparable
+  // scope = same calendar date as this zone requirement. Built from
+  // `allAssignments`/`allRequirements`/`allFlights` already fetched above
+  // for occupiedWindows -- no new query. DOCUMENTED GAP: this counts only
+  // ordinary flight-anchored duty assignments (Gate/Boarding/Profiling/
+  // Mesure/foreign-company), not other T1 Check-in zone assignments
+  // elsewhere that same day -- `existingZoneAssignments` fetched above is
+  // scoped to only THIS zone requirement, and fetching every zone
+  // assignment/requirement for the day to join against would need a new
+  // query, which is out of scope for this surgical, time-boxed change
+  // (per the product owner's explicit "minimal safe thing" guidance).
+  const tasksAssignedThisScope = new Map<string, number>();
+  for (const a of allAssignments as Assignment[]) {
+    const r = (allRequirements as StaffingRequirement[]).find((req) => req.id === a.staffing_requirement_id);
+    const f = r && (allFlights as Flight[]).find((fl) => fl.id === r.flight_id);
+    if (!f || f.flight_date !== requirementDate) continue;
+    tasksAssignedThisScope.set(a.employee_id, (tasksAssignedThisScope.get(a.employee_id) ?? 0) + 1);
+  }
+
+  const candidates = scoreCandidates("Check-in", window, candidatePool, effectiveConfig, occupiedWindows, undefined, new Map(), tasksAssignedThisScope);
 
   return NextResponse.json({ candidates });
 }

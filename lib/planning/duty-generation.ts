@@ -263,6 +263,21 @@ export function generateDutiesForDay(
   // unchanged; only relevant while config.fairness_weights.workloadHoursWeight
   // is non-zero.
   hoursScheduledThisWindow: Map<string, number> = new Map(),
+  // TASK-COUNT fairness input (2026-10-03 demo milestone — see
+  // scoring.ts's own doc comment on its `tasksAssignedThisScope`
+  // parameter). An optional external seed only (e.g. a future cross-call
+  // signal); defaults to empty. The real, day-scoped count this function
+  // forwards to scoreCandidates is built below from this seed plus
+  // existingAssignments for THIS day, then incremented as `duties` grows
+  // through the loop — which is what makes a single day's generation
+  // self-balance (an already-assigned candidate becomes comparatively
+  // less preferred for the next requirement in the same day), exactly
+  // mirroring the business's own "spread tasks within the shift period"
+  // ask. Deliberately day-scoped, not threaded across days: this is
+  // task-level fairness within a shift period, not week-wide roster
+  // fairness (that's hoursScheduledThisWindow's job, and Stage 6/7's
+  // separate OFF/OFF concern).
+  tasksAssignedThisScope: Map<string, number> = new Map(),
   // FATIGUE fairness input (2026-09-24, fatigue milestone part 2) —
   // forwarded unchanged to scoreCandidates' `fatigue` parameter: each
   // employee's fatigue state ENTERING this day. Optional; only consulted
@@ -282,6 +297,23 @@ export function generateDutiesForDay(
 
   const duties: GeneratedDuty[] = [];
   const unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
+
+  // Day-scoped task-count fairness tally (see this function's own doc
+  // comment on `tasksAssignedThisScope` above): starts from the optional
+  // external seed, then adds every pre-existing Assignment already on
+  // THIS day (e.g. a manual Find Agent fill made before this generation
+  // run) — same "existing assignments for this date" scoping
+  // computeBusyWindowsForDay already applies above — so Stage 9 doesn't
+  // treat an employee as having zero tasks today when they already do.
+  // From here, each duty pushed below increments this same map, so later
+  // requirements in this day's loop see the running count.
+  const taskCountsThisDay = new Map(tasksAssignedThisScope);
+  for (const assignment of existingAssignments) {
+    const requirement = requirements.find((r) => r.id === assignment.staffing_requirement_id);
+    const flight = requirement && flights.find((f) => f.id === requirement.flight_id);
+    if (!flight || flight.day_of_week !== dayOfWeek) continue;
+    taskCountsThisDay.set(assignment.employee_id, (taskCountsThisDay.get(assignment.employee_id) ?? 0) + 1);
+  }
 
   // Build day-effective candidate pool ONCE: only employees actually
   // rostered this day, with their real shift for THIS day substituted
@@ -435,7 +467,17 @@ export function generateDutiesForDay(
         // decides eligibility/exclusion — the clustering fix alone only
         // orders processing; this is what closes the double-booking
         // regardless of which requirement in a cluster is resolved first.
-        const results = scoreCandidates(requirement.role, conflictWindows[idx], dayEffectivePool, config, busyWindows, requiredAuthorization, hoursScheduledThisWindow, fatigue);
+        const results = scoreCandidates(
+          requirement.role,
+          conflictWindows[idx],
+          dayEffectivePool,
+          config,
+          busyWindows,
+          requiredAuthorization,
+          hoursScheduledThisWindow,
+          taskCountsThisDay,
+          fatigue
+        );
         const recommended = results.filter((r) => r.status === "recommended");
 
         if (
@@ -485,6 +527,11 @@ export function generateDutiesForDay(
         // specific airline or employee.
         const busyWindow = requirement.source === "company_config" ? computeForeignCompanyProtectedWindow(flight) : window;
         busyWindows[candidate.employee.id] = [...(busyWindows[candidate.employee.id] ?? []), busyWindow];
+        // Self-balancing within this day's generation (see
+        // taskCountsThisDay's own comment above): this candidate now
+        // counts as one more comparable task assigned today, so the next
+        // requirement resolved in this same pass sees an up-to-date tally.
+        taskCountsThisDay.set(candidate.employee.id, (taskCountsThisDay.get(candidate.employee.id) ?? 0) + 1);
         filled++;
       }
 

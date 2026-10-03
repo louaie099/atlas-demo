@@ -202,7 +202,37 @@ export async function GET(
   // Same rule duty-generation.ts uses: a company_config requirement is
   // filled by real company authorization, not a flight-task skill.
   const requiredAuthorization = requirement.source === "company_config" ? targetFlight.airline : undefined;
-  const candidates = scoreCandidates(requirement.role, window, candidatePool, effectiveConfig, occupiedWindows, requiredAuthorization);
+
+  // TASK-COUNT fairness for manual Find Agent (2026-10-03 demo milestone —
+  // see scoring.ts's `tasksAssignedThisScope` doc comment). Comparable
+  // scope = same calendar day as this requirement's flight: count, per
+  // employee, how many OTHER assignments they already hold for that same
+  // date, from `allAssignments`/`allRequirements`/`allFlights` already
+  // fetched above for occupiedWindows -- no new query. This intentionally
+  // only counts ordinary flight-anchored duty assignments (Gate/Boarding/
+  // Profiling/Mesure/foreign-company); T1 Check-in zone assignments are a
+  // separate table not fetched by this route and are not included here --
+  // a documented gap, not a correctness bug (this route never scores
+  // Check-in zone requirements, so the omission never under/over-counts
+  // the very role being scored here).
+  const tasksAssignedThisScope = new Map<string, number>();
+  for (const a of allAssignments as Assignment[]) {
+    const r = (allRequirements as StaffingRequirement[]).find((req) => req.id === a.staffing_requirement_id);
+    const f = r && (allFlights as Flight[]).find((fl) => fl.id === r.flight_id);
+    if (!f || f.flight_date !== targetFlight.flight_date) continue;
+    tasksAssignedThisScope.set(a.employee_id, (tasksAssignedThisScope.get(a.employee_id) ?? 0) + 1);
+  }
+
+  const candidates = scoreCandidates(
+    requirement.role,
+    window,
+    candidatePool,
+    effectiveConfig,
+    occupiedWindows,
+    requiredAuthorization,
+    new Map(),
+    tasksAssignedThisScope
+  );
 
   // Only computed when there's nothing to show — cheap, and never changes
   // eligibility, only explains it (see buildExclusionSummary's own doc
