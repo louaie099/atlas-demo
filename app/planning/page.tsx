@@ -18,6 +18,7 @@ import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
 import { MakePlanningForMonthDialog } from "@/components/make-planning-month-dialog";
+import { PublishButton } from "@/components/publish-button";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { Button } from "@/components/ui";
 import { monthStartFor, monthLabelFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
@@ -272,6 +273,9 @@ export default function PlanningPage() {
           <DraftLifecycle />
           <PlanningRulesBar />
           {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
+          {plan && plan.status === "draft" && (
+            <PublishButton planId={plan.id} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />
+          )}
           {monthStart && weeksInMonth.length > 0 && (
             <MakePlanningForMonthDialog
               monthLabel={monthLabelFor(monthStart)}
