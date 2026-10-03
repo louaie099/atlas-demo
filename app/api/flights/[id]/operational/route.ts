@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { Flight, FlightStatus } from "@/lib/types";
+import { FlightPhase, FLIGHT_PHASE_LABEL } from "@/lib/flight-phase";
 
 export const dynamic = "force-dynamic";
 
 const TIME_RE = /^\d{2}:\d{2}$/;
 const VALID_STATUSES: FlightStatus[] = ["scheduled", "delayed"];
+const VALID_PHASES = Object.keys(FLIGHT_PHASE_LABEL) as FlightPhase[];
 
 /**
  * PATCH /api/flights/[id]/operational — Live Operations' Edit Flight
@@ -21,6 +23,7 @@ const VALID_STATUSES: FlightStatus[] = ["scheduled", "delayed"];
  *     actual_departure?: string | null,  // "HH:mm", or null to clear back to scheduled
  *     status?: "scheduled" | "delayed",
  *     gate?: string | null,              // reuses the existing `gate` column — never read by generation
+ *     operational_phase_override?: FlightPhase | null, // null = follow the clock (lib/flight-phase.ts)
  *   }
  *
  * Response: `{ flight: Flight }` — the updated row.
@@ -31,7 +34,12 @@ const VALID_STATUSES: FlightStatus[] = ["scheduled", "delayed"];
  */
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
   const body = await req.json().catch(() => ({}));
-  const { actual_departure, status, gate } = body as { actual_departure?: string | null; status?: string; gate?: string | null };
+  const { actual_departure, status, gate, operational_phase_override } = body as {
+    actual_departure?: string | null;
+    status?: string;
+    gate?: string | null;
+    operational_phase_override?: string | null;
+  };
 
   const patch: Partial<Flight> = {};
 
@@ -53,8 +61,21 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     patch.gate = gate;
   }
 
+  if ("operational_phase_override" in body) {
+    if (operational_phase_override !== null && !VALID_PHASES.includes(operational_phase_override as FlightPhase)) {
+      return NextResponse.json(
+        { error: `operational_phase_override must be null or one of: ${VALID_PHASES.join(", ")}` },
+        { status: 400 }
+      );
+    }
+    patch.operational_phase_override = operational_phase_override as FlightPhase | null;
+  }
+
   if (Object.keys(patch).length === 0) {
-    return NextResponse.json({ error: "No recognized fields in request body (actual_departure, status, gate)." }, { status: 400 });
+    return NextResponse.json(
+      { error: "No recognized fields in request body (actual_departure, status, gate, operational_phase_override)." },
+      { status: 400 }
+    );
   }
 
   const supabase = getSupabaseServerClient();

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { todayISO } from "@/lib/flight-date";
 import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState } from "@/lib/live-ops-flight-state";
-import { FlightOpsRow } from "@/components/flight-ops-row";
+import { FlightOpsRow, DayRelation } from "@/components/flight-ops-row";
 import { EditFlightDrawer } from "@/components/edit-flight-drawer";
 import { Card } from "@/components/ui";
 
@@ -43,6 +43,19 @@ export default function OperationsPage() {
   const sortedFlights = view?.flights
     ? [...view.flights].sort((a, b) => a.effectiveDeparture.localeCompare(b.effectiveDeparture))
     : [];
+
+  // "Now," computed once per page load/refresh -- not a ticking clock (a
+  // reasonable future enhancement, not needed for this demo). Only
+  // meaningful when the viewed date actually IS today; otherwise a live
+  // phase would be fabricated for a day that isn't actually happening
+  // right now, so FlightOpsRow gets null instead.
+  const today = todayISO();
+  const isToday = date === today;
+  const nowMinutesSinceMidnight = isToday ? (() => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  })() : null;
+  const dayRelation: DayRelation = date < today ? "past" : date > today ? "future" : "today";
 
   return (
     <div className="flex flex-col gap-6">
@@ -92,6 +105,8 @@ export default function OperationsPage() {
               key={f.flight.id}
               view={f}
               state={deriveFlightState(f, activeConflictFlightIds.has(f.flight.id))}
+              nowMinutesSinceMidnight={nowMinutesSinceMidnight}
+              dayRelation={dayRelation}
               onEdit={() => setEditing(f)}
             />
           ))}

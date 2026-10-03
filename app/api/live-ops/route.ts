@@ -31,7 +31,8 @@ export const dynamic = "force-dynamic";
  *             coverageLabel: string,
  *             coverageStatus: "assigned" | "gap",
  *             gap: number,
- *             assignedEmployees: Employee[],
+ *             assignedEmployees: Employee[],  // real, confirmed assignments table rows
+ *             proposedEmployees: Employee[], // the draft-plan engine's own picks, not yet real rows
  *           }
  *         ]
  *       }

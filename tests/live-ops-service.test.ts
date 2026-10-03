@@ -316,7 +316,43 @@ describe("live-ops-service — loadLiveOpsView", () => {
     expect(flight1View.effectiveDeparture).toBe("09:00"); // no actual_departure set yet
     expect(flight1View.requirements).toHaveLength(1);
     expect(flight1View.requirements[0].assignedEmployees.map((e) => e.id)).toEqual(["emp-a"]);
+    expect(flight1View.requirements[0].proposedEmployees).toEqual([]);
     expect(flight1View.requirements[0].coverageStatus).toBe("assigned");
+  });
+
+  it("returns non-empty proposedEmployees for a draft plan's engine-only ('atlas_generated') coverage, and keeps assignedEmployees to the real-Assignment-backed set only", async () => {
+    const fake = new FakeSupabase();
+    const { empB } = seedBaseFixture(fake);
+
+    // req-2/flight-2 already has emp-a as a real (human_modified)
+    // assignment from the base fixture -- add a SECOND seat on it,
+    // covered only by the engine's own draft-plan pick (atlas_generated),
+    // never backed by a real Assignment row distinction other than
+    // `source`.
+    const reqs = fake.table("staffing_requirements") as unknown as StaffingRequirement[];
+    const req2 = reqs.find((r) => r.id === "req-2")!;
+    req2.total_requirement = 2;
+
+    await fake.from("assignments").insert({
+      id: "assign-3",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-2",
+      employee_id: "emp-b",
+      source: "atlas_generated",
+      created_by: null,
+      assigned_at: new Date().toISOString(),
+    });
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight2View = view.flights.find((f) => f.flight.id === "flight-2")!;
+    const req2View = flight2View.requirements.find((r) => r.requirement.id === "req-2")!;
+
+    // The real, human-attributable assignment stays exactly where it was...
+    expect(req2View.assignedEmployees.map((e) => e.id)).toEqual(["emp-a"]);
+    // ...and the engine's own draft-plan pick shows up SEPARATELY as
+    // proposedEmployees, never merged into or confused with assignedEmployees.
+    expect(req2View.proposedEmployees.map((e) => e.id)).toEqual([empB.id]);
+    expect(req2View.coverageStatus).toBe("assigned"); // 1 assigned + 1 proposed >= total_requirement 2
   });
 });
 

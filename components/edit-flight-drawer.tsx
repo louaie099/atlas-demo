@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { CandidateResult, Flight, FlightStatus } from "@/lib/types";
 import { LiveOpsImpact, LiveOpsImpactConflict } from "@/lib/live-ops-service";
+import { FlightPhase, FLIGHT_PHASE_LABEL } from "@/lib/flight-phase";
 import { Badge, Button } from "./ui";
 
 const STATUS_OPTIONS: FlightStatus[] = ["scheduled", "delayed"];
+const PHASE_OPTIONS = Object.keys(FLIGHT_PHASE_LABEL) as FlightPhase[];
 
 /**
  * One detected conflict from evaluate-impact, with ATLAS's top
@@ -145,6 +147,7 @@ export function EditFlightDrawer({
   const [currentDeparture, setCurrentDeparture] = useState(effectiveDeparture);
   const [gate, setGate] = useState(flight.gate ?? "");
   const [status, setStatus] = useState<FlightStatus>(flight.status);
+  const [phaseOverride, setPhaseOverride] = useState<FlightPhase | "">(flight.operational_phase_override ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [impact, setImpact] = useState<LiveOpsImpact | null>(null);
@@ -168,6 +171,7 @@ export function EditFlightDrawer({
           actual_departure: currentDeparture.trim() === "" ? null : currentDeparture,
           status,
           gate: gate.trim() === "" ? null : gate,
+          operational_phase_override: phaseOverride === "" ? null : phaseOverride,
         }),
       });
       const patchData = await patchRes.json().catch(() => ({}));
@@ -272,6 +276,22 @@ export function EditFlightDrawer({
                 {STATUS_OPTIONS.map((s) => (
                   <option key={s} value={s}>
                     {s}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-sm text-ink flex flex-col gap-1">
+              Flight phase
+              <select
+                className="border border-border rounded-lg px-3 py-2 text-sm"
+                value={phaseOverride}
+                onChange={(e) => setPhaseOverride(e.target.value as FlightPhase | "")}
+              >
+                <option value="">Auto (follow departure time)</option>
+                {PHASE_OPTIONS.map((p) => (
+                  <option key={p} value={p}>
+                    {FLIGHT_PHASE_LABEL[p]}
                   </option>
                 ))}
               </select>

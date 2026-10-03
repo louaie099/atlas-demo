@@ -45,12 +45,30 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 
 // ---- 1. Read: what's happening operationally today -----------------------
 
+// SCOPE SPLIT — read carefully before touching this interface or its two
+// employee arrays:
+//  - DISPLAY (assignedEmployees + proposedEmployees together) now mirrors
+//    Monthly Planning's own Flight Coverage card exactly: a still-draft
+//    plan's engine-only picks (proposedEmployees) are shown alongside any
+//    real Assignment rows (assignedEmployees), styled distinctly, so Live
+//    Operations never falsely shows "— gap —" for coverage that genuinely
+//    exists in the draft plan. See the "This date's plan is still a
+//    draft" banner in app/operations/page.tsx — this is the same
+//    explicitly-supported non-error state.
+//  - CONFLICT DETECTION / REASSIGNMENT (evaluateFlightDelayImpact,
+//    confirmReassignment, below) is a DELIBERATELY separate boundary: it
+//    only ever reads/writes real `assignments` table rows, same as
+//    before. A still-draft day now HONESTLY shows who ATLAS has
+//    tentatively planned, but the delay/conflict/reassignment flow may
+//    find nothing to flag until the plan is published and those picks
+//    become real Assignment rows. Do not change that behavior here.
 export interface LiveOpsRequirementView {
   requirement: StaffingRequirement;
   coverageLabel: string;
   coverageStatus: RosterRequirementView["coverageStatus"];
   gap: number;
   assignedEmployees: Employee[];
+  proposedEmployees: Employee[];
 }
 
 export interface LiveOpsFlightView {
@@ -99,6 +117,7 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
         coverageStatus: r.coverageStatus,
         gap: r.gap,
         assignedEmployees: r.assignedEmployees,
+        proposedEmployees: r.proposedEmployees,
       }));
     return { flight, effectiveDeparture: effectiveDeparture(flight), requirements };
   });

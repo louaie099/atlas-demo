@@ -1,3 +1,5 @@
+import type { FlightPhase } from "./flight-phase";
+
 export type RequirementSource = "fixed_rule" | "demand_forecast" | "company_config";
 export type BookingPressure = "normal" | "elevated";
 export type FlightStatus = "scheduled" | "delayed";
@@ -114,6 +116,13 @@ export interface Flight {
   // across seed data, generation, and tests — none of which know or care
   // about live-ops — never need updating just to add this field.
   actual_departure?: string | null;
+  // Live Operations' manual override of the auto-computed FlightPhase
+  // (lib/flight-phase.ts) — null/undefined means "follow the clock," the
+  // default. Set only by the operational PATCH route, same as
+  // actual_departure. A DO can use this when the real-world state doesn't
+  // match the clock yet (e.g. boarding started early, or a departure
+  // already happened but the operational time hasn't been updated).
+  operational_phase_override?: FlightPhase | null;
   scheduled_arrival: string | null;
   gate: string | null;
   boarding_window_start: string | null;
