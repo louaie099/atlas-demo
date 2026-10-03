@@ -75,3 +75,67 @@ export function weekLabelFor(weekStart: string): string {
   const month = date.toLocaleDateString("en-US", { month: "short" });
   return `Week of ${weekday}, ${month} ${date.getDate()} ${date.getFullYear()}`;
 }
+
+// MONTHLY PLANNING (2026-10-03): the month is the planning HORIZON, the
+// week stays the inspection/working view underneath it (see the product
+// doc comment on app/planning/page.tsx) — these are pure, additive
+// calendar helpers, built the same way every other function in this file
+// is (plain local-date arithmetic, no new parsing convention), so a month
+// view can be composed as a thin layer above the existing week-scoped
+// plumbing (WeekNav/WeekPicker/loadWeeklyPlan) without changing any of it.
+// Nothing below here is itself a unit of planning work — weekStart remains
+// that, exactly as before; a monthStart is only ever used to derive which
+// weeks to show.
+
+/** The first day ("YYYY-MM-DD") of the calendar month containing this date. */
+export function monthStartFor(date: string): string {
+  const d = parseISODate(date);
+  return formatISODate(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+/** monthStart shifted by a number of whole calendar months (negative for previous months) — native Date rollover handles year boundaries (Dec -> Jan) with no special-casing. */
+export function shiftMonth(monthStart: string, months: number): string {
+  const d = parseISODate(monthStart);
+  return formatISODate(new Date(d.getFullYear(), d.getMonth() + months, 1));
+}
+
+/** A human display label for a month, e.g. "October 2026". */
+export function monthLabelFor(monthStart: string): string {
+  const d = parseISODate(monthStart);
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+/**
+ * Every display week's Monday ("YYYY-MM-DD") that OVERLAPS the given
+ * calendar month, in order — a week that starts in the prior month but
+ * runs into this one (or starts in this month but runs into the next) is
+ * included, exactly once, keyed by its own Monday. This is a pure
+ * composition of weekStartFor/shiftWeek — no new date-math primitive —
+ * and is the one thing this app didn't have a month concept for before:
+ * "which weeks does this month touch."
+ */
+export function weeksOverlappingMonth(monthStart: string): string[] {
+  const start = parseISODate(monthStart);
+  const monthIndex = start.getMonth();
+  const monthYear = start.getFullYear();
+  const lastDayOfMonth = formatISODate(new Date(monthYear, monthIndex + 1, 0));
+
+  const weeks: string[] = [];
+  let w = weekStartFor(monthStart);
+  while (parseISODate(w) <= parseISODate(lastDayOfMonth)) {
+    weeks.push(w);
+    w = shiftWeek(w, 1);
+  }
+  return weeks;
+}
+
+/** A short "Oct 1 – Nov 1" style range label for one week's Monday-Sunday span, used to label a week sub-tab inside a month view without repeating the full weekLabelFor sentence. */
+export function weekRangeLabelFor(weekStart: string): string {
+  const dates = weekDates(weekStart);
+  const start = parseISODate(dates[0]);
+  const end = parseISODate(dates[6]);
+  const fmt = (d: Date, withYear: boolean) =>
+    d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: withYear ? "numeric" : undefined });
+  const sameYear = start.getFullYear() === end.getFullYear();
+  return `${fmt(start, !sameYear)} – ${fmt(end, true)}`;
+}

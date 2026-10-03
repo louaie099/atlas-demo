@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { dayOfWeekFor, weekStartFor, flightDateFor, weekLabelFor, shiftWeek, DAYS_ORDER } from "../lib/flight-date";
+import {
+  dayOfWeekFor,
+  weekStartFor,
+  flightDateFor,
+  weekLabelFor,
+  shiftWeek,
+  DAYS_ORDER,
+  monthStartFor,
+  shiftMonth,
+  monthLabelFor,
+  weeksOverlappingMonth,
+  weekRangeLabelFor,
+} from "../lib/flight-date";
 import { CURRENT_WEEK_START, CURRENT_WEEK_LABEL } from "../lib/seed-data";
 
 /**
@@ -97,5 +109,68 @@ describe("week picker primitives — jumping several weeks is a single direct ho
     // No assertion that these differ (they could coincide) — only that
     // "Today" is never hardcoded to the seeded demo week.
     expect(typeof realCurrentWeek).toBe("string");
+  });
+});
+
+/**
+ * MONTHLY PLANNING (2026-10-03): pure calendar helpers added so a month
+ * view can be composed above the existing week-scoped plumbing without
+ * changing it (see app/planning/page.tsx's module doc comment). The one
+ * case worth guarding explicitly: a month's FIRST displayed week can start
+ * on a Monday that falls in the PRIOR calendar month (e.g. October 2026 --
+ * Oct 1 is a Thursday, so its first week starts Monday Sep 28) -- this is
+ * exactly the edge case that would make a naive "derive the month from the
+ * week's Monday" approach snap back to the wrong month.
+ */
+describe("Monthly Planning calendar helpers", () => {
+  it("monthStartFor resolves any date in a month to that month's 1st", () => {
+    expect(monthStartFor("2026-10-01")).toBe("2026-10-01");
+    expect(monthStartFor("2026-10-31")).toBe("2026-10-01");
+    expect(monthStartFor("2026-10-15")).toBe("2026-10-01");
+  });
+
+  it("shiftMonth rolls over year boundaries natively (Dec -> Jan, Jan -> Dec)", () => {
+    expect(shiftMonth("2026-12-01", 1)).toBe("2027-01-01");
+    expect(shiftMonth("2027-01-01", -1)).toBe("2026-12-01");
+    expect(shiftMonth("2026-10-01", 3)).toBe("2027-01-01");
+  });
+
+  it("monthLabelFor renders a human month/year label", () => {
+    expect(monthLabelFor("2026-10-01")).toBe("October 2026");
+  });
+
+  it("weeksOverlappingMonth for October 2026 starts with the week of Mon Sep 28 (Oct 1 is a Thursday) and ends with a week overlapping Oct 31", () => {
+    const weeks = weeksOverlappingMonth("2026-10-01");
+    expect(weeks[0]).toBe("2026-09-28");
+    expect(dayOfWeekFor(weeks[0])).toBe("Monday");
+    const lastWeekDates = flightDateFor(weeks[weeks.length - 1], "Monday");
+    expect(lastWeekDates <= "2026-10-31").toBe(true);
+    const lastWeekSunday = flightDateFor(weeks[weeks.length - 1], "Sunday");
+    expect(lastWeekSunday >= "2026-10-31").toBe(true);
+    // Strictly chronological, no duplicates.
+    for (let i = 1; i < weeks.length; i++) expect(weeks[i] > weeks[i - 1]).toBe(true);
+  });
+
+  it("every week in weeksOverlappingMonth genuinely overlaps the month (not just adjacent)", () => {
+    for (const w of weeksOverlappingMonth("2026-10-01")) {
+      const sunday = flightDateFor(w, "Sunday");
+      expect(w <= "2026-10-31" && sunday >= "2026-10-01").toBe(true);
+    }
+  });
+
+  it("selecting October's month view never snaps back to September: the owning month of its first week (by the week's Thursday) is October itself", () => {
+    const weeks = weeksOverlappingMonth("2026-10-01");
+    const firstWeekThursday = flightDateFor(weeks[0], "Thursday");
+    expect(monthStartFor(firstWeekThursday)).toBe("2026-10-01");
+  });
+
+  it("weekRangeLabelFor produces a short date-range label for a week sub-tab", () => {
+    expect(weekRangeLabelFor("2026-10-05")).toBe("Oct 5 – Oct 11, 2026");
+  });
+
+  it("weekRangeLabelFor includes both years when a week straddles a year boundary", () => {
+    const label = weekRangeLabelFor("2026-12-28");
+    expect(label).toContain("2026");
+    expect(label).toContain("2027");
   });
 });

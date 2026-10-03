@@ -8,7 +8,7 @@ import { ROLES, ROLE_LABELS, UserRole } from "@/lib/roles";
 
 const links = [
   { href: "/", label: "Dashboard" },
-  { href: "/planning", label: "Weekly Planning" },
+  { href: "/planning", label: "Monthly Planning" },
   { href: "/operations", label: "Live Operations" },
   { href: "/employees", label: "Employees" },
   { href: "/audit", label: "Audit Trail" },

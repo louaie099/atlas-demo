@@ -60,7 +60,7 @@ export default function DashboardPage() {
 
       <div className="flex gap-4 flex-wrap">
         <Link href="/planning" className="text-sm font-medium text-brand-600 hover:underline">
-          Go to Weekly Planning →
+          Go to Monthly Planning →
         </Link>
         <Link href="/operations" className="text-sm font-medium text-brand-600 hover:underline">
           Go to Live Operations →

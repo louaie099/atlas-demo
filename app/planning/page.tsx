@@ -11,20 +11,44 @@ import { ZoneFindAgentSheet } from "@/components/zone-find-agent-sheet";
 import { SummaryDrilldownSheet, SummaryMetric } from "@/components/summary-drilldown-sheet";
 import { AddFlightForm } from "@/components/add-flight-form";
 import { ImportFlightsDialog } from "@/components/import-flights-dialog";
-import { WeekNav } from "@/components/week-nav";
+import { MonthNav } from "@/components/month-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { Button } from "@/components/ui";
-import { shiftWeek } from "@/lib/flight-date";
+import { monthStartFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
 // ATLAS generated for it (Flight Coverage) -> see the resulting employee
 // roster (Agent Schedule). All three read the SAME weekly-view response —
 // see loadWeeklyPlan below — never three independent datasets.
 type Tab = "flights" | "coverage" | "schedule";
+
+// MONTHLY PLANNING (2026-10-03 product correction): ATLAS is a monthly
+// workforce planning system, not fundamentally a weekly one -- the MONTH
+// is the planning horizon management prepares from the flight program; a
+// WEEK is an inspection/working view inside that horizon, kept for
+// readability (Flight Schedule/Coverage/Agent Schedule all stay
+// week-sized views -- a 31-column table would be unreadable, not more
+// "monthly").
+//
+// This is deliberately a thin UI-layer correction, not a backend rewrite
+// (2-day demo constraint): `weekStart` remains the single real unit of
+// work for every fetch/mutation below (loadWeeklyPlan, Make Planning,
+// Import/Add Flight, Find Agent) exactly as before -- nothing about the
+// persisted WeeklyPlan/weekly_plans model changed. `monthStart` is new,
+// derived state that exists ONLY to decide which weeks to show
+// (lib/flight-date.ts's weeksOverlappingMonth) and which month label to
+// render; it never drives a fetch directly. Planning Rules already
+// resolve the same way regardless of which week is selected (effective-
+// dated, not week-scoped caching -- see rules-service.ts), so navigating
+// weeks inside a month, or across a month boundary, never resets them;
+// the cross-week roster continuity work (lib/planning/off-block-
+// continuity.ts and friends) is itself entirely calendar-date-based, so
+// it already carries through a month boundary with no special-casing
+// here either.
 
 /**
  * Non-interactive placeholder for the future Generate -> Review -> Adjust ->
@@ -104,6 +128,22 @@ export default function PlanningPage() {
   // this page.
   const [weekStart, setWeekStart] = useState<string | null>(null);
 
+  // monthStart is new (2026-10-03, Monthly Planning): purely derived
+  // display/navigation state, never a unit of work on its own (see the
+  // module doc comment above). It is "sticky" -- it only snaps to a new
+  // month when the resolved weekStart actually falls outside the
+  // currently-displayed month's week list (see loadWeeklyPlan below) --
+  // so clicking between weeks already shown under the selected month, or
+  // using Prev/Next week, never fights the user's own month selection.
+  // When it does need to snap (e.g. Prev/Next week crossed out of the
+  // shown range), it uses the month containing that week's THURSDAY, the
+  // same "a week belongs to the month most of it falls in" convention ISO
+  // week-numbering uses -- not the week's Monday, which can land in the
+  // PRIOR month (e.g. the week of Mon Sep 28 is the first week shown for
+  // October, since Oct 1 2026 is a Thursday) and would otherwise make
+  // selecting October immediately snap back to September.
+  const [monthStart, setMonthStart] = useState<string | null>(null);
+
   // Failure-safe loading (2026-09-29 fix): loadWeeklyPlan's fetch chain
   // previously had NO .catch() anywhere, so a rejected fetch, a non-2xx
   // response, or a response body that failed to parse as JSON left every
@@ -160,7 +200,12 @@ export default function PlanningPage() {
         return body;
       })
       .then((data) => {
-        setWeekStart((data.weekStart as string | undefined) ?? targetWeekStart ?? null);
+        const resolvedWeekStart = (data.weekStart as string | undefined) ?? targetWeekStart ?? null;
+        setWeekStart(resolvedWeekStart);
+        if (resolvedWeekStart) {
+          const owningMonth = monthStartFor(weekDates(resolvedWeekStart)[3]); // Thursday-of-week owns the month
+          setMonthStart((prev) => (prev === null || !weeksOverlappingMonth(prev).includes(resolvedWeekStart) ? owningMonth : prev));
+        }
         setFlights((data.flights as Flight[]) ?? []);
         setRoster((data.roster as RosterRequirementView[]) ?? []);
         setSchedule((data.schedule as AgentScheduleEntry[]) ?? []);
@@ -191,13 +236,14 @@ export default function PlanningPage() {
 
   const flightGroups = useMemo(() => groupByFlight(roster ?? []), [roster]);
   const daysWithData = Array.from(new Set(flightGroups.map((g) => g.flight.day_of_week)));
+  const weeksInMonth = useMemo(() => (monthStart ? weeksOverlappingMonth(monthStart) : []), [monthStart]);
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <div className="flex items-center gap-2.5 flex-wrap">
-            <h1 className="text-2xl font-semibold text-ink">Weekly Planning</h1>
+            <h1 className="text-2xl font-semibold text-ink">Monthly Planning</h1>
             <span
               className={`px-2.5 py-1 rounded-full text-xs font-medium uppercase tracking-wide ${
                 plan === undefined && loadError ? "bg-bad-50 text-bad-700" : "bg-gray-100 text-gray-600"
@@ -227,11 +273,28 @@ export default function PlanningPage() {
         </div>
       </div>
 
-      <WeekNav
+      <MonthNav
+        monthStart={monthStart}
         weekStart={weekStart}
+        weeksInMonth={weeksInMonth}
         hasData={(flights?.length ?? 0) > 0}
-        onPrev={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, -1)).catch(() => {})}
-        onNext={() => weekStart && loadWeeklyPlan(shiftWeek(weekStart, 1)).catch(() => {})}
+        onSelectMonth={(target) => {
+          setMonthStart(target);
+          const firstWeek = weeksOverlappingMonth(target)[0];
+          if (firstWeek) loadWeeklyPlan(firstWeek).catch(() => {});
+        }}
+        onPrevMonth={() => {
+          const target = shiftMonth(monthStart ?? monthStartFor(weekStart ?? new Date().toISOString().slice(0, 10)), -1);
+          setMonthStart(target);
+          const firstWeek = weeksOverlappingMonth(target)[0];
+          if (firstWeek) loadWeeklyPlan(firstWeek).catch(() => {});
+        }}
+        onNextMonth={() => {
+          const target = shiftMonth(monthStart ?? monthStartFor(weekStart ?? new Date().toISOString().slice(0, 10)), 1);
+          setMonthStart(target);
+          const firstWeek = weeksOverlappingMonth(target)[0];
+          if (firstWeek) loadWeeklyPlan(firstWeek).catch(() => {});
+        }}
         onSelectWeek={(target) => loadWeeklyPlan(target).catch(() => {})}
       />
 
