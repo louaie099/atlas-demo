@@ -11,6 +11,7 @@ import { ZoneFindAgentSheet } from "@/components/zone-find-agent-sheet";
 import { SummaryDrilldownSheet, SummaryMetric } from "@/components/summary-drilldown-sheet";
 import { AddFlightForm } from "@/components/add-flight-form";
 import { ImportFlightsDialog } from "@/components/import-flights-dialog";
+import { ImportFlightsForMonthDialog } from "@/components/import-flights-month-dialog";
 import { MonthNav } from "@/components/month-nav";
 import { PlanningSummaryBar } from "@/components/planning-summary-bar";
 import { AgentScheduleTable } from "@/components/agent-schedule-table";
@@ -18,7 +19,7 @@ import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { Button } from "@/components/ui";
-import { monthStartFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
+import { monthStartFor, monthLabelFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
 // ATLAS generated for it (Flight Coverage) -> see the resulting employee
@@ -356,10 +357,23 @@ export default function PlanningPage() {
             {/* Import Flights / Add Flight live next to the page/week controls,
                 only on the Flight Schedule tab -- this is flight-program
                 input, not workforce planning, so it never appears alongside
-                Flight Coverage or Agent Schedule. */}
+                Flight Coverage or Agent Schedule. Both import entry points
+                stay side by side (2026-10-03 product decision): the
+                per-week dialog for importing into just the currently-viewed
+                week, and the month-wide one for handing ATLAS the whole
+                month's program in one file -- see
+                ImportFlightsForMonthDialog's own doc comment for why this
+                needs no backend change. */}
             {tab === "flights" && weekStart && (
               <div className="flex gap-2">
                 <ImportFlightsDialog weekStart={weekStart} onImported={() => loadWeeklyPlan(weekStart).catch(() => {})} />
+                {monthStart && weeksInMonth.length > 0 && (
+                  <ImportFlightsForMonthDialog
+                    monthLabel={monthLabelFor(monthStart)}
+                    weeksInMonth={weeksInMonth}
+                    onImported={() => loadWeeklyPlan(weekStart).catch(() => {})}
+                  />
+                )}
                 <AddFlightForm weekStart={weekStart} onAdded={(newFlightWeekStart) => loadWeeklyPlan(newFlightWeekStart).catch(() => {})} />
               </div>
             )}
