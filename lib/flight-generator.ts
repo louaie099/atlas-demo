@@ -120,7 +120,11 @@ const TEMPLATES: FlightTemplate[] = [
   // used to be hand-typed as "Africa" to avoid a needs_configuration row.
   // That was a classification bug, not a real rule; it now correctly
   // comes out of classifyDestinationOperationally as null (unconfigured).
-  { flightNumber: "AT650", airline: "Royal Air Maroc", origin: "CMN", destination: "IST", aircraft: "Airbus A320", departure: "11:20", operatorType: "atlas_managed", daysOfWeek: ["Monday", "Wednesday", "Friday", "Sunday"], bookingPressure: "normal" },
+  // Aircraft corrected to Boeing 737-800 (2026-10-04): RAM's real fleet is
+  // Boeing (737/787) and Embraer only — it operates no Airbus aircraft at
+  // all, per the product owner's own correction. This was a real data
+  // error, not a deliberate test scenario.
+  { flightNumber: "AT650", airline: "Royal Air Maroc", origin: "CMN", destination: "IST", aircraft: "Boeing 737-800", departure: "11:20", operatorType: "atlas_managed", daysOfWeek: ["Monday", "Wednesday", "Friday", "Sunday"], bookingPressure: "normal" },
   { flightNumber: "AT401", airline: "Royal Air Maroc", origin: "CMN", destination: "FEZ", aircraft: "Boeing 737-800", departure: "12:40", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
   // AT740/LHR: United Kingdom -> UK/USA operational category, not
   // Europe/Schengen (a prior misclassification corrected here).
