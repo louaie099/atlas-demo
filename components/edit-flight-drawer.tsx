@@ -77,11 +77,28 @@ function ConflictCard({
         <p className="font-medium text-ink">
           Conflict detected — {flight.flight_number} {conflict.requirement.role} requires reassignment
         </p>
-        <p className="text-muted mt-1">
-          {conflict.employee.name} is also committed to {conflict.collidesWith.flight.flight_number}{" "}
-          {conflict.collidesWith.requirement.role} ({conflict.collidesWith.window.start}–{conflict.collidesWith.window.end}).
-          New window {conflict.newWindow.start}–{conflict.newWindow.end} (was {conflict.oldWindow.start}–{conflict.oldWindow.end}).
-        </p>
+        <div className="text-muted mt-1 flex flex-col gap-1">
+          {/* Either or both reasons can apply at once -- each gets its own
+              line so a shift-end violation never has to be awkwardly
+              squeezed into collision wording, or vice versa. */}
+          {conflict.shiftBoundaryViolation && (
+            <p>
+              {conflict.employee.name} unavailable — shift ends at {conflict.shiftBoundaryViolation.shiftEnd} (shift{" "}
+              {conflict.shiftBoundaryViolation.shiftStart}–{conflict.shiftBoundaryViolation.shiftEnd}).
+            </p>
+          )}
+          {conflict.collidesWith && (
+            <p>
+              {conflict.employee.name} is also committed to {conflict.collidesWith.flight.flight_number}{" "}
+              {conflict.collidesWith.requirement.role} ({conflict.collidesWith.window.start}–
+              {conflict.collidesWith.window.end}).
+            </p>
+          )}
+          <p>
+            New window {conflict.newWindow.start}–{conflict.newWindow.end} (was {conflict.oldWindow.start}–
+            {conflict.oldWindow.end}).
+          </p>
+        </div>
       </div>
 
       {error && <p className="text-sm text-bad-700">{error}</p>}

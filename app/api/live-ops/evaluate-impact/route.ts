@@ -25,11 +25,15 @@ export const dynamic = "force-dynamic";
  *         oldWindow: { start, end },
  *         newWindow: { start, end },
  *         employee: Employee,                    // the now-conflicted employee
- *         collidesWith: {                         // their other commitment that now collides
+ *         // Either or both of the next two fields can be present -- a
+ *         // real delay commonly triggers both at once, and neither one
+ *         // suppresses the other:
+ *         collidesWith?: {                        // their other commitment that now collides
  *           requirement: StaffingRequirement,
  *           flight: Flight,
  *           window: { start, end },
  *         },
+ *         shiftBoundaryViolation?: { shiftStart: string, shiftEnd: string }, // new window no longer fits their own shift
  *         replacementCandidates: CandidateResult[], // ranked, excludes the conflicted employee; empty = no eligible replacement, a real gap
  *         exclusionSummary?: { reason: string, count: number }[],
  *       }
@@ -37,7 +41,8 @@ export const dynamic = "force-dynamic";
  *   }
  *
  * `conflicts: []` means the current (possibly updated) departure creates
- * no real scheduling collision for anyone currently assigned.
+ * no real scheduling collision AND no shift-boundary violation for
+ * anyone currently assigned.
  */
 export async function POST(req: Request) {
   const { flightId } = await req.json().catch(() => ({}));

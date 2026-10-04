@@ -27,6 +27,21 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 }
 
 /**
+ * Is `window` entirely contained within [shiftStart, shiftEnd]? This is
+ * the SAME shift-containment test lib/planning/candidate-lookup.ts already
+ * applies when vetting a REPLACEMENT candidate against a window (there via
+ * windowsOverlapLocal against the shift as a window, which is equivalent
+ * for a shift with no overnight wrap) -- applied here to the INCUMBENT so
+ * the two are checked consistently. Returns true (no violation) when
+ * either boundary is missing, rather than guessing -- an active,
+ * currently-assigned employee always has both set in practice.
+ */
+function windowWithinShift(window: TimeWindow, shiftStart: string | null, shiftEnd: string | null): boolean {
+  if (!shiftStart || !shiftEnd) return true;
+  return timeToMinutes(window.start) >= timeToMinutes(shiftStart) && timeToMinutes(window.end) <= timeToMinutes(shiftEnd);
+}
+
+/**
  * ===========================================================================
  * Live Operations — plain, testable service functions behind the
  * app/api/live-ops*, app/api/flights/[id]/operational and (re-worked)
@@ -138,12 +153,30 @@ export interface ConflictingAssignment {
   window: TimeWindow;
 }
 
+/**
+ * A conflict can be caused by either or both of two independent reasons
+ * (2026-10-04 fix — see this module's own history for the gap this
+ * closes): the employee's new window now collides with another of their
+ * own duties (`collidesWith`), and/or the new window no longer fits
+ * inside the employee's own shift at all (`shiftBoundaryViolation`).
+ * Previously ONLY the first was ever detected — an incumbent whose new
+ * window simply ran past their shift end, with no OTHER duty to collide
+ * with, was silently reported as still covered. Both fields are optional
+ * and independent; at least one is always present on any conflict this
+ * module reports.
+ */
+export interface ShiftBoundaryViolation {
+  shiftStart: string;
+  shiftEnd: string;
+}
+
 export interface LiveOpsImpactConflict {
   requirement: StaffingRequirement;
   oldWindow: TimeWindow;
   newWindow: TimeWindow;
   employee: Employee;
-  collidesWith: ConflictingAssignment;
+  collidesWith?: ConflictingAssignment;
+  shiftBoundaryViolation?: ShiftBoundaryViolation;
   replacementCandidates: CandidateResult[];
   exclusionSummary?: { reason: string; count: number }[];
 }
@@ -234,15 +267,32 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
         })
         .filter((c): c is ConflictingAssignment => c !== null);
 
-      const colliding = otherCommitments.find((c) => windowsOverlap(newWindow, c.window));
-      if (!colliding) continue;
+      const collidingRaw = otherCommitments.find((c) => windowsOverlap(newWindow, c.window));
+      // Real collision only if this is a NEW one — if the two commitments
+      // already overlapped before the operational change, that's a
+      // pre-existing state this flow isn't responsible for surfacing (and
+      // ought to already have been caught at generation time), not
+      // something this delay just caused.
+      const collidesWith = collidingRaw && !windowsOverlap(oldWindow, collidingRaw.window) ? collidingRaw : undefined;
 
-      // Real conflict only if this is a NEW collision — if the two
-      // commitments already overlapped before the operational change,
-      // that's a pre-existing state this flow isn't responsible for
-      // surfacing (and ought to already have been caught at generation
-      // time), not something this delay just caused.
-      if (windowsOverlap(oldWindow, colliding.window)) continue;
+      // Shift-boundary check (2026-10-04 fix): does the NEW window still
+      // fit inside this employee's own shift? Checked independently of
+      // the collision above -- an employee can run past their shift end
+      // with no other duty anywhere near it to "collide" with, and that
+      // is still a real, reportable loss of validity, not coverage.
+      // "New" in the same sense as the collision check: only reported
+      // when the OLD window was still within shift (a pre-existing
+      // out-of-shift assignment is a separate, already-existing data
+      // problem, not something this delay just caused).
+      const newlyOutOfShift =
+        !windowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
+        windowWithinShift(oldWindow, employee.shift_start, employee.shift_end);
+      const shiftBoundaryViolation: ShiftBoundaryViolation | undefined =
+        newlyOutOfShift && employee.shift_start && employee.shift_end
+          ? { shiftStart: employee.shift_start, shiftEnd: employee.shift_end }
+          : undefined;
+
+      if (!collidesWith && !shiftBoundaryViolation) continue;
 
       const lookup = await getCandidatesForRequirement(supabase, requirement.id, {
         excludeEmployeeIds: [employee.id],
@@ -253,7 +303,8 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
         oldWindow,
         newWindow,
         employee,
-        collidesWith: colliding,
+        collidesWith,
+        shiftBoundaryViolation,
         replacementCandidates: lookup.ok ? lookup.candidates : [],
         exclusionSummary: lookup.ok ? lookup.exclusionSummary : undefined,
       });

@@ -384,7 +384,8 @@ describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", 
     expect(conflict.employee.id).toBe("emp-a");
     expect(conflict.oldWindow).toEqual({ start: "08:00", end: "09:00" });
     expect(conflict.newWindow).toEqual({ start: "09:30", end: "10:30" });
-    expect(conflict.collidesWith.requirement.id).toBe("req-2");
+    expect(conflict.collidesWith?.requirement.id).toBe("req-2");
+    expect(conflict.shiftBoundaryViolation).toBeUndefined();
 
     // emp-b is free all day and qualified for Boarding -- a real eligible
     // replacement, never a forced/invalid one.
@@ -406,6 +407,102 @@ describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", 
 
     expect(result.conflicts).toHaveLength(1);
     expect(result.conflicts[0].replacementCandidates).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------
+  // Regression coverage for the 2026-10-04 fix: the delayed flight's new
+  // window can run past the incumbent's own shift end with NO other
+  // duty anywhere nearby to "collide" with -- that must still be
+  // reported as a real conflict, not silently treated as still covered.
+  // -------------------------------------------------------------------
+
+  it("detects a shift-boundary violation even with no colliding other assignment, and recommends a replacement", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    // emp-a's shift ends at 18:15 by default (makeEmployee) -- far later
+    // than anything in this fixture, so no fixture-wide test would ever
+    // hit a shift boundary by accident. Narrow it here, specifically for
+    // this test, to just past flight-1's original 08:00-09:00 window.
+    const employees = fake.table("employees") as unknown as Employee[];
+    const empA = employees.find((e) => e.id === "emp-a")!;
+    empA.shift_end = "09:30";
+
+    // Delay flight-1 so its new window (09:30-10:30) ends after emp-a's
+    // 09:30 shift end AND newly overlaps emp-a's existing flight-2 Gate
+    // duty (10:00-11:00) -- deliberately left in, since a real delay
+    // commonly triggers both reasons at once, and the conflict object
+    // must carry both independently rather than only reporting
+    // whichever was checked first.
+    await fake.from("flights").update({ actual_departure: "10:30" }).eq("id", "flight-1");
+
+    const result = await evaluateFlightDelayImpact(fake as unknown as SupabaseClient, "flight-1");
+    if ("error" in result) throw new Error(result.error);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0];
+    expect(conflict.employee.id).toBe("emp-a");
+    expect(conflict.shiftBoundaryViolation).toEqual({ shiftStart: "08:00", shiftEnd: "09:30" });
+    // Both reasons fire together here -- neither suppresses the other.
+    expect(conflict.collidesWith?.requirement.id).toBe("req-2");
+    expect(conflict.newWindow).toEqual({ start: "09:30", end: "10:30" });
+    expect(conflict.replacementCandidates.some((c) => c.employee.id === "emp-b")).toBe(true);
+  });
+
+  it("reports ONLY the shift-boundary reason when there is no other duty to collide with", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    // Remove emp-a's flight-2 assignment entirely so there is nothing
+    // left for the new window to collide with -- isolates the
+    // shift-boundary check from the collision check.
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    const withoutAssign2 = assignments.filter((a) => a.id !== "assign-2");
+    assignments.length = 0;
+    assignments.push(...withoutAssign2);
+
+    const employees = fake.table("employees") as unknown as Employee[];
+    const empA = employees.find((e) => e.id === "emp-a")!;
+    empA.shift_end = "09:30";
+
+    // New window becomes 09:00-10:00 -- past the 09:30 shift end, but
+    // nowhere near flight-2's now-irrelevant (and now unassigned) window.
+    await fake.from("flights").update({ actual_departure: "10:00" }).eq("id", "flight-1");
+
+    const result = await evaluateFlightDelayImpact(fake as unknown as SupabaseClient, "flight-1");
+    if ("error" in result) throw new Error(result.error);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0];
+    expect(conflict.newWindow).toEqual({ start: "09:00", end: "10:00" });
+    expect(conflict.shiftBoundaryViolation).toEqual({ shiftStart: "08:00", shiftEnd: "09:30" });
+    expect(conflict.collidesWith).toBeUndefined();
+  });
+
+  it("does NOT report a shift-boundary violation that already existed before the delay (pre-existing, not newly caused)", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    const withoutAssign2 = assignments.filter((a) => a.id !== "assign-2");
+    assignments.length = 0;
+    assignments.push(...withoutAssign2);
+
+    const employees = fake.table("employees") as unknown as Employee[];
+    const empA = employees.find((e) => e.id === "emp-a")!;
+    // Shift already ends BEFORE flight-1's original 08:00-09:00 window
+    // even starts -- a pre-existing, already-invalid assignment this
+    // flow isn't responsible for surfacing (same principle as a
+    // pre-existing collision).
+    empA.shift_start = "10:00";
+    empA.shift_end = "18:00";
+
+    // No operational change at all -- still, this must report zero
+    // conflicts, since nothing NEW was caused by a delay that didn't
+    // happen.
+    const result = await evaluateFlightDelayImpact(fake as unknown as SupabaseClient, "flight-1");
+    if ("error" in result) throw new Error(result.error);
+    expect(result.conflicts).toHaveLength(0);
   });
 });
 
