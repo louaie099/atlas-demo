@@ -3,8 +3,19 @@
 import { LiveOpsFlightView } from "@/lib/live-ops-service";
 import { FLIGHT_STATE_LABEL, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
 import { FLIGHT_PHASE_LABEL, resolveFlightPhase } from "@/lib/flight-phase";
+import { canManageOperations } from "@/lib/roles";
+import { useRole } from "./role-context";
 import { Badge, Button } from "./ui";
 import { TeamBadge } from "./team-badge";
+
+/** What FlightOpsRow asks its parent to open — either Find Agent's own
+ * "assign" mode against an uncovered requirement, or its "reassign" mode
+ * against one specific currently-assigned/proposed employee. The parent
+ * (app/operations/page.tsx) owns the sheet so it can be a single shared
+ * instance across every row/requirement on the board. */
+export type LiveOpsAssignRequest =
+  | { mode: "assign"; requirementId: string; roleLabel: string }
+  | { mode: "reassign"; requirementId: string; roleLabel: string; employeeId: string; employeeName: string };
 
 // Reuses Flight Coverage's own status-to-tone convention
 // (components/flight-coverage-card.tsx's statusTone) for per-requirement
@@ -49,6 +60,7 @@ export function FlightOpsRow({
   nowMinutesSinceMidnight,
   dayRelation,
   onEdit,
+  onRequestAssign,
 }: {
   view: LiveOpsFlightView;
   state: LiveOpsFlightState;
@@ -60,7 +72,14 @@ export function FlightOpsRow({
   nowMinutesSinceMidnight: number | null;
   dayRelation: DayRelation;
   onEdit: () => void;
+  /** Opens the shared Find Agent/Reassign sheet for one requirement row
+   * (2026-10-04 — every requirement row must be actionable: Assign for a
+   * gap, Change for an already-covered one). Omit to render the board
+   * read-only (not currently used, kept for a future read-only surface). */
+  onRequestAssign?: (request: LiveOpsAssignRequest) => void;
 }) {
+  const { role } = useRole();
+  const canAct = canManageOperations(role);
   const { flight, effectiveDeparture, requirements } = view;
   const departureChanged = effectiveDeparture !== flight.scheduled_departure;
   const calm = state === "covered";
@@ -150,45 +169,129 @@ export function FlightOpsRow({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          {requirements.map((r) => (
-            <div
-              key={r.requirement.id}
-              className="flex items-center justify-between gap-3 text-sm rounded-lg bg-surface px-3 py-1.5"
-            >
-              <span className="text-ink">
-                {r.coverageLabel}{" "}
-                <span className="text-muted">
-                  {r.assignedEmployees.length + r.proposedEmployees.length}/{r.requirement.total_requirement}
+          {requirements.map((r) => {
+            const totalCovered = r.assignedEmployees.length + r.proposedEmployees.length;
+            const hasGap = totalCovered < r.requirement.total_requirement;
+            return (
+              <div
+                key={r.requirement.id}
+                className="flex items-center justify-between gap-3 text-sm rounded-lg bg-surface px-3 py-1.5"
+              >
+                <span className="text-ink">
+                  {r.coverageLabel} <span className="text-muted">{totalCovered}/{r.requirement.total_requirement}</span>
                 </span>
-              </span>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                {r.assignedEmployees.length === 0 && r.proposedEmployees.length === 0 ? (
-                  <span className="text-xs text-muted">— gap —</span>
-                ) : (
-                  <>
-                    {r.assignedEmployees.map((e) => (
-                      <span key={e.id} className="text-xs bg-gray-100 text-ink px-2 py-0.5 rounded-full">
-                        {e.name}
-                      </span>
-                    ))}
-                    {/* ATLAS's own draft-plan picks -- a normal part of an
-                        unpublished plan, not a pending recommendation, so
-                        this uses the same calm brand-blue treatment Flight
-                        Coverage uses, never a "needs approval" styling. */}
-                    {r.proposedEmployees.map((e) => (
-                      <span key={e.id} className="text-xs bg-brand-50 text-brand-700 px-2 py-0.5 rounded-full">
-                        {e.name}
-                      </span>
-                    ))}
-                  </>
-                )}
-                <Badge tone={requirementTone[r.coverageStatus]}>{r.coverageStatus}</Badge>
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  {totalCovered === 0 ? (
+                    <span className="text-xs text-muted">— gap —</span>
+                  ) : (
+                    <>
+                      {r.assignedEmployees.map((e) => (
+                        <EmployeeChip
+                          key={e.id}
+                          name={e.name}
+                          tone="assigned"
+                          canAct={canAct}
+                          onReassign={
+                            onRequestAssign
+                              ? () =>
+                                  onRequestAssign({
+                                    mode: "reassign",
+                                    requirementId: r.requirement.id,
+                                    roleLabel: r.coverageLabel,
+                                    employeeId: e.id,
+                                    employeeName: e.name,
+                                  })
+                              : undefined
+                          }
+                        />
+                      ))}
+                      {/* ATLAS's own draft-plan picks -- a normal part of an
+                          unpublished plan, not a pending recommendation, so
+                          this uses the same calm brand-blue treatment Flight
+                          Coverage uses, never a "needs approval" styling.
+                          Still a real, reassignable Assignment row (source
+                          "atlas_generated" rather than "human_modified" —
+                          see lib/live-ops-service.ts), so it gets the same
+                          Change action as a human-assigned one. */}
+                      {r.proposedEmployees.map((e) => (
+                        <EmployeeChip
+                          key={e.id}
+                          name={e.name}
+                          tone="proposed"
+                          canAct={canAct}
+                          onReassign={
+                            onRequestAssign
+                              ? () =>
+                                  onRequestAssign({
+                                    mode: "reassign",
+                                    requirementId: r.requirement.id,
+                                    roleLabel: r.coverageLabel,
+                                    employeeId: e.id,
+                                    employeeName: e.name,
+                                  })
+                              : undefined
+                          }
+                        />
+                      ))}
+                    </>
+                  )}
+                  {hasGap && onRequestAssign && (
+                    <Button
+                      variant="secondary"
+                      disabled={!canAct}
+                      className="!px-2 !py-1 !text-xs !shadow-none"
+                      onClick={() =>
+                        onRequestAssign({ mode: "assign", requirementId: r.requirement.id, roleLabel: r.coverageLabel })
+                      }
+                    >
+                      Assign agent
+                    </Button>
+                  )}
+                  <Badge tone={requirementTone[r.coverageStatus]}>{r.coverageStatus}</Badge>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {requirements.length === 0 && <p className="text-xs text-muted">No staffing requirements for this flight.</p>}
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * One assigned/proposed employee's chip, with an inline "Change" action
+ * (2026-10-04) so reassigning a currently-covered requirement is always
+ * one click away -- no disruption alert required first. `onReassign` is
+ * only omitted when the parent board is rendered read-only; `canAct`
+ * disables (but still shows) the action for a Viewer, matching Find
+ * Agent's own treatment of the same boundary.
+ */
+function EmployeeChip({
+  name,
+  tone,
+  canAct,
+  onReassign,
+}: {
+  name: string;
+  tone: "assigned" | "proposed";
+  canAct: boolean;
+  onReassign?: () => void;
+}) {
+  const toneClass = tone === "assigned" ? "bg-gray-100 text-ink" : "bg-brand-50 text-brand-700";
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${toneClass}`}>
+      {name}
+      {onReassign && (
+        <button
+          type="button"
+          onClick={onReassign}
+          disabled={!canAct}
+          className="underline decoration-dotted underline-offset-2 disabled:opacity-50 disabled:cursor-not-allowed hover:no-underline"
+        >
+          Change
+        </button>
+      )}
+    </span>
   );
 }

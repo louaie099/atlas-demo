@@ -31,6 +31,27 @@ export function canManageEmployees(role: UserRole): boolean {
   return role === "administrator";
 }
 
+/**
+ * Live Operations manual assignment/reassignment (2026-10-04 — see
+ * app/api/assign/route.ts and app/api/confirm-reassignment/route.ts).
+ *
+ * The product ask names this permission by job title — "Regulator and DO
+ * [Duty Officer] roles must both be able to perform these manual
+ * assignments/reassignments" — but this demo's role model only has the
+ * three generic levels above; there is no "Regulator" or "DO" entry in
+ * UserRole, and no real identity/session system to attach one to (see this
+ * file's own doc comment). Rather than invent two new named roles with no
+ * way to actually distinguish who holds them, this reuses the existing
+ * non-viewer boundary: anyone acting as Planner or Administrator — i.e.
+ * anyone who isn't the read-only Viewer level — can assign and reassign.
+ * Viewers remain read-only everywhere, including here. If/when real
+ * accounts exist, Regulator/DO should become actual UserRole values (or
+ * claims) mapped through this same function, not a parallel check.
+ */
+export function canManageOperations(role: UserRole): boolean {
+  return role !== "viewer";
+}
+
 export const ROLE_HEADER = "x-atlas-role";
 
 /**

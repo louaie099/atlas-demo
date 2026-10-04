@@ -1,11 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { canManageEmployees, getRoleFromHeader } from "../lib/roles";
+import { canManageEmployees, canManageOperations, getRoleFromHeader } from "../lib/roles";
 
 describe("canManageEmployees", () => {
   it("only Administrator can manage employees", () => {
     expect(canManageEmployees("administrator")).toBe(true);
     expect(canManageEmployees("planner")).toBe(false);
     expect(canManageEmployees("viewer")).toBe(false);
+  });
+});
+
+describe("canManageOperations", () => {
+  it("allows Planner and Administrator (the 'Regulator'/'DO' boundary for Live Operations manual assign/reassign), blocks Viewer", () => {
+    expect(canManageOperations("planner")).toBe(true);
+    expect(canManageOperations("administrator")).toBe(true);
+    expect(canManageOperations("viewer")).toBe(false);
   });
 });
 

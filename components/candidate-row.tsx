@@ -5,10 +5,20 @@ export function CandidateRow({
   candidate,
   onAssign,
   assigning,
+  disabled = false,
+  actionLabel,
 }: {
   candidate: CandidateResult;
   onAssign: () => void;
   assigning: boolean;
+  /** True when the current role may not act (e.g. Viewer) — the button
+   * stays visible (so the candidate ranking is still informative) but
+   * can't be clicked. */
+  disabled?: boolean;
+  /** Overrides the default "Assign"/"Assign with override" wording — used
+   * by the Live Operations reassignment flow (find-agent-sheet.tsx) so
+   * the button reads "Reassign" instead. */
+  actionLabel?: string;
 }) {
   const recommended = candidate.status === "recommended";
 
@@ -28,10 +38,18 @@ export function CandidateRow({
       <Button
         variant={recommended ? "primary" : "secondary"}
         onClick={onAssign}
-        disabled={assigning}
+        disabled={assigning || disabled}
         className="self-start"
       >
-        {assigning ? "Assigning…" : recommended ? "Assign" : "Assign with override"}
+        {assigning
+          ? `${actionLabel ?? "Assign"}ing…`
+          : actionLabel
+          ? recommended
+            ? actionLabel
+            : `${actionLabel} with override`
+          : recommended
+          ? "Assign"
+          : "Assign with override"}
       </Button>
     </div>
   );

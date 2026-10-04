@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates } from "@/lib/scoring";
-import { CURRENT_WEEK_START } from "@/lib/seed-data";
+import { weekStartFor } from "@/lib/flight-date";
 import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
+import { ROLE_HEADER, getRoleFromHeader, canManageOperations } from "@/lib/roles";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
 
 const PLANNER_NAME = "Mohammed Alaoui";
@@ -13,13 +14,15 @@ const PLANNER_NAME = "Mohammed Alaoui";
 export const dynamic = "force-dynamic";
 
 /**
- * Manual assignment from Find Agent — this is a human planner filling a
- * real staffing gap, so it must be persisted as a genuine draft-plan
+ * Manual assignment — fills a real, currently-uncovered staffing
+ * requirement, whether from Monthly Planning's Find Agent or Live
+ * Operations' own "Assign agent" action on a gap row (2026-10-04;
+ * previously Find Agent-only). This must be persisted as a genuine
  * Assignment row (never client-side/local React state — see
  * components/find-agent-sheet.tsx, which calls this and then refetches
- * both /api/planning/weekly-view and this requirement's candidates so
- * Flight Coverage and Agent Schedule both reflect it immediately, and it
- * survives a refresh because it's a real row, read back on every GET).
+ * the caller's own view so Flight Coverage/Agent Schedule/Live Operations
+ * all reflect it immediately, and it survives a refresh because it's a
+ * real row, read back on every GET).
  *
  * Server-side re-validation (never trust the client that a candidate is
  * still valid): re-checks needs_configuration, remaining capacity, and
@@ -31,9 +34,19 @@ export const dynamic = "force-dynamic";
  * duty. This is what makes the headcount and overlap invariants hold
  * even under concurrent/manual action, not just for automatic
  * generation.
+ *
+ * Role boundary (2026-10-04): only non-Viewer roles (Planner/
+ * Administrator — see lib/roles.ts's canManageOperations doc comment on
+ * why "Regulator"/"DO" collapse onto this same check in this demo's role
+ * model) may call this. Checked server-side, not just hidden in the UI.
  */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
+  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  if (!canManageOperations(role)) {
+    return NextResponse.json({ error: "Viewers cannot make assignments — Planner or Administrator role required." }, { status: 403 });
+  }
+
   const { staffingRequirementId, employeeId } = await req.json();
 
   if (!staffingRequirementId || !employeeId) {
@@ -56,25 +69,29 @@ export async function POST(req: Request) {
     );
   }
 
-  // A human modification only ever targets the current DRAFT plan --
-  // editing a published plan's assignments isn't exposed anywhere in this
-  // milestone (see lib/planning/weekly-plan-service.ts's publishPlan doc
-  // comment); a future operational-modification layer is what that will
-  // eventually go through.
-  const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(CURRENT_WEEK_START));
-  const plan = (planRows as WeeklyPlan[] | null)?.[0];
-  if (!plan) {
-    return NextResponse.json({ error: "No draft plan exists for this week — generate one first." }, { status: 409 });
-  }
-  if (plan.status !== "draft") {
-    return NextResponse.json(
-      { error: "This week's plan has already been published — manual assignment against a published plan is not available yet." },
-      { status: 409 }
-    );
-  }
-
   const { data: flight } = await supabase.from("flights").select("*").eq("id", requirement.flight_id).single();
   if (!flight) return NextResponse.json({ error: "Flight not found" }, { status: 404 });
+
+  // The plan looked up is always the one for the requirement's OWN
+  // flight's week (never a fixed global week constant) — same week-
+  // derivation fix lib/planning/candidate-lookup.ts already applies for
+  // the candidate list this assignment is made from, so the two can never
+  // disagree about which plan a given requirement belongs to.
+  //
+  // No plan.status gate here (2026-10-04 — previously blocked once a plan
+  // was published): Live Operations' own gap-fill action needs to work
+  // against the plan that's actually live, which is normally published,
+  // not draft, and a manual reassignment of an already-covered slot
+  // (app/api/confirm-reassignment/route.ts) was never gated on status in
+  // the first place — this removes the inconsistency rather than
+  // introducing a new behavior. Planning itself still only ever edits the
+  // current plan row in place; nothing here mutates plan.status.
+  const weekStart = weekStartFor((flight as Flight).flight_date);
+  const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(weekStart));
+  const plan = (planRows as WeeklyPlan[] | null)?.[0];
+  if (!plan) {
+    return NextResponse.json({ error: "No plan exists for this requirement's week — generate one first." }, { status: 409 });
+  }
 
   const [{ data: allAssignments }, { data: allRequirements }, { data: allFlights }] = await Promise.all([
     supabase.from("assignments").select("*"),

@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
 import { todayISO } from "@/lib/flight-date";
 import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState } from "@/lib/live-ops-flight-state";
-import { FlightOpsRow, DayRelation } from "@/components/flight-ops-row";
+import { FlightOpsRow, DayRelation, LiveOpsAssignRequest } from "@/components/flight-ops-row";
 import { EditFlightDrawer } from "@/components/edit-flight-drawer";
+import { FindAgentSheet } from "@/components/find-agent-sheet";
 import { Card } from "@/components/ui";
 
 export default function OperationsPage() {
@@ -15,6 +16,11 @@ export default function OperationsPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeConflictFlightIds, setActiveConflictFlightIds] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<LiveOpsFlightView | null>(null);
+  // Every staffing requirement row must be actionable (2026-10-04): a
+  // single shared sheet instance, opened by whichever row's Assign/Change
+  // action was clicked, reusing the exact same Find Agent sheet/candidate
+  // engine Monthly Planning already uses (components/find-agent-sheet.tsx).
+  const [assignRequest, setAssignRequest] = useState<LiveOpsAssignRequest | null>(null);
 
   function loadLiveOps(forDate: string) {
     setLoading(true);
@@ -108,6 +114,7 @@ export default function OperationsPage() {
               nowMinutesSinceMidnight={nowMinutesSinceMidnight}
               dayRelation={dayRelation}
               onEdit={() => setEditing(f)}
+              onRequestAssign={setAssignRequest}
             />
           ))}
         </div>
@@ -120,6 +127,18 @@ export default function OperationsPage() {
           onClose={() => setEditing(null)}
           onSaved={() => loadLiveOps(date)}
           onConflictStateChange={handleConflictStateChange}
+        />
+      )}
+
+      {assignRequest && (
+        <FindAgentSheet
+          requirementId={assignRequest.requirementId}
+          mode={assignRequest.mode}
+          roleLabel={assignRequest.roleLabel}
+          replacingEmployeeId={assignRequest.mode === "reassign" ? assignRequest.employeeId : undefined}
+          replacingEmployeeName={assignRequest.mode === "reassign" ? assignRequest.employeeName : undefined}
+          onClose={() => setAssignRequest(null)}
+          onAssigned={() => loadLiveOps(date)}
         />
       )}
     </div>

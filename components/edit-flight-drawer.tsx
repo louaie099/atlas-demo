@@ -4,6 +4,8 @@ import { useState } from "react";
 import { CandidateResult, Flight, FlightStatus } from "@/lib/types";
 import { LiveOpsImpact, LiveOpsImpactConflict } from "@/lib/live-ops-service";
 import { FlightPhase, FLIGHT_PHASE_LABEL } from "@/lib/flight-phase";
+import { ROLE_HEADER, canManageOperations } from "@/lib/roles";
+import { useRole } from "./role-context";
 import { Badge, Button } from "./ui";
 
 const STATUS_OPTIONS: FlightStatus[] = ["scheduled", "delayed"];
@@ -26,6 +28,8 @@ function ConflictCard({
   flight: Flight;
   onConfirmed: () => void;
 }) {
+  const { role } = useRole();
+  const allowed = canManageOperations(role);
   const top = conflict.replacementCandidates[0] as CandidateResult | undefined;
   const [selectedId, setSelectedId] = useState<string>(top?.employee.id ?? "");
   const [confirming, setConfirming] = useState(false);
@@ -41,7 +45,7 @@ function ConflictCard({
     try {
       const res = await fetch("/api/confirm-reassignment", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", [ROLE_HEADER]: role },
         body: JSON.stringify({
           staffingRequirementId: conflict.requirement.id,
           oldEmployeeId: conflict.employee.id,
@@ -136,7 +140,11 @@ function ConflictCard({
             </label>
           )}
 
-          <Button onClick={handleConfirm} disabled={confirming || !selected} className="self-start">
+          {!allowed && (
+            <p className="text-xs text-warn-700">Viewing only — switch to Planner or Administrator to confirm.</p>
+          )}
+
+          <Button onClick={handleConfirm} disabled={confirming || !selected || !allowed} className="self-start">
             {confirming ? "Confirming…" : "Confirm reassignment"}
           </Button>
         </>
