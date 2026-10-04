@@ -24,27 +24,30 @@ import { classifyDestinationOperationally } from "../destination-classification"
  *  - 7 RAM (atlas_managed) flights every day (8-10/day including the two
  *    day-specific ones below), spanning Domestic, Europe/Schengen, Africa,
  *    and UK/USA categories, standard AND Dreamliner aircraft.
- *  - One self-managed carrier with a small, real company_config headcount
- *    (Qatar Airways, 2 agents/flight) so the foreign-company path is
- *    exercised without consuming a disproportionate share of a 20-25
- *    person roster.
+ *  - THREE self-managed carriers with small, real company_config
+ *    headcounts (Qatar Airways 2/flight, Emirates 3/flight, Air France
+ *    3/flight — 2026-10-04 addition, see below) so the foreign-company
+ *    path is exercised across more than one carrier without consuming a
+ *    disproportionate share of the roster the way Gulf Air's real 8-agent
+ *    requirement would.
  *  - One self-managed, UNCONFIGURED carrier (Turkish Airlines) — the
  *    "real schedule noise with zero staffing cost" case, same honest
  *    "unmanaged" path as the main dataset's TK653.
  *  - One UK/USA flight (AT225/LHR) is the only Profiling+Mesure trigger —
- *    deliberately the ONLY one, since Mesure's confirmed flat 4-agent
+ *    deliberately the ONLY one, since Mesure's confirmed per-flight
  *    requirement is expensive relative to a small roster; two such flights
  *    would force an oversized Mesure team just to stay feasible, which
  *    would misrepresent "small but tight" as "small and starved."
  *
- * Flight numbers use RAM's real "AT" prefix (not a made-up code) — chosen
- * to NOT collide with any flight number the main dataset already uses
- * (lib/flight-generator.ts's TEMPLATES / lib/seed-data.ts's
+ * Flight numbers use RAM's real "AT" prefix (not a made-up code) for RAM
+ * flights, and each foreign carrier's own real-looking prefix for its own
+ * flights — chosen to NOT collide with any flight number the main dataset
+ * already uses (lib/flight-generator.ts's TEMPLATES / lib/seed-data.ts's
  * SCRIPTED_FLIGHTS: AT100, AT201, AT302, AT401, AT535, AT650, AT740,
- * AT803, AT870). This dataset's own numbers (AT120, AT160, AT225, AT310,
- * AT420, AT560, AT660, AT815) are deliberately outside that set, so the
- * two datasets' flights are never confusable even if both were ever
- * imported into the same week.
+ * AT803, AT870, EK751, AF1234). This dataset's own numbers (AT120, AT160,
+ * AT225, AT310, AT420, AT560, AT660, AT815, QR1015, AF1680, EK702) are
+ * deliberately outside that set, so the two datasets' flights are never
+ * confusable even if both were ever imported into the same week.
  */
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -97,10 +100,21 @@ function syntheticBookedPassengersFor(
 }
 
 /**
- * The small demo's flight program. Flight numbers deliberately reuse the
- * SMxxx range (never AT1xx/AT2xx/AT3xx/etc., which are the main dataset's
- * protected/generated numbers) so the two datasets' flights are never
- * visually confusable if both were ever displayed side by side.
+ * The small demo's flight program. Flight numbers deliberately avoid the
+ * main dataset's own protected/generated set (lib/flight-generator.ts:
+ * AT100/201/302/401/535/650/740/803/870, EK751, AF1234) so the two
+ * datasets' flights are never visually confusable if both were ever
+ * displayed side by side.
+ *
+ * 2026-10-04 (Moses: "add foreign companies teams"): two more configured
+ * self-managed carriers alongside Qatar Airways -- Emirates and Air
+ * France, both already confirmed in lib/company-config.ts
+ * (COMPANY_STAFFING_CONFIG: Emirates 3/flight, Air France 3/flight).
+ * Gulf Air/Etihad are deliberately still left out, same reasoning as
+ * Qatar Airways' own module comment on Gulf Air: an 8-agent real
+ * requirement would dominate a small roster disproportionately. See
+ * employees.ts's buildForeignCompanyGroup for the matching authorized-
+ * employee groups this demand is rostered against.
  */
 export const SMALL_DEMO_FLIGHT_TEMPLATES: SmallFlightTemplate[] = [
   // ---- Daily RAM core (7 flights, every day) ----
@@ -129,12 +143,14 @@ export const SMALL_DEMO_FLIGHT_TEMPLATES: SmallFlightTemplate[] = [
   // (lib/flight-generator.ts).
   { flightNumber: "TK653", airline: "Turkish Airlines", origin: "CMN", destination: "IST", aircraft: "Airbus A321", departure: "20:40", operatorType: "self_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
 
-  // ---- Monday/Wednesday/Friday (the one Profiling+Mesure trigger + the one foreign carrier) ----
+  // ---- Monday/Wednesday/Friday (the Profiling+Mesure trigger + two foreign carriers) ----
   { flightNumber: "AT225", airline: "Royal Air Maroc", origin: "CMN", destination: "LHR", aircraft: "Boeing 737-800", departure: "13:10", operatorType: "atlas_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
   { flightNumber: "QR1015", airline: "Qatar Airways", origin: "CMN", destination: "DOH", aircraft: "Airbus A350", departure: "17:20", operatorType: "self_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
+  { flightNumber: "AF1680", airline: "Air France", origin: "CMN", destination: "CDG", aircraft: "Airbus A321", departure: "11:15", operatorType: "self_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
 
-  // ---- Tuesday/Thursday/Saturday/Sunday (a second domestic rotation) ----
+  // ---- Tuesday/Thursday/Saturday/Sunday (a second domestic rotation + the third foreign carrier) ----
   { flightNumber: "AT660", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "15:20", operatorType: "atlas_managed", daysOfWeek: TUE_THU_SAT_SUN, bookingPressure: "normal" },
+  { flightNumber: "EK702", airline: "Emirates", origin: "CMN", destination: "DXB", aircraft: "Boeing 777-300ER", departure: "16:40", operatorType: "self_managed", daysOfWeek: TUE_THU_SAT_SUN, bookingPressure: "normal" },
 ];
 
 /**

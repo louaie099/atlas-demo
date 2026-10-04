@@ -7,6 +7,8 @@ import { generateSmallDemoFlights } from "./flights";
 import {
   SMALL_DEMO_FLAT_RULE_EMPLOYEES,
   SMALL_DEMO_QATAR_AIRWAYS_EMPLOYEES,
+  SMALL_DEMO_EMIRATES_EMPLOYEES,
+  SMALL_DEMO_AIR_FRANCE_EMPLOYEES,
   SMALL_DEMO_FIXED_CYCLE_EMPLOYEES,
   SMALL_DEMO_ROTATING_EMPLOYEE,
 } from "./employees";
@@ -16,9 +18,12 @@ import { buildFixedCycleWeeklySchedule } from "../fixed-cycle-rotation";
  * SMALL DEMO DATASET — assembly.
  *
  * A separate, independent dataset for manual UI testing (Monthly Planning
- * + Live Operations), sized for roughly 20-25 agents and 8-12 flights/day
- * — see lib/demo-small/employees.ts and flights.ts for the full
- * per-group/per-flight sizing rationale. This module never imports from
+ * + Live Operations). Originally sized for roughly 20-25 agents and 8-12
+ * flights/day; grown twice since (2026-10-04, Moses) to ~48 agents across
+ * 3 foreign carriers and larger RAM specialized teams — see
+ * lib/demo-small/employees.ts and flights.ts for the full per-group/
+ * per-flight sizing rationale and both rounds' reasoning. This module
+ * never imports from
  * lib/seed-data.ts's EMPLOYEES/FLIGHTS constants, and nothing here is
  * read by lib/reset-database.ts or scripts/seed.ts — the main (large)
  * stress-test dataset is completely untouched by this file's existence.
@@ -57,6 +62,14 @@ export const SMALL_DEMO_EMPLOYEES: Employee[] = [
     weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, SMALL_DEMO_DAYS_WITH_DATA),
   })),
   ...SMALL_DEMO_QATAR_AIRWAYS_EMPLOYEES.map((e) => ({
+    ...e,
+    weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, SMALL_DEMO_DAYS_WITH_DATA),
+  })),
+  ...SMALL_DEMO_EMIRATES_EMPLOYEES.map((e) => ({
+    ...e,
+    weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, SMALL_DEMO_DAYS_WITH_DATA),
+  })),
+  ...SMALL_DEMO_AIR_FRANCE_EMPLOYEES.map((e) => ({
     ...e,
     weekly_shifts: buildUniformWeeklySchedule(e.shift_code, e.off_days, SMALL_DEMO_DAYS_WITH_DATA),
   })),

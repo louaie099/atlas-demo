@@ -13,15 +13,22 @@ import { getShiftTimesAs } from "../lib/shift-templates";
 
 /**
  * Locks in the shape and real-engine behavior of the small, separate
- * UI/manual-testing dataset (lib/demo-small/*) requested 2026-10-04:
- * ~20-25 agents, 8-12 flights/day, a NORMALLY FEASIBLE but TIGHT plan with
- * genuine, bounded bottlenecks — never engineered to guarantee 100%
- * coverage, and never touching the main (large) seeded dataset.
+ * UI/manual-testing dataset (lib/demo-small/*). Originally requested
+ * 2026-10-04 at ~20-25 agents, 8-12 flights/day; grown twice since, same
+ * day (Moses: "increase the agents count", then "add foreign companies
+ * teams" + "add about 5 agents for each RAM teams") to ~48 agents across
+ * 3 foreign carriers. Still meant to be a NORMALLY FEASIBLE plan, never
+ * engineered to guarantee 100% coverage, and never touching the main
+ * (large) seeded dataset — but at this size coverage is comfortably high
+ * (~98%, see the tightness test below), so "genuine bottleneck" is a
+ * much weaker claim now than at the original 20-25 scale. Flagged rather
+ * than silently accepted — if tighter bottlenecks matter again, dial the
+ * specialized-team sizes in employees.ts back down.
  */
 describe("small demo dataset — shape", () => {
-  it("has between 20 and 25 employees", () => {
+  it("has at least 20 employees (originally capped at 25; grown twice since to ~48 — see this file's module comment)", () => {
     expect(SMALL_DEMO_EMPLOYEES.length).toBeGreaterThanOrEqual(20);
-    expect(SMALL_DEMO_EMPLOYEES.length).toBeLessThanOrEqual(25);
+    expect(SMALL_DEMO_EMPLOYEES.length).toBeLessThanOrEqual(60);
   });
 
   it("has every employee active, with a real shift, and a unique id", () => {
@@ -55,11 +62,13 @@ describe("small demo dataset — shape", () => {
     expect(distinctShiftCodes.size).toBeGreaterThanOrEqual(4);
   });
 
-  it("includes the configured foreign-carrier path (Qatar Airways) without it dominating the roster", () => {
-    const qatarEmployees = SMALL_DEMO_EMPLOYEES.filter((e) => e.assignment === "Qatar Airways");
-    expect(qatarEmployees.length).toBeGreaterThan(0);
-    expect(qatarEmployees.length).toBeLessThan(SMALL_DEMO_EMPLOYEES.length / 3);
-    for (const e of qatarEmployees) expect(e.foreign_company_authorizations).toContain("Qatar Airways");
+  it("includes the configured foreign-carrier path (Qatar Airways, Emirates, Air France — 2026-10-04 addition) without any one of them dominating the roster", () => {
+    for (const company of ["Qatar Airways", "Emirates", "Air France"]) {
+      const companyEmployees = SMALL_DEMO_EMPLOYEES.filter((e) => e.assignment === company);
+      expect(companyEmployees.length).toBeGreaterThan(0);
+      expect(companyEmployees.length).toBeLessThan(SMALL_DEMO_EMPLOYEES.length / 3);
+      for (const e of companyEmployees) expect(e.foreign_company_authorizations).toContain(company);
+    }
   });
 
   it("names are stable, hand-authored identifiers (never index-generated), so the same people are recognizable across Monthly Planning and Live Operations", () => {
@@ -123,7 +132,13 @@ describe("small demo dataset — real-engine generation (never a second seed-onl
     // Tight: this is NOT a 100%-coverage dataset — real, honest gaps exist.
     // (Never assert === 1, and never adjust the dataset just to clear this
     // bound — a passing dataset that always hits 100% would mean the
-    // "meaningful bottleneck" requirement silently regressed.)
+    // "meaningful bottleneck" requirement silently regressed.) NOTE
+    // (2026-10-04): at the roster's current ~48-employee size the ratio
+    // actually lands around 0.98 — comfortably feasible, barely tight —
+    // so this bound alone no longer guarantees a MEANINGFUL bottleneck,
+    // only a non-100%-engineered one. If that distinction starts to
+    // matter again, tighten this bound AND the specialized-team sizes in
+    // employees.ts together, rather than one without the other.
     expect(coverageRatio).toBeLessThan(1);
 
     // At least one genuinely unfilled requirement is reported as a real
