@@ -506,6 +506,67 @@ describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", 
   });
 });
 
+describe("candidate-lookup — scores replacement candidates against the REAL (effective) departure, not a stale scheduled time (2026-10-04 fix)", () => {
+  it("excludes a candidate whose roster shift fit the flight's ORIGINAL window but doesn't reach anywhere near its real, delayed window", async () => {
+    const fake = new FakeSupabase();
+    // emp-b's effective candidate-pool shift comes from its roster entry's
+    // shift_code (NR02, 08:00-18:15 for this fixture's pre-regime-change
+    // week) -- buildDayEffectivePoolFromRosterEntries overrides whatever
+    // raw Employee.shift_start/shift_end say, so the window has to be
+    // pushed outside THAT real catalog shift, not an arbitrary raw field.
+    seedBaseFixture(fake);
+
+    // Real departure moves to 20:00 -> the real window becomes 19:00-20:00,
+    // entirely outside emp-b's 08:00-18:15 roster shift. getRequirementWindow
+    // deliberately never reads actual_departure itself (every caller must
+    // substitute it in) -- this function previously never did, so it
+    // scored emp-b against the stale, ORIGINAL 08:00-09:00 window (which
+    // sits comfortably inside their shift) and returned them as a clean
+    // "recommended, no extension required" candidate for a flight that
+    // will really be staffed at 19:00-20:00, hours after they're off.
+    await fake.from("flights").update({ actual_departure: "20:00" }).eq("id", "flight-1");
+
+    const result = await getCandidatesForRequirement(fake as unknown as SupabaseClient, "req-1", { excludeEmployeeIds: ["emp-a"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+
+    // emp-b's shift (08:00-18:15) has ZERO overlap with the REAL window
+    // (19:00-20:00) -- must be excluded outright, not even flagged.
+    expect(result.candidates.some((c) => c.employee.id === "emp-b")).toBe(false);
+  });
+});
+
+describe("live-ops-service — evaluateFlightDelayImpact detects a collision even when the OTHER flight was also independently delayed (2026-10-04 fix)", () => {
+  it("detects a NEW collision caused by two independent delays, using each flight's OWN live departure on both sides", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    // flight-1 (Boarding, 08:00-09:00) and flight-2 (Gate, 10:00-11:00)
+    // never overlap at their original times. Delay BOTH: flight-1 forward
+    // to 10:30 (new window 09:30-10:30) and flight-2 earlier to 09:45 (new
+    // window 08:45-09:45) -- together these now genuinely overlap
+    // (09:30-09:45), purely as a product of two independent operational
+    // changes, neither of which alone would have caused it.
+    await fake.from("flights").update({ actual_departure: "10:30" }).eq("id", "flight-1");
+    await fake.from("flights").update({ actual_departure: "09:45" }).eq("id", "flight-2");
+
+    const result = await evaluateFlightDelayImpact(fake as unknown as SupabaseClient, "flight-1");
+    if ("error" in result) throw new Error(result.error);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0];
+    expect(conflict.employee.id).toBe("emp-a");
+    expect(conflict.newWindow).toEqual({ start: "09:30", end: "10:30" });
+    // The collision partner's reported window must reflect flight-2's OWN
+    // live delay (08:45-09:45) -- previously this was built from
+    // flight-2's stale, never-updated scheduled window (10:00-11:00),
+    // which didn't even overlap flight-1's new window, silently missing
+    // this collision entirely.
+    expect(conflict.collidesWith?.window).toEqual({ start: "08:45", end: "09:45" });
+    expect(conflict.replacementCandidates.some((c) => c.employee.id === "emp-b")).toBe(true);
+  });
+});
+
 describe("live-ops-service — confirmReassignment", () => {
   it("replaces the assignment, writes an assignment_modifications 'replaced' row and an audit_log_entries row, without touching the other assignment", async () => {
     const fake = new FakeSupabase();

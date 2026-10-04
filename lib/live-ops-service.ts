@@ -221,7 +221,26 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
   }
 
   const employeesById = new Map((allEmployees as Employee[]).map((e) => [e.id, e]));
-  const flightsById = new Map((allFlights as Flight[]).map((f) => [f.id, f]));
+  // Operational-delay fix (2026-10-04, sibling of the same fix in
+  // lib/planning/candidate-lookup.ts): getRequirementWindow deliberately
+  // never reads actual_departure -- every caller must substitute it in via
+  // a shallow copy (see lib/flight-operations.ts's own doc comment). The
+  // "this employee's other same-day commitments" loop below used the RAW
+  // flight row for each OTHER duty, so if that OTHER duty's own flight had
+  // ALSO been operationally delayed, its window was computed from its
+  // stale scheduled time -- silently missing a real, newly-caused collision
+  // whenever two of an employee's flights are disrupted together. Building
+  // this map from effective-departure flights (a no-op for any flight with
+  // no actual_departure set) fixes that without touching anything else in
+  // this function; `effectiveFlight` below (built from the single
+  // individually-fetched `flight` row) is kept as-is for this flight's own
+  // requirement windows.
+  const flightsById = new Map((allFlights as Flight[]).map((f) => [f.id, { ...f, scheduled_departure: effectiveDeparture(f) }]));
+  // The TRUE "before any operational change" snapshot for the "was this
+  // collision pre-existing" check below -- flight.scheduled_departure is
+  // never mutated (see lib/types.ts), so the raw row IS the original
+  // state, independent of flightsById's effective-departure substitution.
+  const flightsRawById = new Map((allFlights as Flight[]).map((f) => [f.id, f]));
   const requirementsById = new Map((allRequirements as StaffingRequirement[]).map((r) => [r.id, r]));
 
   // getRequirementWindow fed an effective-departure copy of the flight —
@@ -257,23 +276,44 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
       // assignments, not a separate foreign-company protected-window
       // collision — acceptable here since the conflict this flow exists to
       // catch is exactly "assigned to two real duties that now overlap."
-      const otherCommitments = (allAssignments as Assignment[])
-        .filter((a) => a.employee_id === employee.id && a.staffing_requirement_id !== requirement.id)
-        .map((a) => {
-          const r = requirementsById.get(a.staffing_requirement_id);
-          const f = r && flightsById.get(r.flight_id);
-          if (!r || !f || f.day_of_week !== flight.day_of_week) return null;
-          return { requirement: r, flight: f, window: getRequirementWindow(r, f) };
-        })
-        .filter((c): c is ConflictingAssignment => c !== null);
+      //
+      // Built TWICE (2026-10-04 fix) -- once from each OTHER flight's
+      // effective (current, possibly also delayed) departure, and once
+      // from its raw, never-mutated scheduled_departure -- because the
+      // "was this pre-existing" check just below needs the TRUE before-
+      // state of BOTH sides of a collision, not just this flight's own.
+      // Previously the "other" side was computed once (from current data)
+      // and compared against for both old and new, which silently missed
+      // a real, newly-caused collision whenever the OTHER duty's flight
+      // had ALSO been delayed into overlapping range: that duty's CURRENT
+      // window looked identical whether checked against this flight's old
+      // or new window, so a delay-caused collision could read as
+      // "already overlapping" and be wrongly suppressed.
+      const employeeId = employee.id;
+      function otherCommitmentsAt(flightsMap: Map<string, Flight>): ConflictingAssignment[] {
+        return (allAssignments as Assignment[])
+          .filter((a) => a.employee_id === employeeId && a.staffing_requirement_id !== requirement.id)
+          .map((a) => {
+            const r = requirementsById.get(a.staffing_requirement_id);
+            const f = r && flightsMap.get(r.flight_id);
+            if (!r || !f || f.day_of_week !== flight.day_of_week) return null;
+            return { requirement: r, flight: f, window: getRequirementWindow(r, f) };
+          })
+          .filter((c): c is ConflictingAssignment => c !== null);
+      }
+      const otherCommitmentsNew = otherCommitmentsAt(flightsById);
+      const otherCommitmentsOld = otherCommitmentsAt(flightsRawById);
 
-      const collidingRaw = otherCommitments.find((c) => windowsOverlap(newWindow, c.window));
+      const collidingRaw = otherCommitmentsNew.find((c) => windowsOverlap(newWindow, c.window));
       // Real collision only if this is a NEW one — if the two commitments
-      // already overlapped before the operational change, that's a
-      // pre-existing state this flow isn't responsible for surfacing (and
-      // ought to already have been caught at generation time), not
-      // something this delay just caused.
-      const collidesWith = collidingRaw && !windowsOverlap(oldWindow, collidingRaw.window) ? collidingRaw : undefined;
+      // already overlapped before EITHER side's operational change, that's
+      // a pre-existing state this flow isn't responsible for surfacing
+      // (and ought to already have been caught at generation time), not
+      // something caused by what changed just now.
+      const priorOverlap =
+        collidingRaw &&
+        otherCommitmentsOld.find((c) => c.requirement.id === collidingRaw.requirement.id && windowsOverlap(oldWindow, c.window));
+      const collidesWith = collidingRaw && !priorOverlap ? collidingRaw : undefined;
 
       // Shift-boundary check (2026-10-04 fix): does the NEW window still
       // fit inside this employee's own shift? Checked independently of

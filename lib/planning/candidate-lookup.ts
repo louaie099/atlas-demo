@@ -6,6 +6,7 @@ import { getRequirementWindow } from "./requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "./duty-generation";
 import { isFixedPlanningTeam, isTransitTeam } from "../teams";
 import { weekStartFor } from "../flight-date";
+import { effectiveDeparture } from "../flight-operations";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, CandidateResult } from "../types";
 
 function timeToMinutesLocal(t: string): number {
@@ -147,12 +148,12 @@ export async function getCandidatesForRequirement(
   const { data: employees, error: empErr } = await supabase.from("employees").select("*");
   if (empErr) return { ok: false, status: 500, error: empErr.message };
 
-  const targetFlight = flight as Flight;
+  const rawTargetFlight = flight as Flight;
 
   // The requirement's OWN flight determines which week's plan to score
   // against — never a fixed global week constant (see this function's
   // own doc comment above for the bug this replaced).
-  const weekStart = weekStartFor(targetFlight.flight_date);
+  const weekStart = weekStartFor(rawTargetFlight.flight_date);
   const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(weekStart));
   const plan = (planRows as WeeklyPlan[] | null)?.[0];
   const effectiveConfig = plan?.config_snapshot;
@@ -169,6 +170,28 @@ export async function getCandidatesForRequirement(
   if (assignErr || allReqErr || allFlightErr) {
     return { ok: false, status: 500, error: (assignErr || allReqErr || allFlightErr)!.message };
   }
+
+  // Operational-delay fix (2026-10-04): getRequirementWindow deliberately
+  // never reads actual_departure (see lib/flight-operations.ts's own doc
+  // comment) -- every caller is responsible for feeding it a shallow copy
+  // with scheduled_departure substituted by effectiveDeparture() when it
+  // needs the REAL, live time. This function never did that, which was
+  // invisible for ordinary draft-plan candidate lookups (no flight has an
+  // actual_departure yet at that stage) but silently wrong for its OTHER
+  // real caller -- lib/live-ops-service.ts's delay-conflict flow -- where
+  // it matters most: a flight that was JUST delayed still had its
+  // replacement candidates (and every other employee's busy windows below)
+  // scored against the flight's ORIGINAL scheduled time, not the real new
+  // time the task now needs covering. A candidate whose shift doesn't
+  // reach anywhere near the real new window could still come back
+  // "recommended, no extension required" simply because the stale window
+  // fit their shift fine. Applied once, up front, to every flight (not
+  // just the target one) so an already-delayed OTHER flight's busy window
+  // below is equally correct -- for any flight with no actual_departure
+  // set, effectiveDeparture() falls back to scheduled_departure, so this
+  // is a no-op and every existing (non-delayed) caller is unaffected.
+  const effectiveFlights = (allFlights as Flight[]).map((f) => ({ ...f, scheduled_departure: effectiveDeparture(f) }));
+  const targetFlight = effectiveFlights.find((f) => f.id === rawTargetFlight.id) ?? rawTargetFlight;
 
   const requirementAssignments = (allAssignments as Assignment[]).filter(
     (a) => a.staffing_requirement_id === requirement.id
@@ -190,7 +213,7 @@ export async function getCandidatesForRequirement(
     targetFlight.day_of_week,
     allAssignments as Assignment[],
     allRequirements as StaffingRequirement[],
-    allFlights as Flight[],
+    effectiveFlights,
     candidatePool
   );
 
