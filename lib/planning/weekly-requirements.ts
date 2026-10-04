@@ -42,11 +42,18 @@ import { classifyCompanyRequirement } from "../company-config";
  * scheduled flight that simply has no ATLAS staffing role at all — it
  * returns an EMPTY requirement list, not a placeholder "needs
  * configuration" row. Flight Schedule still shows it; Flight Coverage
- * never does. A RAM/atlas_managed flight with no established operation
- * rule is a different, genuinely internal case (ATLAS DOES operate the
- * flight, but the rule for it isn't confirmed yet) — that one keeps its
- * needs_configuration: true row, surfaced only as an administrative
- * PlanIssue (see validation.ts), never as a routine Flight Coverage state.
+ * never does.
+ *
+ * "NEEDS CONFIGURATION" IS NOW A SELF-MANAGED-ONLY NOTION (2026-10-04
+ * revision): Gate/Boarding is a CONFIRMED universal rule for every RAM
+ * flight regardless of destination (see ram-staffing-matrix.ts), so
+ * classifyRamGateAndBoardingRequirements no longer returns null for a real
+ * RAM flight — the `!gateAndBoarding` branch below (and
+ * missingOperationRuleRequirement itself) is now a defensive fallback for
+ * a genuinely malformed flight record (e.g. missing aircraft), not a
+ * routine state any confirmed destination can reach. ATLAS DOES operate
+ * every RAM flight it schedules and always sends Gate/Boarding agents —
+ * "no requirement generated" is reserved for self-managed flights above.
  */
 export function classifyFlightRequirements(
   flight: Flight,

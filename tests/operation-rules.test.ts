@@ -55,21 +55,33 @@ describe("classifyRamGateAndBoardingRequirements", () => {
     expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(1);
   });
 
-  it("returns null for an unconfigured destination category", () => {
+  it("still returns Gate x1 + Boarding x1 for an unconfigured destination category (2026-10-04 revision: Gate/Boarding is universal, driven by aircraft class alone)", () => {
     const reqs = classifyRamGateAndBoardingRequirements(
       makeFlight({ aircraft: "Airbus A320", destination_category: "Domestic" })
     );
+    expect(reqs?.find((r) => r.role === "Gate")?.total_requirement).toBe(1);
+    expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(1);
+    expect(reqs?.every((r) => r.needs_configuration === false)).toBe(true);
+  });
+
+  it("still returns Gate x1 + Boarding x1 even with no destination classification at all (destination_category null)", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(makeFlight({ destination_category: null }));
+    expect(reqs?.find((r) => r.role === "Gate")?.total_requirement).toBe(1);
+    expect(reqs?.find((r) => r.role === "Boarding")?.total_requirement).toBe(1);
+  });
+
+  it("returns null only for a genuinely malformed flight record (no aircraft at all) — the defensive fallback missingOperationRuleRequirement now exists for", () => {
+    const reqs = classifyRamGateAndBoardingRequirements(makeFlight({ aircraft: "" }));
     expect(reqs).toBeNull();
   });
 });
 
 describe("missingOperationRuleRequirement", () => {
-  it("never fabricates a number — total_requirement is always 0 and needs_configuration is true", () => {
-    const flight = makeFlight({ aircraft: "Airbus A320", destination_category: "Domestic" });
+  it("never fabricates a number — total_requirement is always 0 and needs_configuration is true (now only reachable via a malformed flight record, not a destination classification gap)", () => {
+    const flight = makeFlight({ aircraft: "" });
     const req = missingOperationRuleRequirement(flight);
     expect(req.total_requirement).toBe(0);
     expect(req.needs_configuration).toBe(true);
-    expect(req.reasoning).toContain("No operation rule configured");
   });
 });
 

@@ -827,11 +827,20 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     // Sunday (previously left OFF only because the old hours arithmetic
     // discouraged a 6th working day) — [T,T,F,F,T,T,T], a 3-day trailing run,
     // still under the 5-consecutive-day cap and still a clean 2-day OFF pair.
+    // 2026-10-04 (RAM staffing matrix revision): Gate/Boarding is now a
+    // universal, confirmed rule for every RAM flight (see
+    // lib/ram-staffing-matrix.ts), so the two Morocco-domestic routes
+    // (AT302/RAK, AT401/FEZ — every day of the week) now generate real
+    // Gate/Boarding demand that used to be silently dropped as
+    // needs_configuration. That extra daily demand shifts youssef's clean
+    // 2-day OFF block one day earlier — [T,F,F,T,T,T,T] — still a 3-day
+    // trailing run, still under the 5-consecutive-day cap, still a clean
+    // 2-day OFF pair; only which two days moved.
     const boundary = deriveFallbackBoundaryContext(EMPLOYEES, DAYS_WITH_DATA, CURRENT_WEEK_START);
     const run = (hardCapRepair: boolean) =>
       generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, boundary, "fallback_static_baseline", { hardCapRepair });
     const before = run(false);
-    expect(workPattern(before, "youssef-el-amrani")).toEqual([true, true, false, false, true, true, true]);
+    expect(workPattern(before, "youssef-el-amrani")).toEqual([true, false, false, true, true, true, true]);
     expect(before.issues.some((i) => i.type === "consecutive_off_violation" && i.employeeId === "youssef-el-amrani")).toBe(false);
     expect(maxRun(workPattern(before, "youssef-el-amrani"))).toBeLessThanOrEqual(5);
 

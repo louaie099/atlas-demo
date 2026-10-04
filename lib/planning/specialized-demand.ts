@@ -20,17 +20,18 @@ import { getRamRoleCounts, getRamMesureHeadcount } from "../ram-staffing-matrix"
 
 /**
  * Whether this RAM flight has a Profiling requirement, and if so, how
- * many. Returns null when either (a) there's no established rule at all
- * for this destination category/aircraft combination — that's
- * classifyRamGateAndBoardingRequirements/missingOperationRuleRequirement's
- * problem, not duplicated here — or (b) the rule IS established and says
- * Profiling simply doesn't apply to this category (e.g. Africa).
+ * many. Profiling is genuinely destination-gated (unlike Gate/Boarding,
+ * which is universal — see ram-staffing-matrix.ts's 2026-10-04 revision):
+ * returns null whenever the destination category isn't one of the three
+ * CONFIRMED Profiling categories (Europe/Schengen, UK/USA, Canada) — this
+ * includes an unclassified destination (Turkey, the Gulf states, etc.) and
+ * a classified-but-not-Profiling category (Africa, Domestic) alike. Both
+ * are confirmed "not applicable" answers, not gaps.
  */
 export function classifyProfilingRequirement(flight: Flight): Omit<StaffingRequirement, "id" | "flight_id"> | null {
   if (flight.operator_type !== "atlas_managed") return null;
   const counts = getRamRoleCounts(flight.destination_category, flight.aircraft);
-  if (!counts) return null; // no established rule for this combination at all
-  if (counts.profiling === null) return null; // established rule says Profiling doesn't apply here
+  if (counts.profiling === null) return null; // not one of the confirmed Profiling categories
 
   return {
     role: "Profiling",

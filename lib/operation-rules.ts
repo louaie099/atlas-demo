@@ -5,21 +5,31 @@ import { getRamRoleCounts } from "./ram-staffing-matrix";
  * RAM (Atlas-managed) Gate + Boarding staffing rules — reads the shared
  * matrix (lib/ram-staffing-matrix.ts) rather than keeping its own copy of
  * the numbers. Gate and Boarding are always generated together as two
- * DISTINCT concurrent requirements (never one merged headcount) whenever
- * the flight's (destination category, aircraft class) combination is
- * established. A flight whose combination isn't in the matrix returns
- * null — the caller must surface that as "needs configuration", never
- * guess.
+ * DISTINCT concurrent requirements (never one merged headcount).
+ *
+ * CONFIRMED RULE (2026-10-04 revision): Gate/Boarding is universal for
+ * every RAM flight, driven by aircraft class alone — it no longer depends
+ * on the flight's destination being classified into any confirmed
+ * category at all. RAM operates every one of its own flights and always
+ * sends Gate/Boarding agents, wherever it flies; a destination
+ * classification gap (an unconfirmed country — Turkey, the Gulf states,
+ * etc.) is a Profiling/Mesure-applicability question (see
+ * lib/planning/specialized-demand.ts), never a reason to withhold
+ * Gate/Boarding. This function no longer returns null for a RAM flight —
+ * the nullable return type is kept only so a caller added later (or a
+ * flight genuinely missing an aircraft value) still has a defined
+ * "needs configuration" path to fall back to, never a guess.
  */
 export function classifyRamGateAndBoardingRequirements(
   flight: Flight
 ): Omit<StaffingRequirement, "id" | "flight_id">[] | null {
-  if (!flight.destination_category) return null;
+  if (!flight.aircraft) return null;
 
   const counts = getRamRoleCounts(flight.destination_category, flight.aircraft);
-  if (!counts) return null;
 
-  const basis = `${flight.aircraft} to ${flight.destination_category} destinations`;
+  const basis = flight.destination_category
+    ? `${flight.aircraft} to ${flight.destination_category} destinations`
+    : `${flight.aircraft} (destination not yet classified into an operational category)`;
 
   return [
     {
@@ -28,7 +38,7 @@ export function classifyRamGateAndBoardingRequirements(
       additional_requirement: 0,
       total_requirement: counts.gate,
       source: "fixed_rule",
-      reasoning: `${counts.gate} Gate agent(s) required — operation rule for ${basis}.`,
+      reasoning: `${counts.gate} Gate agent(s) required — confirmed universal operation rule for ${basis}.`,
       needs_configuration: false,
     },
     {
@@ -37,7 +47,7 @@ export function classifyRamGateAndBoardingRequirements(
       additional_requirement: 0,
       total_requirement: counts.boarding,
       source: "fixed_rule",
-      reasoning: `${counts.boarding} Boarding agent(s) required — operation rule for ${basis}.`,
+      reasoning: `${counts.boarding} Boarding agent(s) required — confirmed universal operation rule for ${basis}.`,
       needs_configuration: false,
     },
   ];

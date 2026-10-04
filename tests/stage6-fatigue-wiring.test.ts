@@ -631,13 +631,27 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // confirming the new signal is isolated to live Stage 9 generation, not a
 // change to scoreCandidates' own default behavior. (Previous values:
 // plan:2026-08-31 c5cafd5ebd8ed431, plan:2026-09-21 94d88b2ed59a6501.)
+// 2026-10-04 (RAM staffing matrix revision) RE-PIN of the four plan:/stage6:
+// hashes only: Gate/Boarding is now a universal, confirmed rule for every
+// RAM flight regardless of destination classification (see
+// lib/ram-staffing-matrix.ts) -- the two Morocco-domestic routes (AT302/RAK,
+// AT401/FEZ, every day of the week) now generate real Gate/Boarding
+// requirements that used to be silently dropped as needs_configuration, so
+// computeWeeklyStaffingRequirements' output (feeding both the full pipeline
+// and Stage 6's own demand aggregation) legitimately changed for both
+// pinned weeks. topup:/foreign:/score: are untouched -- confirmed directly:
+// none of those calls route through computeWeeklyStaffingRequirements/real
+// FLIGHTS demand, they use synthetic demandDriven maps or isolated inputs.
+// (Previous values: plan:2026-08-31 e5b7eedcf1919903, stage6:2026-08-31
+// 765613e53f0d2c61, plan:2026-09-21 6642fea8786afda3, stage6:2026-09-21
+// 35e4ca6007983334.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "e5b7eedcf1919903",
-  "stage6:2026-08-31": "765613e53f0d2c61",
+  "plan:2026-08-31": "77e6cf81b62d2cba",
+  "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "6642fea8786afda3",
-  "stage6:2026-09-21": "35e4ca6007983334",
+  "plan:2026-09-21": "2388e084b136fd8d",
+  "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",
   "score:Boarding:0": "a37c5bb9e85fdb75",

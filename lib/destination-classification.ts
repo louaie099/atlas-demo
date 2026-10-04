@@ -27,12 +27,16 @@ export const DESTINATIONS: Record<string, { code: string; city: string; country:
 };
 
 /**
- * Country -> confirmed RAM operational category. ONLY countries with an
- * actual confirmed rule appear here — this is deliberately short. A
- * country's absence (Turkey, Bahrain, the Gulf states reached by their own
- * carriers, etc.) means no established RAM category exists yet, not that
- * one was overlooked. Do not extend this table to "make a flight fit" —
- * extend it only when a real confirmed rule exists.
+ * Country -> confirmed RAM Profiling/Mesure category. ONLY countries with
+ * an actual confirmed Profiling/Mesure rule appear here — this is
+ * deliberately short. A country's absence (Turkey, the Gulf states, etc.)
+ * means no confirmed Profiling/Mesure category exists for it — NOT that
+ * RAM has no staffing rule for the flight at all. Since the 2026-10-04
+ * revision, Gate/Boarding is a universal rule for every RAM flight
+ * regardless of this table (see ram-staffing-matrix.ts) — this mapping
+ * only ever decides Profiling/Mesure applicability now. Do not extend this
+ * table to "make a flight fit" — extend it only when a real confirmed
+ * Profiling/Mesure rule exists for that country.
  *
  * Canada is its own category, not folded into "UK/USA" — the CONFIRMED
  * RULE (additional security/document-related functions: Profiling, Mesure)
@@ -55,19 +59,19 @@ const COUNTRY_TO_RAM_CATEGORY: Partial<Record<string, RamDestinationCategory>> =
  * function that should decide a flight's destination_category — never a
  * hand-typed literal on a flight template.
  *
- * - Morocco is a confident classification ("Domestic") even though no RAM
- *   staffing matrix rule exists for it yet — that's a real, known gap
- *   (see ram-staffing-matrix.ts), not an unclassifiable destination. It is
- *   surfaced as needs_configuration by the requirement layer, same as any
- *   other category with no matrix entry, but the classification itself is
- *   not in doubt.
- * - A country with a confirmed RAM category (Spain/France -> Europe/Schengen,
- *   United Kingdom/United States -> UK/USA, Canada -> Canada, Senegal ->
- *   Africa) returns that category directly.
+ * - Morocco is a confident classification ("Domestic"). Gate/Boarding is
+ *   universal for every RAM flight regardless of category (see
+ *   ram-staffing-matrix.ts's 2026-10-04 revision), so "Domestic" having no
+ *   Profiling/Mesure entry is a confirmed "not applicable" answer, not a
+ *   gap — same as Africa.
+ * - A country with a confirmed Profiling/Mesure category (Spain/France ->
+ *   Europe/Schengen, United Kingdom/United States -> UK/USA, Canada ->
+ *   Canada, Senegal -> Africa) returns that category directly.
  * - Everything else (Turkey, Bahrain, the UAE, Qatar, or an airport not in
- *   DESTINATIONS at all) returns null — genuinely unclassifiable with
- *   what's currently confirmed. Never guessed into the nearest-sounding
- *   bucket.
+ *   DESTINATIONS at all) returns null — genuinely unclassifiable for
+ *   Profiling/Mesure purposes with what's currently confirmed. This no
+ *   longer blocks Gate/Boarding, which is universal. Never guessed into
+ *   the nearest-sounding Profiling/Mesure bucket.
  */
 export function classifyDestinationOperationally(
   destinationCode: string | null

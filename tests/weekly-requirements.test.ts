@@ -74,13 +74,22 @@ describe("classifyFlightRequirements — a flight now produces MULTIPLE concurre
     expect(byRole.Mesure.needs_configuration).toBe(false);
   });
 
-  it("an entirely unconfigured destination category gets exactly ONE needs_configuration row for Gate/Boarding/Profiling/Mesure — not one gap row per role, and no Check-in row at all any more", () => {
+  it("Domestic (and any other unconfirmed-for-Profiling/Mesure category): Gate x1 + Boarding x1, confirmed, no needs_configuration row — Gate/Boarding is universal (2026-10-04 revision), only Profiling/Mesure stay destination-gated", () => {
     const reqs = classifyFlightRequirements(makeFlight({ destination_category: "Domestic" }), CONFIG);
-    expect(reqs).toHaveLength(1);
-    expect(reqs.find((r) => r.role === "Check-in")).toBeUndefined();
-    const gap = reqs[0];
-    expect(gap.needs_configuration).toBe(true);
-    expect(gap.total_requirement).toBe(0);
+    const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate"]);
+    expect(byRole.Gate.total_requirement).toBe(1);
+    expect(byRole.Boarding.total_requirement).toBe(1);
+    expect(reqs.every((r) => r.needs_configuration === false)).toBe(true);
+  });
+
+  it("a destination with NO confirmed classification at all (destination_category null — e.g. Turkey, the Gulf states): still gets Gate x1 + Boarding x1, confirmed — classification gaps no longer block Gate/Boarding", () => {
+    const reqs = classifyFlightRequirements(makeFlight({ destination_category: null }), CONFIG);
+    const byRole = Object.fromEntries(reqs.map((r) => [r.role, r]));
+    expect(Object.keys(byRole).sort()).toEqual(["Boarding", "Gate"]);
+    expect(byRole.Gate.total_requirement).toBe(1);
+    expect(byRole.Boarding.total_requirement).toBe(1);
+    expect(reqs.every((r) => r.needs_configuration === false)).toBe(true);
   });
 
   it("self-managed (foreign carrier) flights are untouched by the RAM matrix — still one company_config row", () => {
