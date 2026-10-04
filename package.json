@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "seed:small-demo": "tsx scripts/seed-small-demo.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
