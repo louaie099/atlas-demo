@@ -31,11 +31,20 @@ import { classifyDestinationOperationally } from "../destination-classification"
  *  - One self-managed, UNCONFIGURED carrier (Turkish Airlines) — the
  *    "real schedule noise with zero staffing cost" case, same honest
  *    "unmanaged" path as the main dataset's TK653.
- *  - One UK/USA flight (AT210/LHR) is the only Profiling+Mesure trigger —
+ *  - One UK/USA flight (AT225/LHR) is the only Profiling+Mesure trigger —
  *    deliberately the ONLY one, since Mesure's confirmed flat 4-agent
  *    requirement is expensive relative to a small roster; two such flights
  *    would force an oversized Mesure team just to stay feasible, which
  *    would misrepresent "small but tight" as "small and starved."
+ *
+ * Flight numbers use RAM's real "AT" prefix (not a made-up code) — chosen
+ * to NOT collide with any flight number the main dataset already uses
+ * (lib/flight-generator.ts's TEMPLATES / lib/seed-data.ts's
+ * SCRIPTED_FLIGHTS: AT100, AT201, AT302, AT401, AT535, AT650, AT740,
+ * AT803, AT870). This dataset's own numbers (AT120, AT160, AT225, AT310,
+ * AT420, AT560, AT660, AT815) are deliberately outside that set, so the
+ * two datasets' flights are never confusable even if both were ever
+ * imported into the same week.
  */
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -95,16 +104,16 @@ function syntheticBookedPassengersFor(
  */
 export const SMALL_DEMO_FLIGHT_TEMPLATES: SmallFlightTemplate[] = [
   // ---- Daily RAM core (7 flights, every day) ----
-  { flightNumber: "SM100", airline: "Royal Air Maroc", origin: "CMN", destination: "MAD", aircraft: "Boeing 737-800", departure: "07:15", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
-  { flightNumber: "SM302", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "08:30", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
-  { flightNumber: "SM150", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "15:10", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
-  { flightNumber: "SM401", airline: "Royal Air Maroc", origin: "CMN", destination: "FEZ", aircraft: "Boeing 737-800", departure: "10:40", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
-  { flightNumber: "SM540", airline: "Royal Air Maroc", origin: "CMN", destination: "ORY", aircraft: "Boeing 737-800", departure: "12:50", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT120", airline: "Royal Air Maroc", origin: "CMN", destination: "MAD", aircraft: "Boeing 737-800", departure: "07:15", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT310", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "08:30", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT160", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "15:10", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT420", airline: "Royal Air Maroc", origin: "CMN", destination: "FEZ", aircraft: "Boeing 737-800", departure: "10:40", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT560", airline: "Royal Air Maroc", origin: "CMN", destination: "ORY", aircraft: "Boeing 737-800", departure: "12:50", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
   // Dreamliner on a Domestic/Africa-shaped route — exercises the
   // aircraft-class-driven 2x Gate/Boarding rule WITHOUT also triggering
   // Profiling/Mesure (Africa has no confirmed Profiling/Mesure category —
   // see destination-classification.ts), so it doesn't compound with
-  // SM210's Mesure demand below. Deliberately an EARLY-AFTERNOON departure
+  // AT225's Mesure demand below. Deliberately an EARLY-AFTERNOON departure
   // (not late evening): with a tiny roster, clustering demand across the
   // whole clock (early morning AND late evening every single day) forces
   // every flexible-pool employee onto a long evening shift just to cover
@@ -114,18 +123,18 @@ export const SMALL_DEMO_FLIGHT_TEMPLATES: SmallFlightTemplate[] = [
   // whole RAM core within a single legal shift's span (05:45-15:00ish)
   // lets the real, intended bottlenecks (Mesure, Profiling — see
   // employees.ts) show up on their own, without this artifact.
-  { flightNumber: "SM803", airline: "Royal Air Maroc", origin: "CMN", destination: "DKR", aircraft: "Boeing 787-9", departure: "13:45", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
+  { flightNumber: "AT815", airline: "Royal Air Maroc", origin: "CMN", destination: "DKR", aircraft: "Boeing 787-9", departure: "13:45", operatorType: "atlas_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
   // Self-managed, deliberately UNCONFIGURED carrier — real schedule entry,
   // zero staffing cost, same "unmanaged" path as the main dataset's TK653
   // (lib/flight-generator.ts).
   { flightNumber: "TK653", airline: "Turkish Airlines", origin: "CMN", destination: "IST", aircraft: "Airbus A321", departure: "20:40", operatorType: "self_managed", daysOfWeek: ALL_DAYS, bookingPressure: "normal" },
 
   // ---- Monday/Wednesday/Friday (the one Profiling+Mesure trigger + the one foreign carrier) ----
-  { flightNumber: "SM210", airline: "Royal Air Maroc", origin: "CMN", destination: "LHR", aircraft: "Boeing 737-800", departure: "13:10", operatorType: "atlas_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
+  { flightNumber: "AT225", airline: "Royal Air Maroc", origin: "CMN", destination: "LHR", aircraft: "Boeing 737-800", departure: "13:10", operatorType: "atlas_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
   { flightNumber: "QR1015", airline: "Qatar Airways", origin: "CMN", destination: "DOH", aircraft: "Airbus A350", departure: "17:20", operatorType: "self_managed", daysOfWeek: MON_WED_FRI, bookingPressure: "normal" },
 
   // ---- Tuesday/Thursday/Saturday/Sunday (a second domestic rotation) ----
-  { flightNumber: "SM650", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "15:20", operatorType: "atlas_managed", daysOfWeek: TUE_THU_SAT_SUN, bookingPressure: "normal" },
+  { flightNumber: "AT660", airline: "Royal Air Maroc", origin: "CMN", destination: "RAK", aircraft: "Boeing 737-800", departure: "15:20", operatorType: "atlas_managed", daysOfWeek: TUE_THU_SAT_SUN, bookingPressure: "normal" },
 ];
 
 /**

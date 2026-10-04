@@ -62,14 +62,18 @@ function buildEmployee(partial: {
 }
 
 /**
- * General T1 Pool (10) — the flexible core. Shift codes deliberately span
- * early-morning (MT01 05:45-15:00), midday (NR01/NR02 08:00-17:00/18:15),
- * and afternoon/evening (AP01/AP02 13:45-22:45/23:15) so SM100's early
- * 07:15 departure (window ~06:15-07:15) and SM803's late 19:15 departure
- * (window ~17:45-19:15) are NOT both coverable by the same shift code —
- * a genuine, visible bottleneck (an NR-shift employee is correctly
- * "flagged," not auto-assignable, for SM100's early window) rather than a
- * hand-picked universal shift that would quietly guarantee success.
+ * General T1 Pool (10) — the flexible core. Shift codes span early-morning
+ * (MT01/MT03 ~05:45-15:00), midday (NR01/NR02 08:00-17:00/18:15), and
+ * afternoon (AP01/AP02 13:45-22:45/23:15) base codes — the real day-to-day
+ * code Stage 6 actually assigns is demand-driven (lib/planning/
+ * shift-generation.ts), not fixed to whichever code is listed here. An
+ * employee whose assigned shift that day doesn't fully contain a given
+ * flight's duty window is correctly "flagged," not auto-assignable — see
+ * flights.ts's module comment for why the flight schedule is deliberately
+ * kept within a single legal shift's span rather than spread across the
+ * whole clock (that earlier shape caused a cross-day REST LOCKOUT, not a
+ * meaningful bottleneck — see that file's comment on AT815's departure
+ * time).
  */
 const GENERAL_T1_POOL = [
   { id: "small-yasmine-rafiq", name: "Yasmine Rafiq", skills: ["Check-in", "Weight Control"], shift_code: "NR01", weekly_hours: 24 },
@@ -85,9 +89,9 @@ const GENERAL_T1_POOL = [
 ];
 
 /**
- * Profiling (2) — covers SM100/SM540 (Europe/Schengen, 1 each) and SM210
+ * Profiling (2) — covers AT120/AT560 (Europe/Schengen, 1 each) and AT225
  * (UK/USA, 1) on their respective days. 2 people for up to 3 simultaneous
- * daily Profiling slots (Mon/Wed/Fri: SM100+SM540+SM210) is intentionally
+ * daily Profiling slots (Mon/Wed/Fri: AT120+AT560+AT225) is intentionally
  * tight — one of the three will routinely go uncovered or need a
  * flagged/manual pick, a real bottleneck, not a gap to paper over.
  */
@@ -97,7 +101,7 @@ const PROFILING = [
 ];
 
 /**
- * Mesure (4) — SM210 (Mon/Wed/Fri only) needs exactly 4 Mesure agents at
+ * Mesure (4) — AT225 (Mon/Wed/Fri only) needs exactly 4 Mesure agents at
  * once (the confirmed flat Mesure headcount, lib/ram-staffing-matrix.ts).
  * 4 dedicated Mesure employees is therefore the minimum that can ever
  * fully cover it — zero spare capacity: any OFF day, rest shortfall, or
