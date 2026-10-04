@@ -371,11 +371,21 @@ describe("Stage 6 + Stage 9 integration -- AT870-shaped simultaneous demand end-
     // narrower, overlapping windows) -- and the qualified population
     // splits into a small multi-qualified shared pool (exactly enough
     // for Gate+Boarding's combined 4) plus a larger Check-in-only pool.
-    const checkinFlight = makeFlight({ id: "f-ci", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    // 2026-10-04 (planning-integrity audit fix): departure bumped from
+    // 10:00 to 11:00 so Check-in's window (T-180/T-45, i.e. 08:00-10:15)
+    // starts exactly at 08:00 -- the Check-in-only pool's real Stage-6-
+    // assigned shift (NR01, 08:00-17:00) genuinely covers it. At the old
+    // 10:00 departure the Check-in window opened at 07:00, an hour before
+    // NR01 even starts -- silently tolerated before the audit fix (only
+    // the shift's END boundary was checked), but a genuine containment
+    // violation once early-start is enforced. Gate/Boarding's window
+    // shifts to 10:00-11:00 accordingly; the overlap structure (Check-in's
+    // close overlapping Gate/Boarding's open) is unchanged.
+    const checkinFlight = makeFlight({ id: "f-ci", scheduled_departure: "11:00", day_of_week: "Tuesday" });
     const checkinReq = makeRequirement({ id: "r-ci", flight_id: "f-ci", role: "Check-in", source: "demand_forecast", total_requirement: 4 });
-    const gateFlight = makeFlight({ id: "f-ga", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    const gateFlight = makeFlight({ id: "f-ga", scheduled_departure: "11:00", day_of_week: "Tuesday" });
     const gateReq = makeRequirement({ id: "r-ga", flight_id: "f-ga", role: "Gate", total_requirement: 2 });
-    const boardingFlight = makeFlight({ id: "f-bo", scheduled_departure: "10:00", day_of_week: "Tuesday" });
+    const boardingFlight = makeFlight({ id: "f-bo", scheduled_departure: "11:00", day_of_week: "Tuesday" });
     const boardingReq = makeRequirement({ id: "r-bo", flight_id: "f-bo", role: "Boarding", total_requirement: 2 });
     const flights = [checkinFlight, gateFlight, boardingFlight];
     const requirements = [checkinReq, gateReq, boardingReq];

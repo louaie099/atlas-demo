@@ -22,10 +22,19 @@ function makeEmployee(overrides: Partial<Employee>): Employee {
 
 function makeFlight(overrides: Partial<Flight>): Flight {
   return {
+    // 2026-10-04 (planning-integrity audit fix): bumped from 14:00 to 15:00
+    // so the default fixed_rule window (T-60, i.e. 14:00-15:00) falls fully
+    // WITHIN makeEmployee's default shift (13:45-22:45) -- before the audit
+    // fix, scoreCandidates only checked the shift's END boundary, so a
+    // 13:00-14:00 window against a 13:45-22:45 shift was silently
+    // "recommended" despite starting before the shift began. That is no
+    // longer eligible for automatic assignment (see scoring.ts's
+    // earlyStartNeeded), so every test here that isn't deliberately
+    // exercising a containment boundary needs a genuinely-contained default.
     id: "f1", flight_number: "AT100", airline: "Royal Air Maroc", route: "CMN → X",
     origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null,
-    registration: null, callsign: null, terminal: "T1", scheduled_departure: "14:00",
-    scheduled_arrival: null, gate: null, boarding_window_start: "13:50", boarding_window_end: "14:20",
+    registration: null, callsign: null, terminal: "T1", scheduled_departure: "15:00",
+    scheduled_arrival: null, gate: null, boarding_window_start: "14:50", boarding_window_end: "15:20",
     status: "scheduled", booking_pressure: "normal", day_of_week: "Wednesday", flight_date: "2026-09-03", week_start: "2026-09-01",
     operator_type: "atlas_managed", destination_category: "Europe/Schengen",
     booked_passengers: null, seat_capacity: null,
@@ -206,10 +215,12 @@ describe("generateDutiesForDay", () => {
   });
 
   it("never double-books an employee across two overlapping duties the same day", () => {
-    // T-1h windows: flightA (14:00 departure) -> 13:00-14:00, flightB
-    // (14:30 departure) -> 13:30-14:30 — partial overlap, 13:30-14:00.
-    const flightA = makeFlight({ id: "a", scheduled_departure: "14:00" });
-    const flightB = makeFlight({ id: "b", scheduled_departure: "14:30" }); // overlaps A
+    // T-1h windows: flightA (15:00 departure) -> 14:00-15:00, flightB
+    // (15:30 departure) -> 14:30-15:30 — partial overlap, 14:30-15:00. Both
+    // fully within the default employee's 13:45-22:45 shift (see
+    // makeFlight's own 2026-10-04 doc comment on why 15:00, not 14:00).
+    const flightA = makeFlight({ id: "a", scheduled_departure: "15:00" });
+    const flightB = makeFlight({ id: "b", scheduled_departure: "15:30" }); // overlaps A
     const reqA = makeRequirement({ id: "ra", flight_id: "a", total_requirement: 1 });
     const reqB = makeRequirement({ id: "rb", flight_id: "b", total_requirement: 1 });
 

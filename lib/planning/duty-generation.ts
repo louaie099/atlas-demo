@@ -476,7 +476,18 @@ export function generateDutiesForDay(
           requiredAuthorization,
           hoursScheduledThisWindow,
           taskCountsThisDay,
-          fatigue
+          fatigue,
+          // Full shift-containment (2026-10-04 audit fix) must be judged
+          // against the REAL, narrow, displayed task window (`window` —
+          // the same value recorded on the GeneratedDuty below and shown
+          // to users) — never conflictWindows[idx], which for a
+          // company_config requirement is the WIDE protected window used
+          // only to decide busy/overlap conflicts (see this function's own
+          // comment above). Requiring a shift to contain the wide window
+          // would wrongly demand a foreign-carrier agent clock in ~4h30
+          // before departure for a ~30-minute task. See scoreCandidates'
+          // own doc comment on its `taskWindow` parameter.
+          window
         );
         const recommended = results.filter((r) => r.status === "recommended");
 

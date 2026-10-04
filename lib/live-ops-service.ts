@@ -5,7 +5,7 @@ import { loadPersistedPlanView, planIdForWeek } from "./planning/weekly-plan-ser
 import { getRequirementWindow } from "./planning/requirement-window";
 import { getCandidatesForRequirement } from "./planning/candidate-lookup";
 import { effectiveDeparture } from "./flight-operations";
-import { TimeWindow } from "./scoring";
+import { TimeWindow, isWindowWithinShift } from "./scoring";
 import {
   Assignment,
   CandidateResult,
@@ -24,21 +24,6 @@ function timeToMinutes(t: string): number {
 }
 function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
   return timeToMinutes(a.start) < timeToMinutes(b.end) && timeToMinutes(b.start) < timeToMinutes(a.end);
-}
-
-/**
- * Is `window` entirely contained within [shiftStart, shiftEnd]? This is
- * the SAME shift-containment test lib/planning/candidate-lookup.ts already
- * applies when vetting a REPLACEMENT candidate against a window (there via
- * windowsOverlapLocal against the shift as a window, which is equivalent
- * for a shift with no overnight wrap) -- applied here to the INCUMBENT so
- * the two are checked consistently. Returns true (no violation) when
- * either boundary is missing, rather than guessing -- an active,
- * currently-assigned employee always has both set in practice.
- */
-function windowWithinShift(window: TimeWindow, shiftStart: string | null, shiftEnd: string | null): boolean {
-  if (!shiftStart || !shiftEnd) return true;
-  return timeToMinutes(window.start) >= timeToMinutes(shiftStart) && timeToMinutes(window.end) <= timeToMinutes(shiftEnd);
 }
 
 /**
@@ -325,8 +310,8 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
       // out-of-shift assignment is a separate, already-existing data
       // problem, not something this delay just caused).
       const newlyOutOfShift =
-        !windowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
-        windowWithinShift(oldWindow, employee.shift_start, employee.shift_end);
+        !isWindowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
+        isWindowWithinShift(oldWindow, employee.shift_start, employee.shift_end);
       const shiftBoundaryViolation: ShiftBoundaryViolation | undefined =
         newlyOutOfShift && employee.shift_start && employee.shift_end
           ? { shiftStart: employee.shift_start, shiftEnd: employee.shift_end }

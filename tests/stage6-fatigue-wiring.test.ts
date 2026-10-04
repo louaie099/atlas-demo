@@ -645,19 +645,37 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // (Previous values: plan:2026-08-31 e5b7eedcf1919903, stage6:2026-08-31
 // 765613e53f0d2c61, plan:2026-09-21 6642fea8786afda3, stage6:2026-09-21
 // 35e4ca6007983334.)
+// 2026-10-04 (planning-integrity audit fix, part 2) RE-PIN of plan:/
+// score:Qatar: hashes: scoreCandidates now requires FULL shift containment
+// (task.start >= shift.start AND task.end <= shift.end) to auto-
+// "recommend" a candidate, not just a non-overlap check plus the shift
+// reaching through the window's end (see scoring.ts's earlyStartNeeded).
+// plan: changed because the real demo plan's duty assignments shift
+// slightly (same duties/coverage, some different, now-genuinely-valid
+// holders -- see tests/hard-work-caps.test.ts's re-pinned fixture for the
+// full before/after). score:Qatar: changed because this test's own direct
+// scoreCandidates("Company Team", {09:00-13:00}, ..., "Qatar Airways", ...)
+// call is exactly the kind of plain, non-duty-generation call this fix
+// tightens -- some EMPLOYEES whose shift didn't fully contain 09:00-13:00
+// are no longer silently "recommended". stage6:/topup:/foreign:/
+// score:Boarding: are untouched (foreign:/topup: don't route through real
+// FLIGHTS demand; stage6: and score:Boarding: use windows/shifts that
+// already satisfied full containment). (Previous values: plan:2026-08-31
+// 77e6cf81b62d2cba, plan:2026-09-21 2388e084b136fd8d, score:Qatar:0
+// 88eedf7072a15efc, score:Qatar:1 742c59c261d79b2f.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "77e6cf81b62d2cba",
+  "plan:2026-08-31": "957bc0a120b04427",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "2388e084b136fd8d",
+  "plan:2026-09-21": "d97121f6546899bb",
   "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",
   "score:Boarding:0": "a37c5bb9e85fdb75",
-  "score:Qatar:0": "88eedf7072a15efc",
+  "score:Qatar:0": "fa5ba07a44f0763d",
   "score:Boarding:1": "37bb3c051860cb4d",
-  "score:Qatar:1": "742c59c261d79b2f",
+  "score:Qatar:1": "5c3d1e533de192e2",
 };
 
 type FingerprintMode = "omitted" | "disabled-config";

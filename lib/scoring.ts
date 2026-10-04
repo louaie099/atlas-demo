@@ -20,6 +20,25 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
   return timeToMinutes(a.start) < timeToMinutes(b.end) && timeToMinutes(b.start) < timeToMinutes(a.end);
 }
 
+/**
+ * Is `window` entirely contained within [shiftStart, shiftEnd]? The single
+ * shared full-shift-containment predicate — task.start >= shift.start AND
+ * task.end <= shift.end — used both by scoreCandidates below (to decide
+ * whether a candidate can be automatically "recommended") and by
+ * lib/live-ops-service.ts (to detect when a live delay pushes an
+ * INCUMBENT'S already-assigned duty outside their shift). Before the
+ * 2026-10-04 planning-integrity audit, these were two separately
+ * maintained copies — live-ops-service.ts's own version was already
+ * correct, scoreCandidates' was not (see scoreCandidates' own doc comment
+ * on `earlyStartNeeded` below for the bug this fixes). Centralized here so
+ * the two can never drift apart again. Returns true (no violation) when
+ * either boundary is missing, rather than guessing.
+ */
+export function isWindowWithinShift(window: TimeWindow, shiftStart: string | null, shiftEnd: string | null): boolean {
+  if (!shiftStart || !shiftEnd) return true;
+  return timeToMinutes(window.start) >= timeToMinutes(shiftStart) && timeToMinutes(window.end) <= timeToMinutes(shiftEnd);
+}
+
 function hasRosterAssigned(e: Employee): e is RosteredEmployee {
   return e.shift_start !== null && e.shift_end !== null && e.rest_before_shift_hours !== null && e.weekly_hours !== null;
 }
@@ -108,7 +127,25 @@ export function scoreCandidates(
   // after the workload-hours key. Never an exclusion: every hard gate
   // above runs first and is untouched. Omitted (the default) = exact prior
   // behaviour, no fatigueReason key.
-  fatigue?: CandidateFatigueInput
+  fatigue?: CandidateFatigueInput,
+  // FULL SHIFT CONTAINMENT TARGET (2026-10-04 planning-integrity audit fix)
+  // — the REAL operational task window a candidate's shift must fully
+  // contain (task.start >= shift.start AND task.end <= shift.end) to be
+  // automatically "recommended". Defaults to `window` above, which is
+  // correct for every existing caller EXCEPT duty-generation.ts's
+  // company_config clustering path: there, `window` is deliberately the
+  // WIDE foreign-company protected window (~4h30 before departure, see
+  // computeForeignCompanyProtectedWindow) used only to decide
+  // busy/overlap conflicts correctly (the 2026-09-22 Gulf Air/Qatar
+  // Airways double-booking fix) -- it is NOT the real task the employee
+  // performs, and must never be what shift containment is judged against
+  // (that would wrongly demand a shift starting 4h30 before departure for
+  // a ~30-minute foreign-carrier task). `taskWindow` lets a caller keep
+  // `window` wide for conflict purposes while still checking containment
+  // against the real, narrow, DISPLAYED requirement window
+  // (getRequirementWindow's own return value) — see duty-generation.ts's
+  // call site for the one place this actually differs from `window`.
+  taskWindow: TimeWindow = window
 ): CandidateResult[] {
   const eligiblePool = employees.filter((e): e is RosteredEmployee => {
     if (!e.active) return false;
@@ -117,21 +154,15 @@ export function scoreCandidates(
     if (isFixedPlanningTeam(e.assignment)) return false;
     if (isTransitTeam(e.assignment) && role !== "Transit") return false;
     if ((occupiedWindows[e.id] ?? []).some((occupied) => windowsOverlap(occupied, window))) return false;
-    // Hard containment gate: a candidate whose shift doesn't overlap the
-    // requirement's window AT ALL is not "a shift extension away" from
-    // covering it -- they are simply not working anywhere near this flight,
-    // and must never enter scoring. Previously this function only compared
-    // shift END against window END (see extensionNeeded below), which
-    // never rejected a candidate whose shift didn't overlap the window in
-    // the first place -- e.g. a 13:45-22:45 shift was scored as eligible
-    // for a 06:15-07:15 flight, because 22:45 >= 07:15 satisfied the only
-    // check that existed. That is how duties ended up persisted outside
-    // the employee's actual working interval (assignment.requirement_window
-    // must be ⊆ roster_shift_window for anything auto-recommended). A
-    // shift extension (late end, or now, early start -- see
-    // earlyStartNeeded below) is still tolerated as a FLAGGED,
-    // human-reviewed case, since the two windows genuinely overlap; total
-    // non-overlap is excluded outright, never flagged.
+    // Hard ENTRY gate (not the full containment test): a candidate whose
+    // shift doesn't overlap the requirement's window AT ALL is not "a shift
+    // extension away" from covering it -- they are simply not working
+    // anywhere near this flight, and must never enter scoring at all, not
+    // even flagged. A candidate whose shift PARTIALLY overlaps (a late end
+    // or an early start -- see extensionNeeded/earlyStartNeeded below)
+    // still enters scoring, but is downgraded to FLAGGED, never
+    // "recommended" -- see those checks below for the full containment
+    // test that actually decides automatic eligibility.
     if (!windowsOverlap(window, { start: e.shift_start, end: e.shift_end })) return false;
     if (requiredAuthorization) return e.foreign_company_authorizations.includes(requiredAuthorization);
     return e.skills.includes(role);
@@ -139,17 +170,38 @@ export function scoreCandidates(
 
   const results: CandidateResult[] = eligiblePool.map((employee) => {
     const shiftEndMin = timeToMinutes(employee.shift_end);
-    const windowEndMin = timeToMinutes(window.end);
-    // A shift starting somewhat after the window's own start is normal and
-    // expected, not a bug: the RAM window rule (getRequirementWindow) opens
-    // a full T-1h/T-1h30 before departure as the IDEAL coverage start, but
-    // an employee clocking in partway through that lead time and covering
-    // the window through departure is exactly how real shift coverage
-    // works -- that's what the hard eligiblePool overlap gate above already
-    // protects (total non-overlap is excluded outright); only the shift
-    // ending before the window ends is a genuine unplanned extension worth
-    // flagging for human review.
-    const extensionNeeded = shiftEndMin < windowEndMin;
+    const taskWindowEndMin = timeToMinutes(taskWindow.end);
+    // FULL SHIFT CONTAINMENT (2026-10-04 planning-integrity audit fix):
+    // automatic generation requires task.start >= shift.start AND task.end
+    // <= shift.end -- anything short of that is a genuine unplanned
+    // exception (an early call-in or a shift extension), never an ordinary
+    // planning option the automatic weekly planner may rely on to make a
+    // plan "feasible". Before this fix, only the END boundary was checked
+    // here (extensionNeeded) -- a shift starting AFTER the window opened
+    // (e.g. a 05:45-14:45 shift against a 05:30-06:30 duty window) passed
+    // through as fully "recommended", no flag at all, because the window
+    // and shift do genuinely overlap (the hard eligiblePool gate above only
+    // rejects TOTAL non-overlap) and the shift still reached departure.
+    // That is exactly how ATLAS silently auto-assigned employees to duties
+    // starting before their shift began (the Sanaa Benali/AT2101 and
+    // Youssef El Amrani/AT2101 cases from the audit — 50 such violations
+    // found across a real month of generated duties, systemic, not
+    // isolated to one employee or flight). Both boundaries are now
+    // checked symmetrically via the shared isWindowWithinShift predicate
+    // (also used by lib/live-ops-service.ts to detect the same violation
+    // on an already-assigned INCUMBENT after a live delay) -- a partial
+    // overlap on EITHER boundary still enters scoring (so a human can see
+    // and explicitly override it via Find Agent's "Assign with override"),
+    // but is never auto-"recommended" by draft/duty generation, which only
+    // ever auto-assigns "recommended" candidates (see
+    // lib/planning/duty-generation.ts's own doc comment).
+    const extensionNeeded = shiftEndMin < taskWindowEndMin;
+    const earlyStartNeeded = timeToMinutes(employee.shift_start) > timeToMinutes(taskWindow.start);
+    // isWindowWithinShift(taskWindow, employee.shift_start, employee.shift_end) is
+    // exactly !extensionNeeded && !earlyStartNeeded here (both boundaries
+    // already known non-null -- hasRosterAssigned guarantees it) -- kept as
+    // two separate booleans only so the human-facing reasoning below can
+    // name which boundary actually failed.
     // maximum_average_weekly_working_hours (42h) is a confirmed AVERAGE,
     // not a Monday-Sunday ceiling (see lib/labor-rules.ts) — the exact
     // reference period it averages over is not yet confirmed, so nothing
@@ -170,15 +222,16 @@ export function scoreCandidates(
     // authorization isn't a flight-task skill.
     const eligibilityBasis = requiredAuthorization ? `${requiredAuthorization}-authorized` : `${role}-qualified`;
 
-    if (rested && !extensionNeeded && !nearCeiling) {
+    if (rested && !extensionNeeded && !earlyStartNeeded && !nearCeiling) {
       return {
         employee,
         status: "recommended",
-        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within the confirmed ${config.maximum_average_weekly_working_hours}h average. No extension required.`,
+        reasoning: `Currently on shift (${employee.shift_start}–${employee.shift_end}), ${eligibilityBasis}. ${employee.rest_before_shift_hours}h rest before shift (minimum required: ${config.minimum_rest_hours}h). Weekly hours: ${employee.weekly_hours}h — within the confirmed ${config.maximum_average_weekly_working_hours}h average. Shift fully covers the duty window, no early call-in or extension required.`,
       };
     }
 
     const reasons: string[] = [];
+    if (earlyStartNeeded) reasons.push("would require an early call-in, before the shift begins, with no rest window");
     if (extensionNeeded) reasons.push("would require an unplanned shift extension with no rest window");
     if (nearCeiling) reasons.push(`weekly hours (${employee.weekly_hours}h) approaching the confirmed ${config.maximum_average_weekly_working_hours}h average`);
     if (!rested) reasons.push(`insufficient rest (${employee.rest_before_shift_hours}h, below the ${config.minimum_rest_hours}h minimum required)`);
