@@ -26,6 +26,35 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 }
 
 /**
+ * 2026-10-05 (Profiling/Mesure workforce-model correction): within a
+ * cluster, Profiling/Mesure demand is resolved BEFORE any other role,
+ * regardless of raw most-constrained-first ranking.
+ *
+ * Why this is needed: now that Profiling/Mesure-qualified employees also
+ * carry genuine ordinary RAM skills (Boarding/Gate/Check-in — see
+ * lib/employee-generator.ts and lib/demo-small/employees.ts), they are
+ * legitimately eligible for both their specialized requirement AND a
+ * same-flight Gate/Boarding requirement that shares their exact window
+ * (e.g. a late-night Dreamliner flight staffed entirely by the Mesure
+ * team's own shift, where General T1 Pool isn't clocked in at all). Raw
+ * "fewest recommended candidates first" can then pick the GENERIC
+ * Boarding/Gate requirement first whenever it happens to be scored as
+ * more constrained at that instant, consuming the very agents the
+ * specialized requirement needs and leaving it honestly short — exactly
+ * the failure mode the brief calls out: "[Mesure/Profiling] agents cannot
+ * be consumed by another task that would make the specialized requirement
+ * uncovered." Resolving Profiling/Mesure first (most-constrained-first
+ * still breaks ties WITHIN that tier, and within the generic tier)
+ * reserves the specialized commitment first; only each specialist's
+ * remaining, already-protected free time is then available to generic
+ * demand — never the special-casing of a specific employee, team, or
+ * flight, just a role-priority ordering of the existing clustering pass.
+ */
+function rolePriority(role: string): number {
+  return role === "Profiling" || role === "Mesure" ? 0 : 1;
+}
+
+/**
  * Builds each employee's EFFECTIVE shift for a specific day.
  *
  * For a GENERATION-DRIVEN employee (isGenerationDrivenPopulation --
@@ -491,10 +520,19 @@ export function generateDutiesForDay(
         );
         const recommended = results.filter((r) => r.status === "recommended");
 
+        // Role priority first (see rolePriority's doc comment — protects
+        // Profiling/Mesure from being out-competed by generic demand for
+        // the same shared pool), THEN most-constrained-first, THEN the
+        // existing deterministic id tie-break — unchanged for any pair of
+        // requirements that are already in the same priority tier.
+        const priority = rolePriority(requirement.role);
+        const bestPriority = bestIdx === -1 ? Infinity : rolePriority(dayRequirements[bestIdx].requirement.role);
         if (
           bestIdx === -1 ||
-          recommended.length < bestRecommended.length ||
-          (recommended.length === bestRecommended.length && requirement.id < dayRequirements[bestIdx].requirement.id)
+          priority < bestPriority ||
+          (priority === bestPriority &&
+            (recommended.length < bestRecommended.length ||
+              (recommended.length === bestRecommended.length && requirement.id < dayRequirements[bestIdx].requirement.id)))
         ) {
           bestIdx = idx;
           bestRecommended = recommended;

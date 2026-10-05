@@ -26,6 +26,40 @@ import { smallDemoCompanyOperatingDays } from "./flights";
  * candidate only "flagged" (would need an early call-in/extension), so
  * the demo has real, honest bottlenecks to click through — never
  * engineered to guarantee 100% coverage.
+ *
+ * 2026-10-05 CORRECTION (Moses) — Profiling/Mesure are NOT exclusive
+ * teams: `assignment: "Profiling"` / `"Mesure"` is a qualification +
+ * priority-commitment marker, never a claim that the employee spends
+ * their whole shift on that one task. The real planning engine already
+ * supports this correctly with no special-casing:
+ *   - lib/planning/workforce-pools.ts's isFlexibleGeneralPool excludes
+ *     Profiling/Mesure-assigned employees from Stage 6's generic
+ *     Boarding/Check-in/Gate shift-code generation (so their roster
+ *     placement follows their own team's demand, not generic pressure)
+ *     — but that is a Stage 6 pool-membership rule, not a duty-matching
+ *     rule.
+ *   - lib/planning/duty-generation.ts's dayEffectivePool (Stage 9, the
+ *     actual flight-by-flight duty assignment) applies NO assignment
+ *     filter at all — every active, rostered employee is in scope,
+ *     Profiling/Mesure included.
+ *   - lib/scoring.ts's scoreCandidates hard-exclusion gate never checks
+ *     assignment === "Profiling"/"Mesure" — eligibility for a given
+ *     requirement is purely skills-based (or authorization-based for
+ *     company_config), and occupiedWindows protects whichever window an
+ *     employee is already committed to on that day.
+ * In other words: the engine already reserves a Profiling/Mesure
+ * employee for their specialized window via the normal duty/window
+ * machinery, and otherwise lets them be scored like any other RAM ACE
+ * for Gate/Boarding/Check-in. What made this small demo dataset LOOK
+ * like an exclusive-team model was narrow data, not engine behavior:
+ * most Profiling/Mesure employees below previously held only
+ * ["Profiling"] or ["Mesure"] as their entire skills list, leaving them
+ * no real path to ordinary duties even though nothing stopped the
+ * engine from using one. Corrected below by giving most Profiling/
+ * Mesure employees a genuine second RAM skill (Boarding/Gate/Check-in),
+ * while keeping a few single-skilled as honest "pure specialist" cases
+ * (Fadwa Benjelloun in Profiling; Widad Senhaji and Houda Kabbaj in
+ * Mesure) so the dataset still shows both kinds of real employee.
  */
 
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -106,41 +140,58 @@ const GENERAL_T1_POOL = [
 ];
 
 /**
- * Profiling (7 — 2026-10-04, up from 2 per Moses: "add about 5 agents for
- * each RAM teams") — covers AT120/AT560 (Europe/Schengen, 1 each) and
- * AT225 (UK/USA, 1) on their respective days. Still intentionally tight
- * relative to Mon/Wed/Fri's 3 simultaneous Profiling slots once rest/OFF
- * days are staggered in, just with real slack now instead of zero.
+ * Profiling (7) — covers AT120/AT560 (Europe/Schengen, 1 each) and AT225
+ * (UK/USA, 1) on their respective days.
+ *
+ * 2026-10-05 CORRECTION (Moses): `assignment: "Profiling"` is this
+ * employee's SPECIALIZED QUALIFICATION + priority commitment, never a
+ * full-shift-exclusive team. Outside their own Profiling duty's actual
+ * time window, a Profiling-assigned employee is ordinary RAM capacity --
+ * see the module-level architecture note at the top of this file for the
+ * full explanation of why the real engine already supports this and what
+ * was data-only about the earlier framing. Most of this team now also
+ * carries a genuine second RAM skill (Boarding/Gate/Check-in) so that
+ * capacity is actually reachable by duty-generation.ts and Find Agent/
+ * Live Ops, not just theoretically possible; a couple (Fadwa) stay
+ * single-skilled as realistic pure specialists.
  */
 const PROFILING = [
   { id: "small-fadwa-benjelloun", name: "Fadwa Benjelloun", skills: ["Profiling"], shift_code: "NR02", weekly_hours: 24 },
   { id: "small-khalid-amrani", name: "Khalid Amrani", skills: ["Profiling", "Boarding"], shift_code: "AP02", weekly_hours: 24 },
-  { id: "small-hind-zerouali", name: "Hind Zerouali", skills: ["Profiling"], shift_code: "NR01", weekly_hours: 24 },
+  { id: "small-hind-zerouali", name: "Hind Zerouali", skills: ["Profiling", "Check-in"], shift_code: "NR01", weekly_hours: 24 },
   { id: "small-mehdi-sqalli", name: "Mehdi Sqalli", skills: ["Profiling", "Boarding"], shift_code: "MT03", weekly_hours: 24 },
-  { id: "small-loubna-haitami", name: "Loubna Haitami", skills: ["Profiling"], shift_code: "AP01", weekly_hours: 24 },
+  { id: "small-loubna-haitami", name: "Loubna Haitami", skills: ["Profiling", "Gate"], shift_code: "AP01", weekly_hours: 24 },
   { id: "small-adil-benomar", name: "Adil Benomar", skills: ["Profiling", "Gate"], shift_code: "NR02", weekly_hours: 24 },
-  { id: "small-siham-raji", name: "Siham Raji", skills: ["Profiling"], shift_code: "MT01", weekly_hours: 24 },
+  { id: "small-siham-raji", name: "Siham Raji", skills: ["Profiling", "Check-in"], shift_code: "MT01", weekly_hours: 24 },
 ];
 
 /**
- * Mesure (9 — 2026-10-04, up from 4 per Moses: "add about 5 agents for
- * each RAM teams") — AT225 (Mon/Wed/Fri only) needs exactly 4 Mesure
- * agents at once (the confirmed flat Mesure headcount,
- * lib/ram-staffing-matrix.ts). With 9 dedicated Mesure employees staggered
- * across 2 OFF days/week, coverage is now comfortable rather than
- * zero-slack — Mesure is no longer this dataset's guaranteed worst
- * bottleneck on every occurrence, though a bad OFF-day/rest overlap can
- * still produce a real shortfall.
+ * Mesure (9) — AT225 (Mon/Wed/Fri only) needs exactly 4 Mesure agents at
+ * once (the confirmed flat Mesure headcount, lib/ram-staffing-matrix.ts).
+ *
+ * 2026-10-05 CORRECTION (Moses): same correction as Profiling above --
+ * `assignment: "Mesure"` is a qualification + priority reservation for
+ * AT225's Mesure window, not an exclusive full-shift team. Before this
+ * correction every Mesure employee here was single-skilled (["Mesure"]
+ * only), which meant NONE of them could ever pick up ordinary Gate/
+ * Boarding/Check-in work during their real idle time -- an accurate
+ * description of the data, but not of the intended RAM workforce model,
+ * and not a limitation of the actual scoring/duty-generation engine (see
+ * this file's top-of-module note). Most of this team now also carries a
+ * genuine second RAM skill so duty-generation.ts and Find Agent/Live Ops
+ * can actually offer them for Boarding/Gate/Check-in outside their
+ * protected Mesure window; two (Widad, Houda) stay single-skilled as
+ * realistic pure specialists.
  */
 const MESURE = [
   { id: "small-widad-senhaji", name: "Widad Senhaji", skills: ["Mesure"], shift_code: "MT02", weekly_hours: 28 },
-  { id: "small-tarik-bouhafa", name: "Tarik Bouhafa", skills: ["Mesure", "Profiling"], shift_code: "MT02", weekly_hours: 28 },
+  { id: "small-tarik-bouhafa", name: "Tarik Bouhafa", skills: ["Mesure", "Boarding"], shift_code: "MT02", weekly_hours: 28 },
   { id: "small-houda-kabbaj", name: "Houda Kabbaj", skills: ["Mesure"], shift_code: "NR01", weekly_hours: 24 },
-  { id: "small-samir-tazi", name: "Samir Tazi", skills: ["Mesure"], shift_code: "NR01", weekly_hours: 24 },
-  { id: "small-nadia-berrada", name: "Nadia Berrada", skills: ["Mesure"], shift_code: "MT02", weekly_hours: 24 },
-  { id: "small-youssef-idrissi", name: "Youssef Idrissi", skills: ["Mesure"], shift_code: "NR02", weekly_hours: 24 },
-  { id: "small-ikram-fehri", name: "Ikram Fehri", skills: ["Mesure"], shift_code: "MT01", weekly_hours: 24 },
-  { id: "small-rachid-ammor", name: "Rachid Ammor", skills: ["Mesure"], shift_code: "AP01", weekly_hours: 24 },
+  { id: "small-samir-tazi", name: "Samir Tazi", skills: ["Mesure", "Gate"], shift_code: "NR01", weekly_hours: 24 },
+  { id: "small-nadia-berrada", name: "Nadia Berrada", skills: ["Mesure", "Check-in"], shift_code: "MT02", weekly_hours: 24 },
+  { id: "small-youssef-idrissi", name: "Youssef Idrissi", skills: ["Mesure", "Boarding"], shift_code: "NR02", weekly_hours: 24 },
+  { id: "small-ikram-fehri", name: "Ikram Fehri", skills: ["Mesure", "Gate"], shift_code: "MT01", weekly_hours: 24 },
+  { id: "small-rachid-ammor", name: "Rachid Ammor", skills: ["Mesure", "Check-in"], shift_code: "AP01", weekly_hours: 24 },
   { id: "small-dounia-sabban", name: "Dounia Sabban", skills: ["Mesure", "Profiling"], shift_code: "NR01", weekly_hours: 24 },
 ];
 

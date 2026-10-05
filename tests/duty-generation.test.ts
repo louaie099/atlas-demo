@@ -461,3 +461,76 @@ describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manua
     expect(pool[0].shift_end).toBe("22:45");
   });
 });
+
+describe("generateDutiesForDay — Profiling/Mesure workforce-model correction (2026-10-05): qualification + protected window, never a full-shift-exclusive team", () => {
+  // Reproduces the real regression found while fixing this: a Mesure (or
+  // Profiling) employee who ALSO holds a genuine ordinary RAM skill
+  // (Boarding/Gate/Check-in) is correctly a candidate for BOTH their
+  // specialized requirement and a same-flight generic requirement sharing
+  // its exact window -- e.g. a late flight nobody but the Mesure team is
+  // clocked in for. Deliberately zero slack: 2 Mesure-only-qualified-pool
+  // members, needing 2 for Mesure AND 2 for Boarding on the exact same
+  // window, with no other candidate anywhere. Without reserving Mesure
+  // first, "most constrained first" can pick Boarding (equally or more
+  // constrained at that instant) and consume the very agents Mesure
+  // needs, leaving Mesure honestly short even though total headcount was
+  // always sufficient to cover both roles together.
+  it("a Mesure requirement is never left short by a same-window generic Boarding requirement drawing from the exact same (now cross-skilled) pool", () => {
+    const flight = makeFlight({ id: "f-mesure", scheduled_departure: "23:00" });
+    const mesureReq = makeRequirement({ id: "r-mesure", flight_id: "f-mesure", role: "Mesure", total_requirement: 2 });
+    const boardingReq = makeRequirement({ id: "r-boarding", flight_id: "f-mesure", role: "Boarding", total_requirement: 2 });
+
+    // 23:00 departure on a standard (non-Dreamliner) aircraft needs
+    // coverage 22:00-23:00 (T-60) -- AP02 (13:45-23:15) fully contains it
+    // and, same-day (not overnight), avoids the separate, already-
+    // documented midnight-crossing-shift limitation noted elsewhere in
+    // this file (line ~311). For a generation-driven employee
+    // (assignment: "Mesure" -- see isGenerationDrivenPopulation),
+    // duty-generation resolves the real catalog times for the
+    // GENERATED shift_code below, not these employee-level defaults.
+    const e1 = makeEmployee({ id: "mesure-1", assignment: "Mesure", skills: ["Mesure", "Boarding"], shift_code: "AP02" });
+    const e2 = makeEmployee({ id: "mesure-2", assignment: "Mesure", skills: ["Mesure", "Boarding"], shift_code: "AP02" });
+
+    // assignment: "Mesure" makes these employees generation-driven (see
+    // isGenerationDrivenPopulation) -- their day's roster comes entirely
+    // from generatedShifts, not the static weekly_shifts baseline.
+    const generatedShifts = [
+      { employeeId: "mesure-1", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: ["Mesure"] },
+      { employeeId: "mesure-2", dayOfWeek: "Wednesday", shiftCode: "AP02", coversRoles: ["Mesure"] },
+    ];
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [mesureReq, boardingReq], [flight], [e1, e2], generatedShifts, [], CONFIG, TEST_DATE);
+
+    const byRequirement = (id: string) => duties.filter((d) => d.requirementId === id);
+    // Mesure's 2-person requirement is fully protected...
+    expect(byRequirement("r-mesure")).toHaveLength(2);
+    // ...which honestly leaves nobody free for Boarding -- reported as a
+    // real, visible gap, never silently dropped or double-booked.
+    expect(byRequirement("r-boarding")).toHaveLength(0);
+    expect(unfilled).toContainEqual({ dayOfWeek: "Wednesday", requirementId: "r-boarding", role: "Boarding", stillNeeded: 2 });
+  });
+
+  it("the same employee's genuine cross-skill is real, reachable capacity once their specialized commitment is protected — a non-overlapping Boarding window is still filled by a Profiling-assigned employee", () => {
+    // Profiling requirement in the morning; the SAME Profiling-assigned
+    // employee is also the only Boarding-qualified candidate for an
+    // unrelated, non-overlapping afternoon flight. The brief's own
+    // example: protect the specialized window, then the remaining free
+    // time is real ordinary RAM capacity.
+    // Profiling window: 09:00-10:00 (T-60 from a 10:00 departure).
+    // Afternoon Boarding window: 16:30-17:30 (T-60 from 17:30) --
+    // genuinely non-overlapping with the morning window. NR02 (08:00-
+    // 18:15, the real catalog shift) fully contains both.
+    const profilingFlight = makeFlight({ id: "f-profiling", scheduled_departure: "10:00" });
+    const profilingReq = makeRequirement({ id: "r-profiling", flight_id: "f-profiling", role: "Profiling", total_requirement: 1 });
+    const afternoonFlight = makeFlight({ id: "f-afternoon", scheduled_departure: "17:30" });
+    const afternoonReq = makeRequirement({ id: "r-afternoon", flight_id: "f-afternoon", role: "Boarding", total_requirement: 1 });
+
+    const employee = makeEmployee({ id: "profiling-1", assignment: "Profiling", skills: ["Profiling", "Boarding"], shift_code: "NR02" });
+
+    const generatedShifts = [{ employeeId: "profiling-1", dayOfWeek: "Wednesday", shiftCode: "NR02", coversRoles: ["Profiling"] }];
+    const { duties, unfilled } = generateDutiesForDay("Wednesday", [profilingReq, afternoonReq], [profilingFlight, afternoonFlight], [employee], generatedShifts, [], CONFIG, TEST_DATE);
+
+    expect(duties.filter((d) => d.requirementId === "r-profiling")).toHaveLength(1);
+    expect(duties.filter((d) => d.requirementId === "r-afternoon")).toHaveLength(1);
+    expect(unfilled).toEqual([]);
+  });
+});

@@ -148,14 +148,35 @@ const CATEGORIES: GenSpec[] = [
   // Transit and Leaders MOVED to FIXED_CYCLE_GROUPS below — both now
   // follow the confirmed continuous JR → NT → OFF → OFF cycle
   // (lib/fixed-cycle-rotation.ts), not this flat 2-OFF-days path.
-  // Profiling — document verification. Real Profiling skill, some also Boarding.
-  { count: 7, skills: ["Profiling"], assignment: "Profiling", shift_code: "NR02", weekly_hours: 22, keepWednesdayWorking: true },
+  // Profiling — document verification. Real Profiling skill.
+  //
+  // 2026-10-05 CORRECTION (Moses): assignment: "Profiling"/"Mesure" is a
+  // qualification + priority-commitment marker, not a full-shift-
+  // exclusive team — the real engine already supports mixed duty (see
+  // lib/planning/workforce-pools.ts's isFlexibleGeneralPool doc comment,
+  // lib/scoring.ts's scoreCandidates, and lib/planning/duty-generation.ts's
+  // dayEffectivePool, none of which hard-exclude a Profiling/Mesure
+  // employee from ordinary Gate/Boarding/Check-in duty outside their
+  // protected window). Before this correction 7 of 12 Profiling and 8 of
+  // 12 Mesure employees were single-skilled with their ONLY other cross-
+  // qualification (Mesure<->Profiling) still being another specialized
+  // duty, not ordinary RAM work — leaving most of both teams with no real
+  // path to Gate/Boarding/Check-in even though nothing in the engine
+  // stopped it. Most of both teams now also hold a genuine ordinary RAM
+  // skill; a small minority stay single-skilled as honest pure
+  // specialists, same as the small demo dataset's parallel fix
+  // (lib/demo-small/employees.ts).
+  { count: 2, skills: ["Profiling"], assignment: "Profiling", shift_code: "NR02", weekly_hours: 22, keepWednesdayWorking: true },
   { count: 5, skills: ["Profiling", "Boarding"], assignment: "Profiling", shift_code: "AP02", weekly_hours: 24, keepWednesdayWorking: true },
-  // Mesure — carry-on inspection at the gate. Real Mesure skill; a subset
-  // also Profiling-qualified, per the explicit instruction. Rest hours
-  // intentionally tight for one sub-group, demonstrating a rest
-  // constraint within a specialized assignment, not only General T1.
-  { count: 8, skills: ["Mesure"], assignment: "Mesure", shift_code: "MT02", weekly_hours: 30 },
+  { count: 5, skills: ["Profiling", "Gate"], assignment: "Profiling", shift_code: "NR02", weekly_hours: 22, keepWednesdayWorking: true },
+  // Mesure — carry-on inspection at the gate. Real Mesure skill; most of
+  // the team also carries a genuine ordinary RAM skill or is Profiling-
+  // qualified, per the correction above. Rest hours intentionally tight
+  // for one sub-group, demonstrating a rest constraint within a
+  // specialized assignment, not only General T1.
+  { count: 2, skills: ["Mesure"], assignment: "Mesure", shift_code: "MT02", weekly_hours: 30 },
+  { count: 3, skills: ["Mesure", "Boarding"], assignment: "Mesure", shift_code: "MT02", weekly_hours: 30 },
+  { count: 3, skills: ["Mesure", "Gate"], assignment: "Mesure", shift_code: "MT02", weekly_hours: 30 },
   { count: 4, skills: ["Mesure", "Profiling"], assignment: "Mesure", shift_code: "NR01", weekly_hours: 24, keepWednesdayWorking: true },
   // Caisse/BCB — the payment desk. Fixed planning, excluded from general
   // allocation regardless of off-status. Real rotation TBD — placeholder

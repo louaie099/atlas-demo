@@ -663,18 +663,53 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // already satisfied full containment). (Previous values: plan:2026-08-31
 // 77e6cf81b62d2cba, plan:2026-09-21 2388e084b136fd8d, score:Qatar:0
 // 88eedf7072a15efc, score:Qatar:1 742c59c261d79b2f.)
+// 2026-10-05 RE-PIN of plan:/score:Boarding: hashes (Moses's Profiling/
+// Mesure workforce-model correction): most single-skilled Profiling/Mesure
+// employees in lib/employee-generator.ts now also hold a genuine ordinary
+// RAM skill (Boarding/Gate), per the explicit instruction that Profiling/
+// Mesure is a qualification + priority commitment, not a full-shift-
+// exclusive team — see that file's CATEGORIES comment. plan: changed
+// twice as part of this same correction:
+//  (1) duty-generation now has more real Boarding/Gate/Check-in candidates
+//      outside each flight's Profiling/Mesure window, so some duty holders
+//      differ (data-only — no engine code changed yet at this point).
+//  (2) duty-generation.ts's cluster resolution now gives Profiling/Mesure
+//      role priority over every other role sharing the same cluster (see
+//      rolePriority's doc comment) — without it, a same-flight generic
+//      Gate/Boarding requirement staffed from the exact same narrow pool
+//      (e.g. a late-night flight nobody but the Mesure team is clocked in
+//      for) could win the old pure "most-constrained-first" tie-break and
+//      consume the very agents the specialized requirement needed,
+//      directly reproducing the failure mode the correction's brief
+//      called out. This is a real, necessary engine fix, not incidental
+//      churn — verified it restores full coverage (0 unfilled_duty, same
+//      219 total duties as the pre-correction fixture).
+// score:Boarding: changed because this test's direct scoreCandidates
+// ("Boarding", {06:00-07:00}, EMPLOYEES, ...) call now sees additional
+// EMPLOYEES holding "Boarding" (the new Mesure+Boarding sub-group) —
+// unaffected by the rolePriority fix, which only touches duty-generation's
+// cluster resolution, not scoreCandidates itself. stage6:/topup:/foreign:/
+// score:Qatar: are untouched: stage6 filters through isFlexibleGeneralPool,
+// which still excludes every Profiling/Mesure-assigned employee regardless
+// of their skills; foreign/score:Qatar are authorization-based, not
+// skill-based; topup doesn't route through Profiling/Mesure employees at
+// all. (Values before this correction: plan:2026-08-31
+// 957bc0a120b04427, plan:2026-09-21 d97121f6546899bb, score:Boarding:0
+// a37c5bb9e85fdb75, score:Boarding:1 37bb3c051860cb4d. Values after step
+// (1) alone, before the rolePriority fix: plan:2026-08-31
+// 179f850edfee13cd, plan:2026-09-21 fdbb4aedd3957f03.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "957bc0a120b04427",
+  "plan:2026-08-31": "ea29fc7f7660c7ed",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "d97121f6546899bb",
+  "plan:2026-09-21": "4db88ab07fcf0523",
   "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",
-  "score:Boarding:0": "a37c5bb9e85fdb75",
+  "score:Boarding:0": "691d7ad390321e8f",
   "score:Qatar:0": "fa5ba07a44f0763d",
-  "score:Boarding:1": "37bb3c051860cb4d",
+  "score:Boarding:1": "01f539800931d0a6",
   "score:Qatar:1": "5c3d1e533de192e2",
 };
 
