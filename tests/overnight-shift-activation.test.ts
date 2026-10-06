@@ -13,8 +13,15 @@ import {
   buildDayEffectivePoolFromRosterEntries,
 } from "../lib/planning/duty-generation";
 import { generateFlexiblePoolShifts } from "../lib/planning/shift-generation";
+import { generateDutiesForDay } from "../lib/planning/duty-generation";
 import { aggregateDailyDemand } from "../lib/planning/demand-aggregation";
+import { shiftOverlapsWindow } from "../lib/shift-interval";
+import { isWindowWithinShift, scoreCandidates } from "../lib/scoring";
+import { getRequirementWindow } from "../lib/planning/requirement-window";
+import { getShiftTimesAs } from "../lib/shift-templates";
+import { CONFIG } from "../lib/seed-data";
 import { Employee, Flight, StaffingRequirement, WeeklyPlanRosterEntry } from "../lib/types";
+import type { PriorDayShiftMap } from "../lib/planning/shift-generation";
 
 /**
  * ===========================================================================
@@ -374,5 +381,182 @@ describe("demand-driven overnight selection — never a blanket default", () => 
     // Tuesday's 2-person early-morning requirement is genuinely unstaffable
     // from this pool and must remain so; this is a capacity fact, not a bug.
     expect(result.length).toBeLessThanOrEqual(1);
+  });
+});
+
+/**
+ * ===========================================================================
+ * 2026-10-06 (SAME DAY, post-delivery audit) — three further, independent
+ * bugs found while chasing a real-world report that flights between ~21:00
+ * and ~03:00 were STILL not being covered despite Stage 6 now correctly
+ * selecting overnight shifts for them. Stage 6 (shift SELECTION) was fixed
+ * correctly above; these three bugs were all in the SEPARATE downstream
+ * path that decides whether a specific employee can be matched to a
+ * specific real duty (Stage 9 / scoreCandidates), and together they made
+ * an overnight employee's shift selection a no-op in practice:
+ *
+ *  1. lib/scoring.ts's shift/window overlap and containment checks
+ *     (isWindowWithinShift, and the eligiblePool entry gate) did plain
+ *     minute-of-day math with no overnight-reach awareness, so an
+ *     overnight employee's OWN starting evening (e.g. NT01's 17:45-23:59,
+ *     not just the following day's already-fixed carryover) looked
+ *     entirely unavailable: the shift's tiny sortie clock-time (06:30)
+ *     made every same-evening duty look like it started after the shift
+ *     already ended.
+ *  2. A carryover candidate's rest_before_shift_hours fell back to their
+ *     STALE static baseline (actualRestHoursByDay has no entry for a day
+ *     with no shift of the employee's own) instead of being recognized as
+ *     already-cleared (enforceRestInvariantAcrossWeek already verifies
+ *     rest before a shift is ever accepted) -- wrongly FLAGGING (never
+ *     auto-assignable) every carryover candidate as under-rested.
+ *  3. lib/planning/requirement-window.ts's subtractMinutes wrapped a
+ *     pre-midnight lead time (e.g. a 00:30 departure minus a 60-minute
+ *     lead) back around to a malformed, self-overlapping window
+ *     ({start: "23:30", end: "00:30"}) instead of clamping at 00:00,
+ *     breaking every downstream raw-minute comparison for any flight
+ *     departing before its own lead time.
+ * ===========================================================================
+ */
+describe("Stage 9 duty-matching bugs the overnight activation exposed (2026-10-06 audit)", () => {
+  it("shiftOverlapsWindow: a same-evening duty on an overnight shift's OWN starting day genuinely overlaps it (bug #1)", () => {
+    // N8 17:45(wait, N8 is 21:30)-06:30; use NT01 17:45-06:30 for a duty
+    // comfortably inside the evening, well before midnight.
+    expect(shiftOverlapsWindow({ start: "22:00", end: "22:30" }, "17:45", "06:30")).toBe(true);
+    // A duty genuinely outside the shift (before it starts) must still
+    // correctly NOT overlap.
+    expect(shiftOverlapsWindow({ start: "10:00", end: "10:30" }, "17:45", "06:30")).toBe(false);
+    // An ordinary (non-overnight) shift is completely unaffected.
+    expect(shiftOverlapsWindow({ start: "14:00", end: "14:30" }, "13:45", "22:45")).toBe(true);
+    expect(shiftOverlapsWindow({ start: "23:00", end: "23:30" }, "13:45", "22:45")).toBe(false);
+  });
+
+  it("isWindowWithinShift: full containment of a same-evening duty on an overnight shift's own starting day (bug #1)", () => {
+    expect(isWindowWithinShift({ start: "21:15", end: "22:00" }, "17:45", "06:30")).toBe(true); // NT01
+    expect(isWindowWithinShift({ start: "21:15", end: "22:00" }, "17:45", "01:15")).toBe(true); // AP03
+    // A duty genuinely extending past the shift's real (wrap-aware) end
+    // must still correctly fail containment.
+    expect(isWindowWithinShift({ start: "21:15", end: "22:00" }, "17:45", "21:30")).toBe(false);
+    // null boundaries (no shift at all) are untouched -- returns true, same as before.
+    expect(isWindowWithinShift({ start: "21:15", end: "22:00" }, null, null)).toBe(true);
+  });
+
+  it("scoreCandidates: an overnight employee is genuinely RECOMMENDED (not excluded, not merely flagged) for a duty on their own starting evening (bug #1, end-to-end)", () => {
+    const employee: any = {
+      id: "e1", name: "E1", skills: ["Gate"], assignment: "General T1 Pool",
+      shift_start: "17:45", shift_end: "06:30", rest_before_shift_hours: 24, weekly_hours: 20,
+      is_duty_officer: false, off_days: [], foreign_company_authorizations: [], active: true, weekly_shifts: [],
+    };
+    const window = { start: "21:15", end: "22:00" };
+    const results = scoreCandidates("Gate", window, [employee], CONFIG, {});
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe("recommended");
+  });
+
+  it("a carryover candidate's rest is treated as already-cleared, never their stale static baseline (bug #2)", () => {
+    // Real production shapes: the carryover candidate's real static
+    // rest_before_shift_hours can be BELOW config.minimum_rest_hours (it's
+    // irrelevant to their carryover eligibility) and auto-generation must
+    // still recommend them for a duty inside the carried-over window.
+    const employees: Employee[] = [
+      {
+        id: "e1", name: "E1", skills: ["Gate"], assignment: "General T1 Pool",
+        shift_code: null, shift_start: null, shift_end: null,
+        rest_before_shift_hours: 1, // deliberately far below any real minimum
+        weekly_hours: 20, is_duty_officer: false, off_days: [], foreign_company_authorizations: [],
+        active: true, weekly_shifts: [],
+      },
+    ];
+    const flight: Flight = {
+      id: "f-tue", flight_number: "ATN", airline: "Royal Air Maroc", route: "CMN → X",
+      origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null,
+      registration: null, callsign: null, terminal: "T1", scheduled_departure: "02:00",
+      scheduled_arrival: null, gate: null, boarding_window_start: null, boarding_window_end: null,
+      status: "scheduled", booking_pressure: "normal", day_of_week: "Tuesday", flight_date: "2026-10-06", week_start: "2026-10-05",
+      operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+      booked_passengers: null, seat_capacity: null,
+    };
+    const req: StaffingRequirement = {
+      id: "r-gate", flight_id: "f-tue", role: "Gate", baseline_requirement: 1, additional_requirement: 0,
+      total_requirement: 1, source: "fixed_rule", reasoning: "", needs_configuration: false,
+    };
+    const previousDayShift: PriorDayShiftMap = new Map([["e1", getShiftTimesAs("NT01", "2026-10-05")]]); // Monday NT01
+    const { duties, unfilled } = generateDutiesForDay(
+      "Tuesday", [req], [flight], employees, [], [], CONFIG, "2026-10-06",
+      undefined, new Map(), new Map(), undefined, previousDayShift
+    );
+    expect(unfilled).toHaveLength(0);
+    expect(duties).toHaveLength(1);
+    expect(duties[0].employeeId).toBe("e1");
+  });
+
+  it("subtractMinutes (requirement window) clamps at 00:00 instead of wrapping into a malformed window for an early-morning departure (bug #3)", () => {
+    const flight: Flight = {
+      id: "f", flight_number: "AT000", airline: "Royal Air Maroc", route: "CMN → X",
+      origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null,
+      registration: null, callsign: null, terminal: "T1", scheduled_departure: "00:30",
+      scheduled_arrival: null, gate: null, boarding_window_start: null, boarding_window_end: null,
+      status: "scheduled", booking_pressure: "normal", day_of_week: "Tuesday", flight_date: "2026-10-06", week_start: "2026-10-05",
+      operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+      booked_passengers: null, seat_capacity: null,
+    };
+    const req: StaffingRequirement = {
+      id: "r", flight_id: "f", role: "Gate", baseline_requirement: 1, additional_requirement: 0,
+      total_requirement: 1, source: "fixed_rule", reasoning: "", needs_configuration: false,
+    };
+    const window = getRequirementWindow(req, flight);
+    // Standard lead is 60 minutes; 00:30 - 60min would wrap to "23:30"
+    // under the old (buggy) implementation -- must clamp at 00:00 instead.
+    expect(window).toEqual({ start: "00:00", end: "00:30" });
+  });
+
+  it("end-to-end regression for the originally-reported symptom: a Monday-night overnight employee now covers BOTH their own starting evening AND the early-morning carryover into Tuesday, including a departure before the lead time", () => {
+    const employees: Employee[] = [
+      {
+        id: "e1", name: "E1", skills: ["Gate", "Boarding"], assignment: "General T1 Pool",
+        // Monday's OWN rest is a separate, already-tested concern
+        // (enforceRestInvariantAcrossWeek) -- a generous value here keeps
+        // this test isolated to the three Stage-9 duty-matching bugs.
+        shift_code: null, shift_start: null, shift_end: null, rest_before_shift_hours: 24,
+        weekly_hours: 20, is_duty_officer: false, off_days: [], foreign_company_authorizations: [],
+        active: true, weekly_shifts: [],
+      },
+    ];
+    function makeFlight(overrides: Partial<Flight>): Flight {
+      return {
+        id: "f", flight_number: "ATN", airline: "Royal Air Maroc", route: "CMN → X",
+        origin: "CMN", destination: "X", aircraft: "Boeing 737-800", equipment_code: null,
+        registration: null, callsign: null, terminal: "T1", scheduled_departure: "22:00",
+        scheduled_arrival: null, gate: null, boarding_window_start: null, boarding_window_end: null,
+        status: "scheduled", booking_pressure: "normal", day_of_week: "Monday", flight_date: "2026-10-05", week_start: "2026-10-05",
+        operator_type: "atlas_managed", destination_category: "Europe/Schengen",
+        booked_passengers: null, seat_capacity: null,
+        ...overrides,
+      };
+    }
+    const mondayFlight = makeFlight({ id: "f-mon", scheduled_departure: "22:00" });
+    const mondayReq: StaffingRequirement = {
+      id: "r-mon", flight_id: "f-mon", role: "Gate", baseline_requirement: 1, additional_requirement: 0,
+      total_requirement: 1, source: "fixed_rule", reasoning: "", needs_configuration: false,
+    };
+    const tuesdayFlight = makeFlight({ id: "f-tue", scheduled_departure: "00:30", day_of_week: "Tuesday", flight_date: "2026-10-06" });
+    const tuesdayReq: StaffingRequirement = {
+      id: "r-tue", flight_id: "f-tue", role: "Boarding", baseline_requirement: 1, additional_requirement: 0,
+      total_requirement: 1, source: "fixed_rule", reasoning: "", needs_configuration: false,
+    };
+
+    const mondayGenerated = [{ employeeId: "e1", dayOfWeek: "Monday", shiftCode: "NT01", coversRoles: ["Gate"] }];
+    const { duties: mondayDuties, unfilled: mondayUnfilled } = generateDutiesForDay(
+      "Monday", [mondayReq], [mondayFlight], employees, mondayGenerated, [], CONFIG, "2026-10-05"
+    );
+    expect(mondayUnfilled).toHaveLength(0);
+    expect(mondayDuties.map((d) => d.employeeId)).toEqual(["e1"]);
+
+    const previousDayShift: PriorDayShiftMap = new Map([["e1", getShiftTimesAs("NT01", "2026-10-05")]]);
+    const { duties: tuesdayDuties, unfilled: tuesdayUnfilled } = generateDutiesForDay(
+      "Tuesday", [tuesdayReq], [tuesdayFlight], employees, [], [], CONFIG, "2026-10-06",
+      undefined, new Map(), new Map(), undefined, previousDayShift
+    );
+    expect(tuesdayUnfilled).toHaveLength(0);
+    expect(tuesdayDuties.map((d) => d.employeeId)).toEqual(["e1"]);
   });
 });

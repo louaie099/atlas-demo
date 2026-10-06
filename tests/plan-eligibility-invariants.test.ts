@@ -4,6 +4,7 @@ import { buildDraftPlanBundle, planIdForWeek } from "../lib/planning/weekly-plan
 import { computeWeeklyStaffingRequirements } from "../lib/planning/weekly-requirements";
 import { getShiftTimesAs } from "../lib/shift-templates";
 import { getRequirementWindow } from "../lib/planning/requirement-window";
+import { shiftOverlapsWindow } from "../lib/shift-interval";
 
 /**
  * Hard eligibility invariant, checked against the ACTUAL generated demo
@@ -21,14 +22,18 @@ import { getRequirementWindow } from "../lib/planning/requirement-window";
  * Employee.weekly_shifts once a plan roster exists (see
  * resolvePlanRosterEntry's and buildDayEffectivePoolFromRosterEntries's
  * doc comments in lib/planning/duty-generation.ts).
+ *
+ * 2026-10-06 (post-activation audit fix): this test's own overlap check
+ * used to be a local, plain-minutes `windowsOverlap`, with no overnight
+ * awareness -- it wrongly flagged a perfectly legitimate overnight
+ * assignment (e.g. mounir-benali-112 on AP03, 17:45-02:00, covering a
+ * 21:30-23:00 Boarding window entirely on his own starting evening) as a
+ * "disjoint" violation, because AP03's raw sortie clock-time (02:00) is
+ * numerically smaller than the window's own end time. Now uses the same
+ * shared, wrap-aware `shiftOverlapsWindow` (lib/shift-interval.ts) that
+ * lib/scoring.ts's real eligibility gate uses, so this invariant actually
+ * tests the real rule instead of a stale, non-overnight-aware copy of it.
  */
-function timeToMinutes(t: string): number {
-  const [h, m] = t.split(":").map(Number);
-  return h * 60 + m;
-}
-function windowsOverlap(a: { start: string; end: string }, b: { start: string; end: string }): boolean {
-  return timeToMinutes(a.start) < timeToMinutes(b.end) && timeToMinutes(b.start) < timeToMinutes(a.end);
-}
 
 describe("weekly plan eligibility invariants (generated demo plan)", () => {
   const planId = planIdForWeek(CURRENT_WEEK_START);
@@ -88,7 +93,7 @@ describe("weekly plan eligibility invariants (generated demo plan)", () => {
       // departure as the ideal coverage start, and an employee clocking in
       // partway through that lead time to cover the window through
       // departure is real, intended shift coverage, not a violation.
-      if (!windowsOverlap(window, { start: shiftTimes.shift_start, end: shiftTimes.shift_end })) {
+      if (!shiftOverlapsWindow(window, shiftTimes.shift_start, shiftTimes.shift_end)) {
         violations.push(
           `${a.employee_id} on ${flight.day_of_week} (${flight.flight_number}, ${req.role}): window ${window.start}-${window.end} vs shift ${shiftTimes.shift_start}-${shiftTimes.shift_end}`
         );

@@ -705,21 +705,36 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // Sunday's mounir-benali-112 genuinely out-scores souad-benali-99 for an
 // AP03-vs-AP02 pick by a single OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT unit —
 // a real tier-3 off-window fit difference, not an arbitrary tie (see
-// tests/hard-work-caps.test.ts's "default caps on the demo" test for the
-// full mechanism and its one resulting, honestly-reported unfilled_duty,
-// req-at870-sunday-gate). stage6:/topup:/foreign:/score: are unaffected,
+// tests/hard-work-caps.test.ts's "E7"/"default caps on the demo" tests for
+// the full mechanism). stage6:/topup:/foreign:/score: are unaffected,
 // confirmed directly: stage6: calls generateFlexiblePoolShifts for Monday
 // alone with no offWindowContext (so tier 3 is inert, score ties resolve
 // exactly as before); topup: uses a synthetic demandDriven map untouched by
 // this phase; foreign: and both score: calls were independently verified
 // byte-identical against this exact CONFIG. (Previous values: plan:2026-08-31
 // ea29fc7f7660c7ed, plan:2026-09-21 4db88ab07fcf0523.)
+// 2026-10-06 SECOND re-pin, same day: three further, independent bugs this
+// same verification pass found in the overlap/containment/rest/window path
+// (lib/scoring.ts's isWindowWithinShift and its eligiblePool gate had no
+// overnight-reach awareness; lib/planning/duty-generation.ts's carryover
+// candidates fell back to a stale static rest baseline instead of their
+// already-cleared real rest; lib/planning/requirement-window.ts's
+// subtractMinutes wrapped a pre-midnight lead time into a malformed,
+// self-overlapping window instead of clamping at 00:00) changed real
+// duty-assignment outcomes on this same Sunday cluster -- fixing them
+// restores full coverage (see hard-work-caps.test.ts's "E7" test, which
+// tracks the resulting 4-person duty reshuffle in detail). Re-verified:
+// stage6:/topup:/foreign:/score: still unaffected, by the same reasoning
+// above -- none of these three fixes touch shift SELECTION, only
+// downstream duty-to-employee matching. (Values after the first re-pin,
+// before this one: plan:2026-08-31 79eff183b7203c28, plan:2026-09-21
+// 1899064ffedfe68b.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "79eff183b7203c28",
+  "plan:2026-08-31": "78c0148e3d41dad2",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "1899064ffedfe68b",
+  "plan:2026-09-21": "33a99739b4381b62",
   "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",

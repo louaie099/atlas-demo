@@ -10,6 +10,7 @@ import { weekStartFor, flightDateFor, DAYS_ORDER } from "../flight-date";
 import { effectiveDeparture } from "../flight-operations";
 import { buildFatigueStatesEnteringDate } from "./fatigue-live-lookup";
 import { CandidateFatigueInput } from "./fatigue-planning";
+import { shiftOverlapsWindow } from "../shift-interval";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, CandidateResult } from "../types";
 
 function timeToMinutesLocal(t: string): number {
@@ -66,7 +67,13 @@ function buildExclusionSummary(
       counts.overlappingCommitment++;
       continue;
     }
-    if (!windowsOverlapLocal(window, { start: effective.shift_start!, end: effective.shift_end! })) {
+    // 2026-10-06: shiftOverlapsWindow (not the plain windowsOverlapLocal
+    // used just above for occupied commitments) -- a shift's real reach on
+    // its own starting day extends past midnight for an overnight code;
+    // see lib/shift-interval.ts's doc comment on this exact bug. Without
+    // this, this exclusion summary wrongly blamed "no shift overlap" for
+    // an overnight employee who genuinely does cover the window.
+    if (!shiftOverlapsWindow(window, effective.shift_start!, effective.shift_end!)) {
       counts.noShiftOverlap++;
       continue;
     }

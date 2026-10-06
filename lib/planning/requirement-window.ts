@@ -2,12 +2,30 @@ import { Flight, StaffingRequirement } from "../types";
 import { isDreamlinerAircraft } from "../ram-staffing-matrix";
 import { CheckinDemandPolicy, DEFAULT_CHECKIN_DEMAND_POLICY, getCheckinWindow } from "./checkin-demand";
 
+/**
+ * 2026-10-06 (post-activation audit fix): clamps at 00:00 rather than
+ * wrapping past midnight. Every requirement window this function builds
+ * is confined to the SAME calendar day as the flight it's for (the day
+ * this requirement itself is dated to — see lib/shift-interval.ts's own
+ * doc comment on this same single-day-window assumption) — a flight
+ * departing at 00:30 with a 60-minute lead genuinely has only 30 real
+ * minutes of lead time available on ITS OWN calendar day; the other 30
+ * minutes belong to the PREVIOUS day, which is a different requirement
+ * entirely (or no requirement at all, if that day has no matching
+ * flight). The previous version wrapped the negative result back around
+ * to e.g. "23:30" — numerically valid as a clock time, but a window of
+ * {start: "23:30", end: "00:30"} is malformed for THIS day: start > end
+ * as plain minute-of-day numbers, which silently broke every downstream
+ * raw-minute comparison (overlap/containment against an employee's
+ * shift, clustering against other requirements) for any flight departing
+ * before its own lead time — exactly the kind of early-morning flight
+ * the overnight-shift activation was meant to make coverable.
+ */
 function subtractMinutes(time: string, minutes: number): string {
   const [h, m] = time.split(":").map(Number);
-  const total = h * 60 + m - minutes;
-  const wrapped = ((total % 1440) + 1440) % 1440;
-  const hh = Math.floor(wrapped / 60);
-  const mm = wrapped % 60;
+  const total = Math.max(0, h * 60 + m - minutes);
+  const hh = Math.floor(total / 60);
+  const mm = total % 60;
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 

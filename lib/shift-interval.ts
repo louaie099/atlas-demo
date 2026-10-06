@@ -98,6 +98,35 @@ export function reachOfDayMinutes(entreeMin: number, sortieMin: number): number 
 }
 
 /**
+ * 2026-10-06 (post-activation audit fix): does a same-day duty/requirement
+ * `window` overlap a shift's REAL reach on the calendar day the shift
+ * STARTS, given its own entree/sortie clock times? This is the single
+ * shared "is this employee even working anywhere near this window" check
+ * -- lib/scoring.ts's eligiblePool entry gate and
+ * lib/planning/candidate-lookup.ts's exclusion-summary reporting both
+ * independently re-derived this exact comparison with plain
+ * minute-of-day math (no reachOfDayMinutes), which silently broke for
+ * every overnight employee on their OWN starting evening: NT01's sortie
+ * (06:30) is numerically tiny, so a same-evening duty (e.g. 22:00) looked
+ * like it started AFTER the shift had already ended, and the employee was
+ * excluded before scoring even began -- the exact bug that made Stage 6's
+ * now-correct overnight shift SELECTION look like it changed nothing,
+ * because Stage 9 could never actually place a real duty on that
+ * employee's own starting night. (The FOLLOWING day's carryover window,
+ * from overnightCarryoverWindow in duty-generation.ts, was never affected
+ * -- it's pre-clipped to [00:00, real sortie], both small numbers that
+ * compare correctly without this fix.) Deliberately distinct from a plain
+ * window-vs-window overlap test (duty-generation.ts's own windowsOverlap,
+ * used only between two ordinary same-day duty windows) -- only a
+ * comparison against a SHIFT boundary ever needs this adjustment.
+ */
+export function shiftOverlapsWindow(window: { start: string; end: string }, shiftStart: string, shiftEnd: string): boolean {
+  const shiftStartMin = timeToMinutes(shiftStart);
+  const shiftReachMin = reachOfDayMinutes(shiftStartMin, timeToMinutes(shiftEnd));
+  return timeToMinutes(window.start) < shiftReachMin && shiftStartMin < timeToMinutes(window.end);
+}
+
+/**
  * The true, wrap-aware duration of a shift in minutes, from its own
  * entree/sortie minute-of-day values — mirrors
  * lib/shift-templates.ts's getShiftDurationHours (kept as a separate,

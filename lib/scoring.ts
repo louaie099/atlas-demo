@@ -2,6 +2,7 @@ import { Employee, Config, CandidateResult } from "./types";
 import { isFixedPlanningTeam, isTransitTeam } from "./teams";
 import { CandidateFatigueInput, rankingBurden } from "./planning/fatigue-planning";
 import { classifyFatigueLevel, explainFatigueFactors, unknownFatigueState } from "./planning/fatigue-model";
+import { reachOfDayMinutes, shiftOverlapsWindow } from "./shift-interval";
 
 export interface TimeWindow {
   start: string; // "HH:mm"
@@ -36,7 +37,17 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
  */
 export function isWindowWithinShift(window: TimeWindow, shiftStart: string | null, shiftEnd: string | null): boolean {
   if (!shiftStart || !shiftEnd) return true;
-  return timeToMinutes(window.start) >= timeToMinutes(shiftStart) && timeToMinutes(window.end) <= timeToMinutes(shiftEnd);
+  // 2026-10-06 (post-activation audit fix): the upper bound is the
+  // shift's REAL reach on the day it starts, not its raw sortie
+  // clock-time -- see reachOfDayMinutes/shiftOverlapsWindow in
+  // lib/shift-interval.ts. Without this, an overnight shift's tiny
+  // sortie minute-of-day (e.g. NT01's 06:30) made every evening duty on
+  // the shift's OWN starting day look like it ended after the shift did,
+  // even though isWindowWithinShift's whole job is to say whether it's
+  // actually covered.
+  const shiftStartMin = timeToMinutes(shiftStart);
+  const shiftReachMin = reachOfDayMinutes(shiftStartMin, timeToMinutes(shiftEnd));
+  return timeToMinutes(window.start) >= shiftStartMin && timeToMinutes(window.end) <= shiftReachMin;
 }
 
 function hasRosterAssigned(e: Employee): e is RosteredEmployee {
@@ -163,13 +174,24 @@ export function scoreCandidates(
     // still enters scoring, but is downgraded to FLAGGED, never
     // "recommended" -- see those checks below for the full containment
     // test that actually decides automatic eligibility.
-    if (!windowsOverlap(window, { start: e.shift_start, end: e.shift_end })) return false;
+    // 2026-10-06: shiftOverlapsWindow (not the plain windowsOverlap used
+    // just above for occupied/busy windows) -- a shift's real reach on its
+    // own starting day extends past midnight for an overnight code, see
+    // lib/shift-interval.ts's doc comment on this exact bug.
+    if (!shiftOverlapsWindow(window, e.shift_start, e.shift_end)) return false;
     if (requiredAuthorization) return e.foreign_company_authorizations.includes(requiredAuthorization);
     return e.skills.includes(role);
   });
 
   const scored: CandidateResult[] = eligiblePool.map((employee) => {
-    const shiftEndMin = timeToMinutes(employee.shift_end);
+    // 2026-10-06: reachOfDayMinutes, not the raw sortie clock-time -- an
+    // overnight shift's real reach on the day it STARTS extends to
+    // end-of-day, so comparing a same-evening task window's end against
+    // the unadjusted (tiny) sortie minute-of-day wrongly flagged every
+    // such duty as needing an "unplanned extension" it never needed. See
+    // lib/shift-interval.ts's shiftOverlapsWindow doc comment for the
+    // full story (same root cause as the eligiblePool gate above).
+    const shiftEndMin = reachOfDayMinutes(timeToMinutes(employee.shift_start), timeToMinutes(employee.shift_end));
     const taskWindowEndMin = timeToMinutes(taskWindow.end);
     // FULL SHIFT CONTAINMENT (2026-10-04 planning-integrity audit fix):
     // automatic generation requires task.start >= shift.start AND task.end

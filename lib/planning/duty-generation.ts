@@ -429,14 +429,32 @@ export function generateDutiesForDay(
       // — if yesterday's effective shift was overnight and its tail still
       // reaches into today. Their own today-dated shift always takes
       // priority when one exists (the ordinary case for every population).
-      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts, date) ?? overnightCarryoverWindow(previousDayShift?.get(e.id));
+      const ownShift = effectiveShiftForDay(e, dayOfWeek, generatedShifts, date);
+      const carryover = ownShift ? null : overnightCarryoverWindow(previousDayShift?.get(e.id));
+      const effective = ownShift ?? carryover;
       if (!effective) return null;
       const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
       return {
         ...e,
         shift_start: effective.shift_start,
         shift_end: effective.shift_end,
-        rest_before_shift_hours: actualRest ?? e.rest_before_shift_hours,
+        // 2026-10-06 (post-activation audit fix): a CARRYOVER candidate is
+        // continuing yesterday's overnight shift, not clocking in fresh
+        // today -- there is no new "rest before this shift" period to
+        // evaluate, and the real one was already checked and enforced
+        // before yesterday's shift was ever accepted (see
+        // enforceRestInvariantAcrossWeek, which drops a generated shift
+        // outright if it fails minimum_rest_hours). actualRestHoursByDay
+        // has no entry for today (no shift of the employee's own is dated
+        // to today), so without this, every carryover candidate silently
+        // fell back to their STALE static baseline rest_before_shift_hours
+        // -- a number with nothing to do with their real, already-cleared
+        // rest situation -- and was wrongly FLAGGED (not auto-assignable)
+        // as "insufficient rest," which is exactly why Stage 6 correctly
+        // selecting an overnight shift still failed to produce real
+        // coverage on the day it carries INTO (the day it STARTS was a
+        // separate bug, fixed via shiftOverlapsWindow in lib/scoring.ts).
+        rest_before_shift_hours: carryover ? Number.POSITIVE_INFINITY : actualRest ?? e.rest_before_shift_hours,
       } as Employee;
     })
     .filter((e) => e !== null) as Employee[];

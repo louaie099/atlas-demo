@@ -530,15 +530,13 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     // (lib/planning/shift-generation.ts), so on Sunday
     // mounir-benali-112's AP03 genuinely out-scores souad-benali-99's AP02
     // pick — fewer off-window structural conflicts for him than for her
-    // with that code, a real tier-3 fit difference, not an arbitrary tie
-    // (see the "default caps on the demo" test's own fuller explanation of
-    // the mechanism and its one resulting unfilled_duty,
-    // req-at870-sunday-gate). That single swap ripples through the
-    // Stage-6.5 top-up's shared day-reservation search for these three
-    // General T1 Pool members (souad-benali-99 and, in turn,
-    // zakaria-ouazzani-54) — each keeps the SAME total worked-day count as
-    // the pre-phase fixture, just on different days/codes. No other
-    // employee is affected.
+    // with that code, a real tier-3 fit difference, not an arbitrary tie.
+    // That single swap ripples through the Stage-6.5 top-up's shared
+    // day-reservation search for these three General T1 Pool members
+    // (souad-benali-99 and, in turn, zakaria-ouazzani-54) — each keeps the
+    // SAME total worked-day count as the pre-phase fixture, just on
+    // different days/codes. No other employee's ROSTER (shift selection)
+    // is affected.
     const KNOWN_OVERNIGHT_RESHUFFLE = new Set(["zakaria-ouazzani-54", "souad-benali-99", "mounir-benali-112"]);
     for (const e of EMPLOYEES) {
       if (KNOWN_OVERNIGHT_RESHUFFLE.has(e.id) && roster[e.id] !== fixture.roster[e.id]) {
@@ -605,24 +603,45 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     // duty strings were updated rather than the test loosened.
     //
     // 2026-10-06 (overnight activation): the same KNOWN_OVERNIGHT_RESHUFFLE
-    // swap above (see this test's own comment near its top) also moves which
-    // of those 3 members holds some of their own plain Gate/Boarding duties
-    // day to day — same (day, requirement) slot, same set of 3 people,
-    // never a different holder outside that set — plus the one genuine,
-    // named, explained gap (req-at870-sunday-gate) this test's sibling
-    // ("default caps on the demo") already covers in full. Compare the slot
-    // (ignoring exact holder) for duties touching this known set; everyone
-    // else's plain duties must still match byte-for-byte.
-    const reshuffleTouches = (d: string) => KNOWN_OVERNIGHT_RESHUFFLE.has(d.split("|")[2]);
+    // swap above also ripples into Stage 9's duty assignment for the
+    // Sunday AT870 Dreamliner's 2+2 Gate/Boarding cluster — a FOURTH
+    // member, othmane-chafik-122 (whose own shift/roster never changes,
+    // confirmed identical to the fixture), trades which of the two roles
+    // he covers with souad-benali-99 (he moves from Boarding to Gate as
+    // she drops out of that cluster; mounir-benali-112 picks up the
+    // Boarding seat he vacates). This was INITIALLY found (during this same
+    // verification pass) to cost one real seat of that 2+2 requirement —
+    // traced to three genuine, now-fixed bugs unrelated to this scoring
+    // swap itself: lib/scoring.ts's shift/window overlap and containment
+    // math had no overnight awareness (an overnight employee's OWN
+    // starting evening looked entirely unavailable), a carryover
+    // candidate's rest wrongly read their stale static baseline instead of
+    // their already-cleared real rest, and lib/planning/requirement-
+    // window.ts's subtractMinutes wrapped a pre-midnight lead time into a
+    // malformed window instead of clamping at 00:00 (lib/shift-interval.ts,
+    // lib/planning/duty-generation.ts, lib/planning/requirement-window.ts).
+    // With those fixed, the 2+2 need is fully covered again: same total
+    // duty COUNT per (day, requirement) slot as the pre-phase fixture,
+    // reshuffled only among this known 4-person set — compared as
+    // multisets (not a simple slot map) since this is a 2-headcount
+    // requirement with two simultaneous holders. Everyone else's plain
+    // duties must still match byte-for-byte.
+    const KNOWN_DUTY_RESHUFFLE = new Set([...KNOWN_OVERNIGHT_RESHUFFLE, "othmane-chafik-122"]);
+    const reshuffleTouches = (d: string) => KNOWN_DUTY_RESHUFFLE.has(d.split("|")[2]);
     const slotOnly = (d: string) => d.split("|").slice(0, 2).join("|");
     const plainNow = plain(duties);
     const plainBefore = plain(fixture.duties);
     expect(plainNow.filter((d) => !reshuffleTouches(d))).toEqual(plainBefore.filter((d) => !reshuffleTouches(d)));
-    const reshuffledSlotsBefore = plainBefore.filter(reshuffleTouches).map(slotOnly).sort();
-    const reshuffledSlotsNow = plainNow.filter(reshuffleTouches).map(slotOnly).sort();
-    expect(reshuffledSlotsBefore.filter((s) => !reshuffledSlotsNow.includes(s))).toEqual([`Sunday|${"req-at870-sunday-gate"}`]);
-    expect(reshuffledSlotsNow.filter((s) => !reshuffledSlotsBefore.includes(s))).toEqual([]);
-    for (const d of plainNow.filter(reshuffleTouches)) expect(KNOWN_OVERNIGHT_RESHUFFLE.has(d.split("|")[2])).toBe(true);
+    const countBySlot = (list: string[]) => {
+      const counts = new Map<string, number>();
+      for (const d of list.filter(reshuffleTouches)) counts.set(slotOnly(d), (counts.get(slotOnly(d)) ?? 0) + 1);
+      return counts;
+    };
+    const slotCountsBefore = countBySlot(plainBefore);
+    const slotCountsNow = countBySlot(plainNow);
+    // Same slots, same per-slot headcount — nothing newly gained or lost.
+    expect(Object.fromEntries(slotCountsNow)).toEqual(Object.fromEntries(slotCountsBefore));
+    for (const d of plainNow.filter(reshuffleTouches)) expect(KNOWN_DUTY_RESHUFFLE.has(d.split("|")[2])).toBe(true);
     const teamSlots = (list: string[]) =>
       list
         .filter((d) => !companyDuty(d) && profMesureDuty(d) && !profilingRoleDuty(d))
@@ -695,33 +714,35 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
   });
 
   it("default caps on the demo: no NEW unfilled flight duty and no new rest violation versus the pre-phase plan", () => {
-    // 2026-10-06 (overnight activation): one narrow, understood exception.
-    // AP03/AP04/NT01/N8 are now real Stage-6 candidates, so on Sunday
-    // mounir-benali-112's AP03 genuinely out-scores souad-benali-99's
-    // AP02 pick by a single OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT unit (his
-    // off-window fits his own preferred-OFF window with one fewer
-    // structural conflict than hers does) — both are real, legally-rested,
-    // demand-driven picks, not a tie resolved arbitrarily. Stage 6's own
-    // coverage accounting is per-30-min-bucket, not per-exact-flight, so
-    // this swap is "coverage-equivalent" from Stage 6's own point of view
-    // (same bucket/role COUNT covered) even though it is a DIFFERENT
-    // employee covering a DIFFERENT specific bucket — souad's own
-    // following pick (AP01, not AP02: by her turn the shared bucket count
-    // is already satisfied, so AP01 ties on hard coverage and wins the
-    // shorter-duration tie-break) no longer reaches 23:00, and nobody else
-    // free at that hour is Gate-qualified for the Dreamliner's 2+2 need.
-    // Net effect: req-at870-sunday-gate (previously held by souad-benali-99)
-    // goes from covered to a genuine, honestly-reported unfilled_duty — a
-    // known, bounded consequence of Stage 6's bucket-granularity coverage
-    // model (see docs/known-limitations/roster-planning-vs-duty-allocation.md)
-    // becoming reachable now that a new candidate code exists, not a defect
-    // in the overnight activation itself. Everything else must still match
-    // exactly: one specific, named, explained exception — not a free pass.
-    const KNOWN_NEW_GAP = "req-at870-sunday-gate";
-    expect(dutiesOf(atDefault).length).toBe(fixture.duties.length - 1);
-    expect(atDefault.issues.filter((i) => i.type === "unfilled_duty")).toEqual([
-      expect.objectContaining({ type: "unfilled_duty", requirementId: KNOWN_NEW_GAP, dayOfWeek: "Sunday" }),
-    ]);
+    // 2026-10-06 (overnight activation): AP03/AP04/NT01/N8 are now real
+    // Stage-6 candidates, so on Sunday mounir-benali-112's AP03 genuinely
+    // out-scores souad-benali-99's AP02 pick by a single
+    // OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT unit (a real tier-3 fit
+    // difference, not an arbitrary tie), which ripples through Stage 9's
+    // candidate pool for the Dreamliner AT870 Sunday 2+2 Gate/Boarding
+    // cluster: souad-benali-99 and othmane-chafik-122 trade which of the
+    // two roles they cover (see the "E7" test's own fuller roster/duty
+    // comparison for this). A SEPARATE, earlier finding in this same
+    // verification pass had this swap costing one real seat of that 2+2
+    // need (req-at870-sunday-gate going unfilled) — that was traced to two
+    // genuine bugs, not an inherent Stage-6-bucket-granularity limit:
+    // lib/scoring.ts's shift/window overlap and containment checks did
+    // raw minute-of-day math with no overnight awareness, so an overnight
+    // employee's OWN starting evening (not just the following day's
+    // carryover) looked entirely unavailable for scoring; and a carryover
+    // candidate's rest was wrongly read from their stale static baseline
+    // instead of being treated as already-cleared (enforceRestInvariant-
+    // AcrossWeek already verifies rest before ever accepting the shift).
+    // Both are now fixed (lib/shift-interval.ts's shiftOverlapsWindow,
+    // lib/planning/duty-generation.ts's carryover rest handling), plus a
+    // third, independent bug in the same area (lib/planning/requirement-
+    // window.ts's subtractMinutes wrapping a pre-midnight lead time back
+    // around to a malformed, self-overlapping window instead of clamping
+    // at 00:00). With all three fixed, the Dreamliner's 2+2 need is fully
+    // covered again — same total duty count as the pre-phase fixture, zero
+    // new unfilled_duty issues.
+    expect(dutiesOf(atDefault).length).toBe(fixture.duties.length);
+    expect(atDefault.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
     expect(atDefault.configurationIssues.some((c) => c.requirementId === "hard-cap-roster-top-up-shortfall")).toBe(false);
     expect(atDefault.issues.filter((i) => i.type === "roster_target_shortfall")).toEqual([]);
     for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) {
@@ -912,15 +933,12 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
 
     const p = run(true);
     expect(workPattern(p, "youssef-el-amrani")).toEqual(workPattern(before, "youssef-el-amrani")); // repair is a genuine no-op here now
-    // 2026-10-06 (overnight activation): same single, named, documented
-    // exception as the "default caps on the demo" test above
-    // (req-at870-sunday-gate — see that test's comment for the full
-    // mechanism) — unrelated to youssef-el-amrani or this repair pass; the
-    // repair pass correctly leaves it alone since it's a genuine capacity
-    // gap, not a hard-cap conflict repair can fix.
-    expect(p.issues.filter((i) => i.type === "unfilled_duty")).toEqual([
-      expect.objectContaining({ type: "unfilled_duty", requirementId: "req-at870-sunday-gate", dayOfWeek: "Sunday" }),
-    ]);
+    // 2026-10-06 (overnight activation): unrelated to youssef-el-amrani or
+    // this repair pass — see the "default caps on the demo" test above for
+    // the Sunday AT870 Dreamliner reshuffle this activation causes
+    // elsewhere in the roster, which (after fixing the real overlap/rest/
+    // window bugs the audit found) remains fully covered, zero unfilled.
+    expect(p.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
     expect(p.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
     expect(p.hardCapRepairs.filter((r) => r.fromEmployeeId === "youssef-el-amrani")).toEqual([]);
   });
