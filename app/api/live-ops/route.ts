@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
  *   {
  *     date: "YYYY-MM-DD",
  *     weekStart: "YYYY-MM-DD",
- *     plan: { id, status: "draft" | "published", revision } | null,
+ *     plan: { id, status, revision } | null, // status kept for backward compatibility, never gates anything here
  *     flights: [
  *       {
  *         flight: Flight,                 // includes actual_departure if set
@@ -31,19 +31,19 @@ export const dynamic = "force-dynamic";
  *             coverageLabel: string,
  *             coverageStatus: "assigned" | "gap",
  *             gap: number,
- *             assignedEmployees: Employee[],  // real, confirmed assignments table rows
- *             proposedEmployees: Employee[], // the draft-plan engine's own picks, not yet real rows
+ *             assignedEmployees: Employee[],  // a human-made (Assignment.source "human_modified") pick
+ *             proposedEmployees: Employee[], // ATLAS's own (Assignment.source "atlas_generated") pick -- already a real row, just styled distinctly
  *           }
  *         ]
  *       }
  *     ]
  *   }
  *
- * `plan: null` means no plan (draft or published) exists yet for this
- * date's week at all — show "no plan for this date", distinct from a
- * draft plan existing but nothing published (`plan.status === "draft"`,
- * `flights` still populated). This route does NOT hard-gate on
- * `status === "published"` — see live-ops-service.ts's own doc comment.
+ * `plan: null` means no plan exists yet for this date's week at all — show
+ * "no plan for this date". 2026-10-06 (Draft/Publish removal): this route
+ * always resolves whatever is CURRENTLY persisted for the date's week,
+ * regardless of `plan.status` — there is no separate "published" milestone
+ * in the product any more (see live-ops-service.ts's own doc comment).
  */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);

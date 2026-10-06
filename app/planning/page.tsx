@@ -18,7 +18,6 @@ import { AgentScheduleTable } from "@/components/agent-schedule-table";
 import { FlightScheduleView } from "@/components/flight-schedule-view";
 import { MakePlanningButton } from "@/components/make-planning-button";
 import { MakePlanningForMonthDialog } from "@/components/make-planning-month-dialog";
-import { PublishButton } from "@/components/publish-button";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { Button } from "@/components/ui";
 import { monthStartFor, monthLabelFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
@@ -52,35 +51,6 @@ type Tab = "flights" | "coverage" | "schedule";
 // continuity.ts and friends) is itself entirely calendar-date-based, so
 // it already carries through a month boundary with no special-casing
 // here either.
-
-/**
- * Non-interactive placeholder for the future Generate -> Review -> Adjust ->
- * Publish lifecycle. Only "Generate" is real today (this page IS that
- * step -- ATLAS already generated the draft on load). The rest are shown
- * muted and are deliberately not buttons: there is no Review/Adjust/
- * Publish workflow implemented yet, and this must not pretend there is.
- */
-function DraftLifecycle() {
-  const steps = ["Generate", "Review", "Adjust", "Publish"];
-  return (
-    <div className="flex items-center gap-1.5 text-xs">
-      {steps.map((step, i) => (
-        <div key={step} className="flex items-center gap-1.5">
-          <span
-            className={
-              i === 0
-                ? "px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 font-medium"
-                : "px-2 py-0.5 rounded-full text-muted"
-            }
-          >
-            {step}
-          </span>
-          {i < steps.length - 1 && <span className="text-border">{"->"}</span>}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /** Pure view transformation of `roster` -- one group per flight, in the
  * order flights already arrive (buildRosterViews sorts by day then
@@ -258,24 +228,18 @@ export default function PlanningPage() {
                   : "Loading…"
                 : plan === null
                   ? "No Plan Yet"
-                  : plan.status === "published"
-                    ? "Published Plan"
-                    : "Draft Weekly Plan"}
+                  : "Current Plan"}
             </span>
           </div>
           <p className="text-muted mt-1 max-w-2xl">
             {plan === null
               ? "No plan has been generated for this week yet. Click Make Planning to generate one from the current flight schedule."
-              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the draft plan; management can still review and edit the whole draft before publishing. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule or the planning rules above, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
+              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the plan; management can review and edit it directly here, and changes flow straight through to Live Operations. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule or the planning rules above, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <DraftLifecycle />
           <PlanningRulesBar />
           {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
-          {plan && plan.status === "draft" && (
-            <PublishButton planId={plan.id} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />
-          )}
           {monthStart && weeksInMonth.length > 0 && (
             <MakePlanningForMonthDialog
               monthLabel={monthLabelFor(monthStart)}
@@ -311,7 +275,7 @@ export default function PlanningPage() {
         onSelectWeek={(target) => loadWeeklyPlan(target).catch(() => {})}
       />
 
-      {plan && plan.status === "draft" && isStale && (
+      {plan && isStale && (
         <div className="bg-warn-50 border border-warn-200 text-warn-700 rounded-xl2 px-4 py-3 text-sm flex items-center justify-between gap-3">
           <span>The flight schedule or planning rules have changed since this draft was generated. Click Make Planning to update it.</span>
         </div>

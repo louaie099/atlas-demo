@@ -68,7 +68,7 @@ export default function OperationsPage() {
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold text-ink">Live Operations</h1>
-          <p className="text-muted mt-1">Today&apos;s operation, scan and act — same plan Monthly Planning published.</p>
+          <p className="text-muted mt-1">Today&apos;s operation, scan and act — the same plan Monthly Planning currently holds.</p>
         </div>
         <label className="text-sm text-ink flex items-center gap-2">
           Date
@@ -89,15 +89,8 @@ export default function OperationsPage() {
 
       {!loading && view && view.plan === null && (
         <Card className="text-sm text-ink">
-          No plan exists for this date yet — generate and publish one in Monthly Planning first.
+          No plan exists for this date yet — generate one in Monthly Planning first.
         </Card>
-      )}
-
-      {!loading && view && view.plan !== null && view.plan.status !== "published" && (
-        <div className="rounded-xl border border-warn-500/30 bg-warn-50 text-warn-700 px-4 py-3 text-sm">
-          This date&apos;s plan is still a draft — operational changes here work the same way, but confirm the plan
-          is ready for live use.
-        </div>
       )}
 
       {!loading && view && view.plan !== null && sortedFlights.length === 0 && (

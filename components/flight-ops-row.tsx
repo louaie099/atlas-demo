@@ -205,9 +205,9 @@ export function FlightOpsRow({
                           }
                         />
                       ))}
-                      {/* ATLAS's own draft-plan picks -- a normal part of an
-                          unpublished plan, not a pending recommendation, so
-                          this uses the same calm brand-blue treatment Flight
+                      {/* ATLAS's own generated picks -- a normal part of
+                          the plan, not a pending recommendation, so this
+                          uses the same calm brand-blue treatment Flight
                           Coverage uses, never a "needs approval" styling.
                           Still a real, reassignable Assignment row (source
                           "atlas_generated" rather than "human_modified" —

@@ -43,7 +43,7 @@ export async function GET(_req: Request, { params }: { params: { zoneRequirement
   const plan = (planRows as WeeklyPlan[] | null)?.[0];
   const effectiveConfig = plan?.config_snapshot;
   if (!effectiveConfig) {
-    return NextResponse.json({ error: "No draft plan exists for this week — generate one first." }, { status: 409 });
+    return NextResponse.json({ error: "No plan exists for this week — generate one first." }, { status: 409 });
   }
 
   const [

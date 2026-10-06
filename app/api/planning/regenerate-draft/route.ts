@@ -8,12 +8,13 @@ import { resolveEffectiveConfig } from "@/lib/planning/rules-service";
 import { DAYS_WITH_DATA } from "@/lib/seed-data";
 
 /**
- * Regenerate Draft. Only valid on an existing DRAFT plan (409 if
- * published or missing) and only when it carries NO human modification
- * for its current revision (409, per the confirmed correction: "no silent
- * loss, no pretending manual work survived when it did not"). A future
- * explicit "Regenerate and discard manual modifications" action is not
- * implemented here.
+ * Regenerate. Only valid on an existing plan (409 if missing) and only
+ * when it carries NO human modification for its current revision (409,
+ * per the confirmed correction: "no silent loss, no pretending manual
+ * work survived when it did not"). 2026-10-06 (Draft/Publish removal):
+ * no longer refuses a "published" plan -- see regenerateDraftPlan's own
+ * doc comment. A future explicit "Regenerate and discard manual
+ * modifications" action is not implemented here.
  */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();

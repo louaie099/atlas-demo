@@ -9,7 +9,7 @@ import { Button } from "./ui";
  * The zone-gap variant of FindAgentSheet -- same UI/interaction shape,
  * against /api/checkin-zone-candidates/[id] and /api/checkin-zone-assign
  * instead of the flight-requirement routes. A zone-requirement gap fill is
- * conceptually the same "human modification against a draft plan" as
+ * conceptually the same "human modification against the current plan" as
  * today's per-flight gap fill (see those routes' own doc comments), so
  * this deliberately mirrors FindAgentSheet closely rather than
  * introducing a different interaction pattern.

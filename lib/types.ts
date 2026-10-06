@@ -186,6 +186,16 @@ export interface Assignment {
   assigned_at: string;
 }
 
+// 2026-10-06 (Draft/Publish removal): `status`/`published_at` are kept on
+// the row purely for backward compatibility (existing data, the
+// publishPlan function and its route still work) -- neither one gates
+// anything in the product any more. Monthly Planning is the one
+// always-editable, always-authoritative workspace for a week; Live
+// Operations reads whatever is currently persisted for a date directly,
+// with no publish step in between (see app/planning/page.tsx,
+// app/operations/page.tsx, lib/live-ops-service.ts). Do not add a new
+// status-gated behavior without reading those three files' own doc
+// comments first.
 export type WeeklyPlanStatus = "draft" | "published";
 
 /**
@@ -199,7 +209,7 @@ export type WeeklyPlanStatus = "draft" | "published";
  * full historical-versioning subsystem. `config_snapshot` freezes the
  * resolved labor/operational rules this revision was generated and
  * validated under, so a later rule change can never silently reinterpret
- * an already-generated (let alone published) plan.
+ * an already-generated plan.
  */
 export interface WeeklyPlan {
   id: string;

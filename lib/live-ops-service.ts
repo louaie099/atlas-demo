@@ -47,21 +47,24 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 
 // SCOPE SPLIT — read carefully before touching this interface or its two
 // employee arrays:
-//  - DISPLAY (assignedEmployees + proposedEmployees together) now mirrors
-//    Monthly Planning's own Flight Coverage card exactly: a still-draft
-//    plan's engine-only picks (proposedEmployees) are shown alongside any
-//    real Assignment rows (assignedEmployees), styled distinctly, so Live
-//    Operations never falsely shows "— gap —" for coverage that genuinely
-//    exists in the draft plan. See the "This date's plan is still a
-//    draft" banner in app/operations/page.tsx — this is the same
-//    explicitly-supported non-error state.
+//  - DISPLAY (assignedEmployees + proposedEmployees together) mirrors
+//    Monthly Planning's own Flight Coverage card exactly: the bucket is
+//    keyed off Assignment.source (human_modified vs atlas_generated — see
+//    lib/planning/persisted-plan-view.ts), never off the plan's `status`.
+//    An ATLAS-generated pick (proposedEmployees) is styled distinctly from
+//    a human one (assignedEmployees), but both are already real,
+//    persisted `assignments` rows the moment a plan is generated or
+//    regenerated (see weekly-plan-service.ts's persistDraftPlanBundle) —
+//    there is no separate "becomes real at publish" step any more
+//    (2026-10-06, Draft/Publish removal; there never actually was one for
+//    this table even before that — see persistDraftPlanBundle's own doc
+//    comment).
 //  - CONFLICT DETECTION / REASSIGNMENT (evaluateFlightDelayImpact,
 //    confirmReassignment, below) is a DELIBERATELY separate boundary: it
 //    only ever reads/writes real `assignments` table rows, same as
-//    before. A still-draft day now HONESTLY shows who ATLAS has
-//    tentatively planned, but the delay/conflict/reassignment flow may
-//    find nothing to flag until the plan is published and those picks
-//    become real Assignment rows. Do not change that behavior here.
+//    before. Because those rows already exist from generation time
+//    onward, this flow has real data to work against for any plan, not
+//    just one that happens to carry the "published" status value.
 export interface LiveOpsRequirementView {
   requirement: StaffingRequirement;
   coverageLabel: string;
@@ -83,13 +86,13 @@ export interface LiveOpsFlightView {
  *
  *   { date: string, weekStart: string, plan: { id, status, revision } | null, flights: LiveOpsFlightView[] }
  *
- * `plan: null` means no plan (draft or published) exists yet for this
- * date's week at all — the frontend should show "no plan for this date"
- * rather than an empty board. When `plan` is non-null but
- * `plan.status !== "published"`, `flights` is still populated (this route
- * does NOT hard-gate on published — see the module/route doc comment) so
- * the frontend can distinguish "no plan at all" from "a draft plan exists
- * but nothing has been published yet" and choose how to present each.
+ * `plan: null` means no plan exists yet for this date's week at all — the
+ * frontend shows "no plan for this date" rather than an empty board.
+ * `plan.status` is still carried through on the response (kept for
+ * backward compatibility — see lib/types.ts's WeeklyPlan doc comment,
+ * 2026-10-06), but this route never gates on it: whatever is currently
+ * persisted for the week is shown, full stop — there is no separate
+ * "published" milestone to wait for any more.
  */
 export interface LiveOpsView {
   date: string;

@@ -32,19 +32,23 @@ import { usesFixedCycleRotation } from "../teams";
  * the only population this boundary rule ever applies to (fixed-cycle
  * JR/NT/OFF/OFF teams are excluded below — their continuous cycle already
  * does not reset at boundaries, by construction). So the only two honest
- * outcomes are a REAL published predecessor plan, or genuinely unknown.
+ * outcomes are a real predecessor plan, or genuinely unknown.
  *
- * PUBLISHED-ONLY, DELIBERATELY: unlike rotation-context.ts's rest-boundary
- * seed (which also accepts a draft predecessor — out of scope to change
- * here), this module must only ever be fed a PUBLISHED prior week's
- * roster. A draft can still be edited or discarded before anyone commits
- * to it, so completing a "must be OFF Monday" obligation sourced from a
- * draft would commit week N+1 to a week N shape that might never actually
- * ship that way. The caller (weekly-plan-service.ts) is responsible for
- * only ever passing `kind: "prior_published_plan"` when the predecessor's
- * `status` is actually "published" — this module trusts that contract
- * rather than re-deriving it (it has no access to a plan's status, only
- * its roster rows).
+ * 2026-10-06 (Draft/Publish removal): this used to require the
+ * predecessor's `status` to be literally "published" before trusting its
+ * roster (a draft could still be edited or discarded before anyone
+ * committed to it, so completing a "must be OFF Monday" obligation sourced
+ * from one risked committing week N+1 to a week N shape that might never
+ * actually ship that way). That distinction no longer exists in the
+ * product: Monthly Planning is the one always-current, always-editable
+ * workspace for a week, exactly like every future week will be too, so any
+ * persisted predecessor plan is now the trusted source here — the same
+ * standard rotation-context.ts's own rest-boundary seed already used. The
+ * caller (weekly-plan-service.ts's lookupPriorWeekBoundaryContext) passes
+ * `kind: "prior_published_plan"` whenever a predecessor plan row was found
+ * at all; the type/kind name is kept as-is (not renamed) to avoid an
+ * unnecessary ripple through this module's callers under the demo
+ * deadline.
  */
 
 /**
@@ -70,12 +74,13 @@ export type IncomingOffBlockState =
 
 /**
  * `priorPlanRosterEntries` must be the full roster of the immediately
- * preceding week's PUBLISHED plan (see this module's doc comment on why
- * published-only) -- the same full-week fetch rotation-context.ts's own
- * callers already do (fetchAllRosterEntriesForPlan), never a narrower
- * last-day-only query, since this derivation needs the prior week's LAST
- * TWO days to tell "first day of a new block" apart from "second day of an
- * already-complete one".
+ * preceding week's plan (see this module's doc comment on why any
+ * persisted predecessor is now trusted) -- the same full-week fetch
+ * rotation-context.ts's own callers already do
+ * (fetchAllRosterEntriesForPlan), never a narrower last-day-only query,
+ * since this derivation needs the prior week's LAST TWO days to tell
+ * "first day of a new block" apart from "second day of an already-complete
+ * one".
  */
 export type OffBlockSeedInput =
   | {
@@ -93,7 +98,7 @@ export type OffBlockSeedInput =
  */
 export function deriveIncomingOffBlockState(employee: Employee, input: OffBlockSeedInput): IncomingOffBlockState {
   if (input.kind === "none") {
-    return { source: "unknown", kind: "none", reason: "No published predecessor plan available (first-ever week, or the prior week is still a draft)." };
+    return { source: "unknown", kind: "none", reason: "No predecessor plan available (first-ever week)." };
   }
 
   // Fixed-cycle JR/NT/OFF/OFF teams (Transit/Leaders/Duty Officers) never

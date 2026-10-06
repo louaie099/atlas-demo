@@ -15,11 +15,18 @@ export const dynamic = "force-dynamic";
 /**
  * The zone-gap variant of /api/assign -- a human planner filling a real
  * T1 Check-in zone staffing gap. Same conceptual action as a per-flight
- * Find Agent assign ("a human modification against a draft plan"), just
- * against a checkin_zone_requirements id instead of a
+ * Find Agent assign ("a human modification against the current plan"),
+ * just against a checkin_zone_requirements id instead of a
  * staffing_requirement_id, and persisting into checkin_zone_assignments
  * with source "human_modified" instead of assignments. Follows the exact
  * same server-side re-validation / audit-log convention as /api/assign.
+ *
+ * No plan.status gate (2026-10-06, Draft/Publish removal -- this route
+ * previously blocked once a plan's status wasn't "draft", unlike
+ * /api/assign's own equivalent gate which had already been removed
+ * 2026-10-04; that inconsistency is now closed the same way): Monthly
+ * Planning is the one always-editable workspace, so manual zone assignment
+ * must work against whatever the current plan is, status notwithstanding.
  */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
@@ -40,13 +47,7 @@ export async function POST(req: Request) {
   const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(CURRENT_WEEK_START));
   const plan = (planRows as WeeklyPlan[] | null)?.[0];
   if (!plan) {
-    return NextResponse.json({ error: "No draft plan exists for this week — generate one first." }, { status: 409 });
-  }
-  if (plan.status !== "draft") {
-    return NextResponse.json(
-      { error: "This week's plan has already been published — manual assignment against a published plan is not available yet." },
-      { status: 409 }
-    );
+    return NextResponse.json({ error: "No plan exists for this week — generate one first." }, { status: 409 });
   }
 
   const { data: existingForRequirement } = await supabase

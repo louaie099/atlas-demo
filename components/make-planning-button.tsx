@@ -39,8 +39,8 @@ function sleep(ms: number): Promise<void> {
 /**
  * The single user-facing trigger for the planning pipeline (flight
  * schedule -> requirements -> demand aggregation -> shift capacity ->
- * roster -> duties -> hard rest validation -> persisted Draft Weekly
- * Plan) -- see makePlanning's doc comment in
+ * roster -> duties -> hard rest validation -> persisted Weekly Plan) --
+ * see makePlanning's doc comment in
  * lib/planning/weekly-plan-service.ts for the exact state machine this
  * calls into. A normal page load/refresh never runs this: reading the
  * Weekly Planning page only ever shows whatever was last persisted, so
@@ -48,8 +48,8 @@ function sleep(ms: number): Promise<void> {
  * this button to get a new plan from the updated program.
  *
  * The server decides what actually happens (create / clean regenerate /
- * blocked-by-manual-modifications / blocked-because-published) -- this
- * component only shows the outcome. A block is never silently retried or
+ * blocked-by-manual-modifications) -- this component only shows the
+ * outcome. A block is never silently retried or
  * hidden: it's surfaced as an explanation, exactly as returned. A success
  * shows the same counts the server actually persisted (managedFlights/
  * dutiesAssigned/staffingGaps/warnings/blockingConflicts/

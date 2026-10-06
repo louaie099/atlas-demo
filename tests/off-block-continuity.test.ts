@@ -187,7 +187,7 @@ describe("wiring into generation — a required Monday OFF is actually enforced 
 describe("weekly-plan-service wiring — buildDraftPlanBundle only trusts a PUBLISHED predecessor", () => {
   const targetEmployee = EMPLOYEES.filter(isFlexibleGeneralPool)[0];
 
-  it("the SAME predecessor roster forces Monday OFF when flagged published, but not when it is (implicitly) still a draft", () => {
+  it("the SAME predecessor roster forces Monday OFF when the caller flags priorWeekPublished, but not when it omits it", () => {
     const priorRows = rosterRows(targetEmployee.id, ["off", "work", "work", "work", "work", "work", "off"]);
     const priorWeekStart = previousWeekStart(CURRENT_WEEK_START);
     const priorWeekBoundaryContext = deriveTransitionContextFromPriorPlan(EMPLOYEES, priorRows, "Sunday", priorWeekStart);
@@ -216,9 +216,12 @@ describe("weekly-plan-service wiring — buildDraftPlanBundle only trusts a PUBL
       daysOrder: DAYS_WITH_DATA,
       priorWeekBoundaryContext,
       priorPlanRosterEntries: priorRows,
-      // priorWeekPublished omitted -- exactly how a caller that looked up a
-      // DRAFT predecessor would call this (see weekly-plan-service.ts's
-      // lookupPriorWeekBoundaryContext, whose `published` is false for a draft).
+      // priorWeekPublished omitted -- this unit test exercises the raw
+      // buildDraftPlanBundle contract directly; the real caller
+      // (weekly-plan-service.ts's lookupPriorWeekBoundaryContext) now
+      // always passes `published: true` once a predecessor plan row exists
+      // at all (2026-10-06, Draft/Publish removal) -- see that function's
+      // own doc comment.
     });
 
     const mondayPublished = published.rosterEntries.find((r) => r.employee_id === targetEmployee.id && r.day_of_week === "Monday");

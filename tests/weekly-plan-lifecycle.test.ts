@@ -291,15 +291,26 @@ describe("weekly-plan-service — Regenerate Draft", () => {
     expect(plans[0].revision).toBe(1);
   });
 
-  it("is blocked once the plan has been published", async () => {
+  // 2026-10-06 (Draft/Publish removal): regenerateDraftPlan used to refuse
+  // a plan whose status was "published" ("a published plan is immutable
+  // via this path") -- that lock is gone now that Monthly Planning is the
+  // one always-editable workspace, with no separate immutable state (see
+  // weekly-plan-service.ts's own doc comment on regenerateDraftPlan). A
+  // plan carrying a lingering "published" status value (from before this
+  // change, or from a direct call to the still-present publishPlan/
+  // /api/planning/publish) must still regenerate normally.
+  it("still regenerates normally even when the plan's status is (still) published", async () => {
     const { fake, planId } = await setupDraft();
     clearBlockingConflicts(fake, planId);
     await publishPlan(fake as unknown as SupabaseClient, planId);
 
     const result = await regenerateDraftPlan(fake as unknown as SupabaseClient, planId, DAYS_WITH_DATA, CONFIG);
-    expect("blocked" in result).toBe(true);
-    if (!("blocked" in result)) throw new Error("unreachable");
-    expect(result.reason).toMatch(/already published/);
+    expect("blocked" in result).toBe(false);
+    if ("blocked" in result) throw new Error("unreachable");
+    expect(result.plan.revision).toBe(2);
+
+    const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
+    expect(plans[0].revision).toBe(2);
   });
 });
 
@@ -643,7 +654,13 @@ describe("weekly-plan-service — Make Planning (the button's state machine)", (
     expect(plans[0].revision).toBe(1);
   });
 
-  it("blocks and explains rather than touching a published plan", async () => {
+  // 2026-10-06 (Draft/Publish removal): Make Planning used to refuse a
+  // published plan the same way it refuses one with manual modifications
+  // -- that lock is gone (see regenerateDraftPlan's own doc comment).
+  // Clicking Make Planning on a plan carrying a lingering "published"
+  // status value must regenerate it cleanly, exactly like any other
+  // clean plan.
+  it("still regenerates cleanly when the existing plan's status is (still) published", async () => {
     const fake = new FakeSupabase();
     fake.seedFacts();
 
@@ -653,11 +670,11 @@ describe("weekly-plan-service — Make Planning (the button's state machine)", (
     await publishPlan(fake as unknown as SupabaseClient, first.plan.id);
 
     const result = await makePlanning(fake as unknown as SupabaseClient, WEEK_START, WEEK_LABEL, DAYS_WITH_DATA, CONFIG);
-    expect("blocked" in result).toBe(true);
-    if (!("blocked" in result)) throw new Error("unreachable");
-    expect(result.reason).toMatch(/already published/);
+    expect("blocked" in result).toBe(false);
+    if ("blocked" in result) throw new Error("unreachable");
+    expect(result.plan.revision).toBe(2);
 
     const plans = fake.table("weekly_plans") as unknown as WeeklyPlan[];
-    expect(plans[0].status).toBe("published");
+    expect(plans[0].revision).toBe(2);
   });
 });

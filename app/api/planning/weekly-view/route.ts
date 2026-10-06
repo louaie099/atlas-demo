@@ -98,8 +98,13 @@ export async function GET(req: Request) {
   // this only tells the UI to show a "schedule changed, click Make
   // Planning" banner -- changing the flight schedule must never silently
   // regenerate the plan on its own.
+  // 2026-10-06 (Draft/Publish removal): no longer gated on
+  // `view.plan.status === "draft"` -- there is no separate frozen
+  // "published" state any more (Monthly Planning is always editable), so a
+  // schedule/rule change must surface this banner for every plan, not just
+  // one that still happens to carry the "draft" status value.
   let isStale = false;
-  if (view.plan.status === "draft") {
+  {
     const { data: allEmployees, error: empErr } = await supabase.from("employees").select("*");
     if (!empErr && allEmployees) {
       // Planning Rules milestone: the CURRENT resolved config (which
