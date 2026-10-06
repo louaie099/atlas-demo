@@ -304,6 +304,34 @@ export interface CandidateResult {
    * Absent otherwise, so default output is byte-identical to before.
    */
   fatigueReason?: string[];
+  /**
+   * FATIGUE LEVEL (2026-10-06, fatigue activation milestone) — an
+   * ABSOLUTE Low/Moderate/High classification of this candidate's state
+   * entering the duty's day (lib/planning/fatigue-model.ts's
+   * classifyFatigueLevel), alongside the comparative `fatigueReason`
+   * above. Present under the exact same gate as `fatigueReason`
+   * (fairness_weights.fatigueWeight > 0 and an enabled fatigue input) —
+   * "unknown" only when the state itself has no real history, never when
+   * the feature is off (it's simply absent then, like `fatigueReason`).
+   */
+  fatigueLevel?: import("./planning/fatigue-model").FatigueLevel;
+  /**
+   * Absolute, non-comparative reasons for this candidate's OWN
+   * `fatigueLevel` (lib/planning/fatigue-model.ts's classifyFatigueLevel)
+   * — unlike `fatigueReason` above (which only exists for "recommended"
+   * candidates and compares against the next-ranked one), this is present
+   * for EVERY candidate once fatigue is active, "recommended" or
+   * "flagged" alike, so a standalone candidate can still be explained.
+   */
+  fatigueLevelReasons?: string[];
+  /**
+   * Real comparable-task count already assigned this scope (the same
+   * signal task-count fairness ranks by — see
+   * lib/fairness-config.ts's taskCountWeight) — surfaced for every
+   * candidate (not gated on fatigue) so the UI can show "N duties today"
+   * as plain workload context alongside the fatigue indicator.
+   */
+  tasksToday?: number;
 }
 
 export interface RosterRequirementView {

@@ -1,5 +1,22 @@
+"use client";
+
+import { useState } from "react";
 import { CandidateResult } from "@/lib/types";
 import { Badge, Button } from "./ui";
+
+const FATIGUE_LABEL: Record<NonNullable<CandidateResult["fatigueLevel"]>, string> = {
+  unknown: "Fatigue: unknown",
+  low: "Low fatigue",
+  moderate: "Moderate fatigue",
+  high: "High fatigue",
+};
+
+const FATIGUE_TONE: Record<NonNullable<CandidateResult["fatigueLevel"]>, "good" | "warn" | "bad" | "neutral"> = {
+  unknown: "neutral",
+  low: "good",
+  moderate: "warn",
+  high: "bad",
+};
 
 export function CandidateRow({
   candidate,
@@ -20,7 +37,9 @@ export function CandidateRow({
    * the button reads "Reassign" instead. */
   actionLabel?: string;
 }) {
+  const [showFatigueDetail, setShowFatigueDetail] = useState(false);
   const recommended = candidate.status === "recommended";
+  const hasFatigueSignal = candidate.fatigueLevel !== undefined;
 
   return (
     <div
@@ -35,6 +54,50 @@ export function CandidateRow({
         </Badge>
       </div>
       <p className="text-sm text-muted">{candidate.reasoning}</p>
+
+      {(hasFatigueSignal || candidate.tasksToday !== undefined) && (
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          {hasFatigueSignal && (
+            <button
+              type="button"
+              onClick={() => setShowFatigueDetail((v) => !v)}
+              className="inline-flex"
+              title="Click to see why"
+            >
+              <Badge tone={FATIGUE_TONE[candidate.fatigueLevel!]}>
+                {FATIGUE_LABEL[candidate.fatigueLevel!]}
+                {candidate.fatigueLevel !== "unknown" ? " · details" : ""}
+              </Badge>
+            </button>
+          )}
+          {candidate.tasksToday !== undefined && (
+            <span className="text-muted">
+              {candidate.tasksToday} dut{candidate.tasksToday === 1 ? "y" : "ies"} today
+            </span>
+          )}
+        </div>
+      )}
+
+      {showFatigueDetail && candidate.fatigueLevel === "high" && (
+        <p className="text-xs text-bad-700 bg-bad-50 border border-bad-500/30 rounded-lg px-3 py-2">
+          ⚠ Higher fatigue burden
+        </p>
+      )}
+      {showFatigueDetail && candidate.fatigueLevelReasons && candidate.fatigueLevelReasons.length > 0 && (
+        <ul className="text-xs text-muted bg-surface border border-border rounded-lg px-3 py-2 flex flex-col gap-1">
+          {candidate.fatigueLevelReasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      )}
+      {showFatigueDetail && candidate.fatigueReason && candidate.fatigueReason.length > 0 && (
+        <ul className="text-xs text-muted bg-surface border border-border rounded-lg px-3 py-2 flex flex-col gap-1">
+          {candidate.fatigueReason.map((reason) => (
+            <li key={`vs-next-${reason}`}>vs. next candidate: {reason}</li>
+          ))}
+        </ul>
+      )}
+
       <Button
         variant={recommended ? "primary" : "secondary"}
         onClick={onAssign}

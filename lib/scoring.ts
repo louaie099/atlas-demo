@@ -1,7 +1,7 @@
 import { Employee, Config, CandidateResult } from "./types";
 import { isFixedPlanningTeam, isTransitTeam } from "./teams";
 import { CandidateFatigueInput, rankingBurden } from "./planning/fatigue-planning";
-import { explainFatigueFactors, unknownFatigueState } from "./planning/fatigue-model";
+import { classifyFatigueLevel, explainFatigueFactors, unknownFatigueState } from "./planning/fatigue-model";
 
 export interface TimeWindow {
   start: string; // "HH:mm"
@@ -168,7 +168,7 @@ export function scoreCandidates(
     return e.skills.includes(role);
   });
 
-  const results: CandidateResult[] = eligiblePool.map((employee) => {
+  const scored: CandidateResult[] = eligiblePool.map((employee) => {
     const shiftEndMin = timeToMinutes(employee.shift_end);
     const taskWindowEndMin = timeToMinutes(taskWindow.end);
     // FULL SHIFT CONTAINMENT (2026-10-04 planning-integrity audit fix):
@@ -243,6 +243,8 @@ export function scoreCandidates(
     };
   });
 
+  const results: CandidateResult[] = scored;
+
   const fatigueActive = (config.fairness_weights.fatigueWeight ?? 0) > 0 && fatigue?.config.enabled === true;
 
   const sorted = results.sort((a, b) => {
@@ -286,14 +288,48 @@ export function scoreCandidates(
   });
 
   if (fatigueActive) {
-    // Explainability: each recommended candidate vs the next-ranked
-    // recommended one (labels only — never a raw number).
-    const recommended = sorted.filter((r) => r.status === "recommended");
     const stateOf = (id: string) => fatigue!.statesByEmployee.get(id) ?? unknownFatigueState("No recent fatigue history supplied for this candidate.");
+
+    // Comparative explainability — unchanged, recommended-only (test-
+    // locked, see tests/stage6-fatigue-wiring.test.ts): each recommended
+    // candidate vs the next-ranked recommended one (labels only — never a
+    // raw number).
+    const recommended = sorted.filter((r) => r.status === "recommended");
     recommended.forEach((r, i) => {
       const next = recommended[i + 1];
       r.fatigueReason = explainFatigueFactors(stateOf(r.employee.id), { comparedWith: next ? stateOf(next.employee.id) : undefined, config: fatigue!.config });
     });
+
+    // Low/Moderate/High classification + its own standalone reasons —
+    // every candidate, recommended or flagged alike, so the UI can show a
+    // fatigue indicator (and explain it on click) for anyone, not only the
+    // ones the ranking signal actually reordered. Classified relative to
+    // this candidate pool's own burdens (percentile rank) wherever a peer
+    // pool exists — accumulatedBurden is an open-ended running total with
+    // no natural absolute scale, so "low/moderate/high" only means
+    // something next to the other agents actually being compared right
+    // now; the configured difficultDayBurdenThreshold is used only as a
+    // fallback when a candidate has no peers to compare against.
+    const knownBurdenById = new Map<string, number>();
+    for (const r of sorted) {
+      const s = stateOf(r.employee.id);
+      if (s.known) knownBurdenById.set(r.employee.id, s.accumulatedBurden);
+    }
+    for (const r of sorted) {
+      const state = stateOf(r.employee.id);
+      const peerBurdens = Array.from(knownBurdenById.entries())
+        .filter(([id]) => id !== r.employee.id)
+        .map(([, burden]) => burden);
+      const info = classifyFatigueLevel(state, fatigue!.config, peerBurdens);
+      r.fatigueLevel = info.level;
+      r.fatigueLevelReasons = info.reasons;
+      // Real workload context shown ALONGSIDE the fatigue indicator (see
+      // CandidateRow) — gated on fatigueActive, like every other field
+      // this block adds, so scoreCandidates' output stays byte-identical
+      // to before whenever fatigue is off (see the fingerprint regression
+      // suite, tests/stage6-fatigue-wiring.test.ts).
+      r.tasksToday = tasksAssignedThisScope.get(r.employee.id) ?? 0;
+    }
   }
   return sorted;
 }

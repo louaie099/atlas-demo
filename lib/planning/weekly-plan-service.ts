@@ -694,7 +694,7 @@ export async function generateDraftPlan(
  * left alone (kept internally for backward compatibility -- see
  * publishPlan), it just no longer gates anything here.
  */
-async function lookupPriorWeekBoundaryContext(
+export async function lookupPriorWeekBoundaryContext(
   supabase: SupabaseClient,
   weekStart: string,
   daysOrder: string[],

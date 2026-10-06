@@ -531,6 +531,88 @@ export function explainFatigueFactors(state: FatigueStateOrUnknown, options: Exp
 }
 
 // ---------------------------------------------------------------------------
+// Absolute level classification (2026-10-06, fatigue activation milestone)
+// ---------------------------------------------------------------------------
+
+export type FatigueLevel = "unknown" | "low" | "moderate" | "high";
+
+export interface FatigueLevelInfo {
+  level: FatigueLevel;
+  /** The raw burden the level was computed from (null for "unknown" — never a fabricated number). */
+  accumulatedBurden: number | null;
+  /** Short, neutral, absolute reasons (no comparison candidate needed) — same vocabulary/guarantees as explainFatigueFactors: never a raw number, never medical language. */
+  reasons: string[];
+}
+
+/**
+ * Buckets a fatigue state into Low/Moderate/High for display (the Agent
+ * operational drawer, Find Agent/candidate comparison, Agent Schedule).
+ * `accumulatedBurden` is an open-ended running total (it never resets and
+ * keeps growing across however many work days are in the history — see
+ * FatigueState's own doc comment), so it has no meaningful ABSOLUTE scale
+ * on its own: a "light" schedule several weeks long can carry a larger
+ * raw number than a "heavy" one observed for only a few days. Exactly the
+ * same reason explainFatigueFactors is comparative-only (never a raw
+ * number) applies here.
+ *
+ * `peerBurdens` — the accumulated burden of every OTHER real candidate
+ * currently being compared (e.g. the rest of a Find Agent candidate list)
+ * — is therefore the PRIMARY classification signal when supplied: this
+ * state's percentile rank among `[this state, ...peerBurdens]`, split into
+ * thirds (bottom third "low", middle third "moderate", top third "high").
+ * This never invents a new absolute number; it only ever compares real,
+ * already-computed burdens from the same pool a ranking decision is
+ * already being made over.
+ *
+ * Only when no peers are available (a lone employee with nothing to
+ * compare against — e.g. an isolated Agent Schedule lookup) does this fall
+ * back to the one threshold the model already defines for a single day's
+ * burden (config.thresholds.difficultDayBurdenThreshold), scaled 1x/3x — a
+ * disclosed, coarser approximation for that case only, not a second hidden
+ * weight.
+ *
+ * Returns "unknown" (never a fabricated level) when the model is disabled
+ * or the state itself carries no real history.
+ */
+export function classifyFatigueLevel(
+  state: FatigueStateOrUnknown,
+  config: FatigueConfig = DEFAULT_FATIGUE_CONFIG,
+  peerBurdens: number[] = []
+): FatigueLevelInfo {
+  if (!config.enabled || !state.known) {
+    return { level: "unknown", accumulatedBurden: null, reasons: [] };
+  }
+
+  const burden = state.accumulatedBurden;
+  let level: FatigueLevel;
+  if (peerBurdens.length > 0) {
+    const pool = [burden, ...peerBurdens].sort((a, b) => a - b);
+    const rank = pool.indexOf(burden) / Math.max(1, pool.length - 1); // 0 (lowest) .. 1 (highest)
+    level = rank < 1 / 3 ? "low" : rank < 2 / 3 ? "moderate" : "high";
+  } else {
+    const threshold = config.thresholds.difficultDayBurdenThreshold;
+    level = burden < threshold ? "low" : burden < threshold * 3 ? "moderate" : "high";
+  }
+
+  const reasons: string[] = [];
+  if (state.consecutiveVeryEarlyDays >= 2) {
+    reasons.push(`Early starts: ${state.consecutiveVeryEarlyDays} consecutive`);
+  }
+  if (state.consecutiveDifficultDays >= 2) {
+    reasons.push("Short recovery pattern");
+  }
+  if (state.consecutiveWorkDays >= 5) {
+    reasons.push(`${state.consecutiveWorkDays} consecutive work days`);
+  }
+  if (level === "high") {
+    reasons.push("Recent workload: elevated");
+  } else if (level === "moderate") {
+    reasons.push("Recent workload: moderate");
+  }
+  return { level, accumulatedBurden: burden, reasons: reasons.slice(0, 4) };
+}
+
+// ---------------------------------------------------------------------------
 // Transport metadata lookup — architecture only (INERT)
 // ---------------------------------------------------------------------------
 

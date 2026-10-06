@@ -111,7 +111,24 @@ export async function saveFatigueConfig(supabase: SupabaseClient, config: Fatigu
 export async function resolveEffectiveConfig(supabase: SupabaseClient, date?: string): Promise<Config> {
   const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
   const resolved = resolveDefaultLaborRules(date, rules);
-  return { ...buildConfigFromResolvedRules(resolved), fatigue };
+  const base = buildConfigFromResolvedRules(resolved);
+  return {
+    ...base,
+    fatigue,
+    // ACTIVATION (2026-10-06): fairness_weights.fatigueWeight has no UI/
+    // persistence of its own (see lib/fairness-config.ts's own doc
+    // comment -- "only '> 0' carries meaning today; relative magnitudes
+    // are NOT used") -- it exists purely to gate scoreCandidates'
+    // fatigue-ranking dimension on an ALREADY-enabled fatigue model. The
+    // one real, persisted, Planning-Rules-editable switch is
+    // `fatigue.enabled` itself, so that single switch is the authority
+    // here too: no second hidden weight, no new UI, no invented
+    // threshold -- turning Fatigue on in Planning Rules now actually
+    // activates ranking (Stage 9 duty assignment, Find Agent/Live Ops
+    // replacement candidates), not just Stage 6/6.5/foreign-roster shift
+    // selection, which were already wired to `fatigue.enabled` alone.
+    fairness_weights: { ...base.fairness_weights, fatigueWeight: fatigue.enabled ? 1 : 0 },
+  };
 }
 
 /**

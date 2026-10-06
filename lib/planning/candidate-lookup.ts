@@ -5,8 +5,10 @@ import { planIdForWeek, fetchAllRosterEntriesForPlan } from "./weekly-plan-servi
 import { getRequirementWindow } from "./requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "./duty-generation";
 import { isFixedPlanningTeam, isTransitTeam } from "../teams";
-import { weekStartFor } from "../flight-date";
+import { weekStartFor, DAYS_ORDER } from "../flight-date";
 import { effectiveDeparture } from "../flight-operations";
+import { buildFatigueStatesEnteringDate } from "./fatigue-live-lookup";
+import { CandidateFatigueInput } from "./fatigue-planning";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, CandidateResult } from "../types";
 
 function timeToMinutesLocal(t: string): number {
@@ -227,6 +229,28 @@ export async function getCandidatesForRequirement(
     tasksAssignedThisScope.set(a.employee_id, (tasksAssignedThisScope.get(a.employee_id) ?? 0) + 1);
   }
 
+  // FATIGUE (2026-10-06 activation) -- gives Find Agent/Live Operations
+  // replacement ranking the SAME fatigueWeight dimension Stage 9 duty
+  // generation already uses, never a second fatigue model: each
+  // candidate's state ENTERING the target flight's day, derived through
+  // the existing continuity-seed + day-by-day ledger machinery (see
+  // fatigue-live-lookup.ts's own doc comment). A genuine no-op (empty map,
+  // undefined input below) whenever fatigue is disabled -- byte-identical
+  // to today's behavior in that case.
+  let fatigue: CandidateFatigueInput | undefined;
+  if (effectiveConfig.fatigue?.enabled) {
+    const statesByEmployee = await buildFatigueStatesEnteringDate(
+      supabase,
+      effectiveConfig.fatigue,
+      weekStart,
+      DAYS_ORDER,
+      targetFlight.flight_date,
+      employees as Employee[],
+      rosterRows
+    );
+    fatigue = { config: effectiveConfig.fatigue, statesByEmployee };
+  }
+
   const candidates = scoreCandidates(
     requirement.role,
     window,
@@ -235,7 +259,8 @@ export async function getCandidatesForRequirement(
     occupiedWindows,
     requiredAuthorization,
     new Map(),
-    tasksAssignedThisScope
+    tasksAssignedThisScope,
+    fatigue
   );
 
   const exclusionSummary =

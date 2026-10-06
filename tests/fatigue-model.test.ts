@@ -336,7 +336,9 @@ describe("transport burden — architecture only, inert by default, never availa
       .filter((f) => /from\s+["'][^"']*fatigue-(model|continuity|config|planning)["']/.test(readFileSync(join(planningDir, f), "utf8")))
       .sort();
     expect(importers).toEqual([
+      "candidate-lookup.ts", // 2026-10-06 fatigue activation: Find Agent/Live Ops replacement ranking — only when effectiveConfig.fatigue?.enabled, via fatigue-live-lookup.ts
       "duty-generation.ts", // forwards scoreCandidates' optional fatigue input only
+      "fatigue-live-lookup.ts", // 2026-10-06: the on-demand "state entering date X" orchestrator candidate-lookup.ts uses — itself gated on config.enabled (an early return, no computation otherwise)
       "generate-draft-plan.ts", // planningOptions.fatigue (omitted by every real caller)
       "roster-generation.ts", // Stage-6.5 top-up: optional TopUpFatigueOptions
       "shift-generation.ts", // Stage 6: optional fatigueContext (tier 4)
