@@ -528,6 +528,16 @@ export interface FlexibleRepairInput {
   fatigueActive?: boolean;
   rolesToConsider?: string[];
   budget?: number;
+  /**
+   * 2026-10-06 FIX: the same weekly OFF-day HARD rules (Config.minimum_off_
+   * days_per_planning_week, Config.normal_off_days_consecutive) that
+   * repairCoverageGaps already enforces for every OTHER generation-driven
+   * population (Profiling/Mesure, foreign-company teams) via
+   * breaksOffDayRules — now also enforced here for the flexible/General T1
+   * Pool population. Omitted (as every pre-existing direct caller/test
+   * does) = never checked, exactly the pre-fix behavior.
+   */
+  offDayRules?: RepairOffDayRules;
 }
 
 export interface FlexibleRepairResult {
@@ -637,6 +647,41 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
   const byGainThenShortest = <T extends { gain: number; dur: number; entree: string; code: string }>(a: T, b: T) =>
     b.gain - a.gain || a.dur - b.dur || (a.entree < b.entree ? -1 : a.entree > b.entree ? 1 : byId(a.code, b.code));
 
+  // Moved up from the OFF-RUN phase below (shared with GAP repair, see the
+  // 2026-10-06 fix note above breaksOffDayRules' call sites): the FINAL
+  // week pattern that actually matters for Config.minimum_off_days_per_
+  // planning_week / normal_off_days_consecutive is the one validation.ts
+  // checks against — Stage 6 + the roster top-up — never the raw,
+  // pre-top-up Stage-6-only pattern either phase otherwise reasons about.
+  const topUpCache = new Map<string, ReadonlyMap<string, string>>();
+  const fullPattern = (id: string, s: Record<string, GeneratedShiftAssignment[]>, useCache: boolean): WeekPattern => {
+    let adds = useCache ? topUpCache.get(id) : undefined;
+    if (!adds) {
+      adds = input.simulateTopUp(id, s);
+      if (useCache) topUpCache.set(id, adds);
+    }
+    return patternOf(id, s).map((code, j) => code ?? adds!.get(ctx.daysOrder[j]) ?? null);
+  };
+  /**
+   * 2026-10-06 FIX: neither repair phase may commit a move that turns a
+   * satisfied Config.minimum_off_days_per_planning_week /
+   * normal_off_days_consecutive outcome into a violated one for the
+   * employee whose day pattern the move actually changes — the same hard
+   * rule repairCoverageGaps' breaksOffDayRules already enforces for the
+   * Profiling/Mesure/foreign-company repair path. Before this fix, this
+   * function (the flexible/General-T1-Pool path) only checked
+   * `offRun(after) <= maxConsecutiveOffDays` (OFF-RUN phase) or nothing at
+   * all (GAP phase) — both blind to a move that SPLITS an already-legal
+   * single OFF block into two separate short runs (e.g. Thu+Fri off ->
+   * Thu off / Fri worked / some other day off), each individually under
+   * the max-run ceiling but together a genuine off_days_not_consecutive
+   * violation. Checked against the real FINAL pattern (fullPattern) so a
+   * move that only looks safe pre-top-up is still caught. No-op when the
+   * caller doesn't supply offDayRules (every existing direct test/caller).
+   */
+  const violatesOffDayRules = (id: string, beforeShifts: Record<string, GeneratedShiftAssignment[]>, afterShifts: Record<string, GeneratedShiftAssignment[]>): boolean =>
+    breaksOffDayRules(fullPattern(id, beforeShifts, true), fullPattern(id, afterShifts, false), input.offDayRules);
+
   // ---- Phase 1: GAP repair ------------------------------------------------
   for (let progress = true; progress && !exhausted; ) {
     progress = false;
@@ -686,7 +731,16 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
               const xEntry: GeneratedShiftAssignment = {
                 employeeId: x, dayOfWeek: dayU, shiftCode: codeX.code, coversRoles: replayU.claimedRoles[replayU.claimedRoles.length - 1], ...extraKeys(entry), hardCapRepairReason: explanation,
               };
-              shifts = withDays({ [dayD]: (shifts[dayD] ?? []).map((g) => (g.employeeId === x ? yEntry : g)), [dayU]: [...(shifts[dayU] ?? []), xEntry] });
+              const candidateShifts = withDays({ [dayD]: (shifts[dayD] ?? []).map((g) => (g.employeeId === x ? yEntry : g)), [dayU]: [...(shifts[dayU] ?? []), xEntry] });
+              // 2026-10-06 FIX: X now works u instead of d (their OFF/working
+              // days for the week change on both ends), and Y now works d
+              // instead of being OFF — neither may turn a legal OFF-day
+              // pattern into a violated one (see violatesOffDayRules' doc
+              // comment above Phase 1).
+              if (violatesOffDayRules(x, shifts, candidateShifts) || violatesOffDayRules(y, shifts, candidateShifts)) continue;
+              shifts = candidateShifts;
+              topUpCache.delete(x);
+              topUpCache.delete(y);
               changed = true;
               repairs.push({
                 population: "flexible_pool", team: "General T1 Pool", kind: "reallocate_for_gap", targetDay: dayU, reassignedDay: dayD, fromEmployeeId: x, toEmployeeId: y,
@@ -704,15 +758,7 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
   }
 
   // ---- Phase 2: OFF-RUN repair ---------------------------------------------
-  const topUpCache = new Map<string, ReadonlyMap<string, string>>();
-  const fullPattern = (id: string, s: Record<string, GeneratedShiftAssignment[]>, useCache: boolean): WeekPattern => {
-    let adds = useCache ? topUpCache.get(id) : undefined;
-    if (!adds) {
-      adds = input.simulateTopUp(id, s);
-      if (useCache) topUpCache.set(id, adds);
-    }
-    return patternOf(id, s).map((code, j) => code ?? adds!.get(ctx.daysOrder[j]) ?? null);
-  };
+  // topUpCache/fullPattern moved up before Phase 1 (shared by both phases now).
   const offRun = (p: WeekPattern) => maxConsecutiveOffCyclic(p.map((c) => ({ status: c ? ("working" as const) : ("off" as const) })));
   const workDays = (p: WeekPattern) => p.filter(Boolean).length;
   const offPhrase = (runBefore: number) => `avoiding a ${runBefore}-day OFF block (max ${input.maxConsecutiveOffDays} consecutive OFF days)`;
@@ -725,7 +771,17 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
     if (runBefore <= input.maxConsecutiveOffDays) continue;
     const base = patternOf(x);
     const cap = flexExclusions.find((e) => e.employeeId === x)?.reason ?? null;
-    const xOk = (after: WeekPattern) => offRun(after) <= input.maxConsecutiveOffDays && workDays(after) >= workDays(xFull) && hardCapBreach(ctx, x, after) === null;
+    // 2026-10-06 FIX: offRun(after) <= max alone only bounds the LONGEST
+    // run — it says nothing about whether X's OFF days still form ONE
+    // block, so it previously let this phase "fix" an over-long OFF run by
+    // fragmenting it into several short, separated ones (each individually
+    // under the ceiling) instead of genuinely shortening it. breaksOffDayRules
+    // (the same check repairCoverageGaps already uses) closes that gap.
+    const xOk = (after: WeekPattern) =>
+      offRun(after) <= input.maxConsecutiveOffDays &&
+      workDays(after) >= workDays(xFull) &&
+      hardCapBreach(ctx, x, after) === null &&
+      !breaksOffDayRules(xFull, after, input.offDayRules);
     let fixed = false;
 
     // (a) SHIFT OWN DAY: d -> u, nobody else touched.
@@ -784,7 +840,13 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
         if (!xOk(xAfter)) continue;
         const yBefore = fullPattern(y, shifts, true);
         const yAfter = fullPattern(y, candidate, false);
-        if (offRun(yAfter) > Math.max(input.maxConsecutiveOffDays, offRun(yBefore)) || workDays(yAfter) < workDays(yBefore) || hardCapBreach(ctx, y, yAfter) !== null) continue;
+        if (
+          offRun(yAfter) > Math.max(input.maxConsecutiveOffDays, offRun(yBefore)) ||
+          workDays(yAfter) < workDays(yBefore) ||
+          hardCapBreach(ctx, y, yAfter) !== null ||
+          breaksOffDayRules(yBefore, yAfter, input.offDayRules) // Y loses an OFF day to cover X's old shift — same split risk as X above
+        )
+          continue;
         const gained = ctx.daysOrder.filter((_, j) => xAfter[j] && !xFull[j]);
         const explanation = `${dayD} reassigned from ${nameOf(x)} to ${nameOf(y)} (${entry.shiftCode}) so ${nameOf(x)} could work ${gained.length > 0 ? gained.join(", ") : "another day"} instead within ${capPhrase(cap, ctx.caps)}, ${offPhrase(runBefore)}.`;
         shifts = withDays({ [dayD]: newD.map((g) => (g.employeeId === y ? { ...entry, employeeId: y, hardCapRepairReason: explanation } : g)) });

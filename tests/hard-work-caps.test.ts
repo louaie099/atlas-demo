@@ -20,7 +20,8 @@ import { deriveFallbackBoundaryContext, previousWeekStart } from "../lib/plannin
 import { isGenerationDrivenPopulation } from "../lib/planning/workforce-pools";
 import { evaluateAverageWorkingHours } from "../lib/planning/average-hours";
 import { auditAverageWeeklyHoursFeasibility, checkRestBetweenDays, checkRosterTargetShortfall } from "../lib/planning/validation";
-import { repairSlotPopulationGaps, HARD_CAP_REPAIR_ATTEMPT_BUDGET, SlotRepairInput } from "../lib/planning/hard-cap-repair";
+import { repairSlotPopulationGaps, repairFlexiblePoolWeek, HARD_CAP_REPAIR_ATTEMPT_BUDGET, SlotRepairInput, FlexibleRepairInput } from "../lib/planning/hard-cap-repair";
+import { maxConsecutiveOffCyclic } from "../lib/planning/consecutive-off";
 import { resolveDefaultLaborRules } from "../lib/labor-rules";
 import { usesFixedCycleRotation } from "../lib/teams";
 import { CONFIGURED_COMPANIES } from "../lib/company-config";
@@ -1073,4 +1074,110 @@ describe("PHASE 2, part B — no-op, determinism, fixed-cycle exemption, bounded
     expect(full.assignmentsByDay).toBe(dflt.assignmentsByDay);
     expect(Date.now() - t0).toBeLessThan(20000);
   });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("repairFlexiblePoolWeek — OFF/OFF regression (2026-10-06): a hard-cap OFF-run repair must never fragment a legal single OFF block", () => {
+  // Real shape reported in Live Operations: an employee ends up with
+  // SEPARATED single-day OFF days (e.g. Thursday OFF, Friday/Saturday
+  // WORK, Sunday OFF) instead of one consecutive OFF block, even though
+  // Config.normal_off_days_consecutive is hard-on. validation.ts correctly
+  // flagged it ("Weekly issue"), proving the gap was in generation/repair,
+  // not validation.
+  //
+  // Root cause, traced to this exact function: the OFF-RUN repair phase's
+  // legality check (`xOk`, now fixed) only verified the LONGEST OFF run
+  // stayed <= max_consecutive_off_days. It never checked whether the
+  // employee's OFF days still formed ONE block — so when an employee's OFF
+  // run was over-long (e.g. 3 days, forced by an earlier hard-cap
+  // exclusion), the repair could "fix" it by moving ONE of their other
+  // work days onto a day in the MIDDLE of that run, satisfying the ceiling
+  // while splitting the run into two or three separated single-day OFFs.
+  // repairCoverageGaps (the Profiling/Mesure/foreign-company repair path)
+  // already guarded against exactly this with breaksOffDayRules; this
+  // flexible-pool path (General T1 Pool) simply never called it.
+  //
+  // Scenario: X works Mon/Tue/Sat/Sun (NR01) and is OFF Wed/Thu/Fri — a
+  // real, honest 3-day OFF run (over the 2-day ceiling), the trigger this
+  // phase exists for. No other employee exists, so HAND-OFF can never
+  // apply (no standIn), isolating SHIFT OWN DAY. Every legal (rest-wise)
+  // SHIFT OWN DAY move in this shape either still exceeds the ceiling or
+  // would fragment the block — so the correct outcome is NO repair at all
+  // (the honest over-long run persists for validation to report), never a
+  // fragmented "fix".
+  const ctx = {
+    daysOrder: DAYS,
+    weekStart: WEEK,
+    minimumRestHours: 15,
+    caps: { maxConsecutiveWorkDays: 6 }, // loose — isolates the OFF-day-rule check from the work-day-streak cap
+    incomingStreakByEmployee: new Map<string, number>(),
+    priorWeekBoundaryContext: new Map(),
+  };
+  const offDayRules = { minimumOffDays: 2, consecutive: true };
+  const workedDays = ["Monday", "Tuesday", "Saturday", "Sunday"];
+  const stage6ShiftsByDay = Object.fromEntries(
+    DAYS.map((d) => [d, workedDays.includes(d) ? [{ employeeId: "x", dayOfWeek: d, shiftCode: "NR01", coversRoles: [] }] : []])
+  );
+  const exclusions: FlexibleRepairInput["exclusions"] = [{ employeeId: "x", dayOfWeek: "Wednesday", population: "flexible_pool", reason: "consecutive_work_days" }];
+  const employees = [makeEmployee({ id: "x", name: "X", skills: ["Gate"] })];
+
+  function offRunAndSplit(pattern: ("working" | "off")[]) {
+    const run = maxConsecutiveOffCyclic(pattern.map((status) => ({ status })));
+    const offCount = pattern.filter((s) => s === "off").length;
+    return { run, isOneBlock: offCount === 0 || run === offCount };
+  }
+
+  it("never fragments the OFF block: with the fix, no repair is applied rather than a split one (the pre-fix bug would have split it)", () => {
+    const input: FlexibleRepairInput = {
+      ctx,
+      employees,
+      demandByDay: {}, // no demand at all -- isolates Phase 2 (OFF-run) from Phase 1 (gap repair)
+      stage6ShiftsByDay,
+      exclusions,
+      maxConsecutiveOffDays: 2,
+      simulateTopUp: () => new Map(), // nothing added by the top-up in this minimal scenario
+      offDayRules,
+    };
+    const result = repairFlexiblePoolWeek(input);
+
+    const finalPattern = DAYS.map((d) => ((result.stage6ShiftsByDay[d] ?? []).some((g) => g.employeeId === "x") ? "working" : "off")) as ("working" | "off")[];
+    const { isOneBlock } = offRunAndSplit(finalPattern);
+
+    // The fix's own contract: never leave X with a fragmented OFF pattern.
+    expect(isOneBlock).toBe(true);
+    // No legal non-fragmenting SHIFT-OWN-DAY move exists in this exact
+    // shape (every alternative either still exceeds the 2-day ceiling or
+    // splits the block) and there is no second employee for HAND-OFF, so
+    // the honest outcome is: no repair applied at all.
+    expect(result.repairs).toEqual([]);
+  });
+
+  it("WITHOUT the off-day-rules guard (the pre-fix behavior), the same scenario really did fragment the block — confirming this is a genuine regression test, not a vacuous one", () => {
+    const input: FlexibleRepairInput = {
+      ctx,
+      employees,
+      demandByDay: {},
+      stage6ShiftsByDay,
+      exclusions,
+      maxConsecutiveOffDays: 2,
+      simulateTopUp: () => new Map(),
+      // offDayRules omitted entirely -- reproduces the exact pre-2026-10-06 behavior
+    };
+    const result = repairFlexiblePoolWeek(input);
+
+    const finalPattern = DAYS.map((d) => ((result.stage6ShiftsByDay[d] ?? []).some((g) => g.employeeId === "x") ? "working" : "off")) as ("working" | "off")[];
+    const { isOneBlock } = offRunAndSplit(finalPattern);
+
+    expect(result.repairs.length).toBeGreaterThan(0); // it did "fix" something...
+    expect(isOneBlock).toBe(false); // ...by fragmenting the OFF block, the exact live bug reported
+  });
+
+  // The guard isn't a blanket block on repair: this file's own "flexible
+  // pool (Stage 6): the same streak-ordering gap" test (PHASE 2, part B,
+  // above) exercises Phase 1 (GAP repair) with this exact guard active and
+  // still gets a full, legal hand-off ("Monday is handed to the fresh
+  // ACEs so the tired ones cover Tuesday") — proving the new check rejects
+  // only the specific off-day-rule-breaking moves it targets, not
+  // repair in general.
 });

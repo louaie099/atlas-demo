@@ -757,6 +757,12 @@ export function generateDraftWeeklyPlan(
       simulateTopUp: (employeeId, shifts) => computeFlexibleEmployeeTopUp(employeeId, shifts, topUpContext).additions,
       dedicatedRoleCovered,
       fatigueActive: Boolean(fatigueConfig),
+      // 2026-10-06 FIX: same two weekly OFF-day hard rules already passed
+      // to the Profiling/Mesure/foreign-company repair path below (see
+      // specializedOffDayRules) — previously omitted here, which let this
+      // repair pass legally fragment a General T1 Pool employee's single
+      // OFF block into a separated pattern while "fixing" an over-long run.
+      offDayRules: { minimumOffDays: config.minimum_off_days_per_planning_week, consecutive: config.normal_off_days_consecutive },
     });
     repairedDemandDrivenShiftsByDay = repair.stage6ShiftsByDay;
     hardCapRepairs.push(...repair.repairs);
