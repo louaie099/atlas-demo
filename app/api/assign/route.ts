@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates } from "@/lib/scoring";
-import { weekStartFor } from "@/lib/flight-date";
+import { weekStartFor, flightDateFor, DAYS_ORDER } from "@/lib/flight-date";
 import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
+import { previousWeekStart } from "@/lib/planning/rotation-context";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { ROLE_HEADER, getRoleFromHeader, canManageOperations } from "@/lib/roles";
@@ -138,11 +139,29 @@ export async function POST(req: Request) {
     .select("*")
     .eq("plan_id", plan.id)
     .eq("employee_id", employeeId);
+
+  // OVERNIGHT CARRYOVER (2026-10-06 activation) — same re-validation
+  // Find Agent's own candidate list already applies (see
+  // lib/planning/candidate-lookup.ts): an employee whose overnight shift
+  // started the day before this flight can still be a genuine candidate,
+  // even with no roster row of their own dated to this flight's day.
+  const targetDayIndex = DAYS_ORDER.indexOf(targetFlight.day_of_week);
+  const previousDayOfWeek = DAYS_ORDER[(targetDayIndex + DAYS_ORDER.length - 1) % DAYS_ORDER.length];
+  const isWeekStart = targetDayIndex === 0;
+  const previousDate = isWeekStart ? flightDateFor(previousWeekStart(weekStart), previousDayOfWeek) : flightDateFor(weekStart, previousDayOfWeek);
+  const previousPlanId = isWeekStart ? planIdForWeek(previousWeekStart(weekStart)) : plan.id;
+  const { data: previousRosterRows } = await supabase
+    .from("weekly_plan_roster_entries")
+    .select("*")
+    .eq("plan_id", previousPlanId)
+    .eq("employee_id", employeeId);
+
   const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(
     [employee as Employee],
     (rosterRows ?? []) as WeeklyPlanRosterEntry[],
     targetFlight.day_of_week,
-    targetFlight.flight_date
+    targetFlight.flight_date,
+    { dayOfWeek: previousDayOfWeek, date: previousDate, rosterEntries: (previousRosterRows ?? []) as WeeklyPlanRosterEntry[] }
   );
 
   if (dayEffectivePool.length === 0) {

@@ -233,6 +233,16 @@ function runShiftGenerationPass(
     const date = flightDateFor(weekStart, day);
     const nextDay = daysOrder[(dayIndex + 1) % daysOrder.length];
     const nextDayBaselineShift = getNextDayBaseline(dayIndex, nextDay);
+    // OVERNIGHT DEMAND LOOKAHEAD (2026-10-06 activation) — only within this
+    // SAME generation window: `nextDay` wraps cyclically to daysOrder[0] on
+    // the last day, which is a DIFFERENT (same-week Monday) day, not
+    // tomorrow — passing its demand would make Sunday react to totally
+    // unrelated demand six days away. Next week's actual Monday demand
+    // isn't available yet inside a single-week generation call; the last
+    // day of a week genuinely has no lookahead, a documented, bounded
+    // limitation (see generateFlexiblePoolShifts' own doc comment) rather
+    // than a silent gap.
+    const nextDayDemand = dayIndex < daysOrder.length - 1 ? demandByDay[nextDay] : undefined;
 
     const generatedShifts = generateFlexiblePoolShifts(
       day,
@@ -247,7 +257,8 @@ function runShiftGenerationPass(
       t1DemandByBucketByDay?.[day],
       offWindowContextFor(dayIndex),
       fatigueLedger ? stage6FatigueContextFromLedger(fatigueLedger) : undefined,
-      hardCaps ? { caps: hardCaps.caps, streakEnteringDay, exclusionsOut: hardCapExclusions } : undefined
+      hardCaps ? { caps: hardCaps.caps, streakEnteringDay, exclusionsOut: hardCapExclusions } : undefined,
+      nextDayDemand
     );
     generatedShiftsByDay[day] = generatedShifts;
     if (hardCaps) {
@@ -971,6 +982,28 @@ export function generateDraftWeeklyPlan(
   const allUnfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] = [];
 
   for (const day of daysOrder) {
+    // OVERNIGHT CARRYOVER (2026-10-06 activation) — each employee's
+    // effective shift on the day immediately BEFORE `day`, so
+    // generateDutiesForDay can recognize someone still physically on an
+    // overnight shift (AP03/AP04/NT01/N8) that started yesterday and runs
+    // into today's early buckets, even though no shift of their OWN is
+    // dated to today. For `day === daysOrder[0]` (this window's Monday),
+    // "yesterday" is the prior WEEK's last day — `priorWeekBoundaryContext`
+    // already carries exactly that (the same continuity seed used for
+    // rest above), so Sunday -> Monday is covered by the same existing
+    // machinery, not a new one. For every other day, "yesterday" is built
+    // fresh from the FINAL same-week roster already resolved above.
+    const dayIndex = daysOrder.indexOf(day);
+    const previousDayShift: PriorDayShiftMap =
+      dayIndex === 0
+        ? priorWeekBoundaryContext
+        : new Map(
+            employeesForPipeline.map((e) => [
+              e.id,
+              effectiveShiftForDay(e, daysOrder[dayIndex - 1], finalGeneratedShiftsByDay[daysOrder[dayIndex - 1]] ?? [], flightDateFor(weekStart, daysOrder[dayIndex - 1])),
+            ])
+          );
+
     const { duties, unfilled } = generateDutiesForDay(
       day,
       requirements,
@@ -992,7 +1025,8 @@ export function generateDraftWeeklyPlan(
       // and self-balances across the day's own loop; nothing from a prior
       // day needs to be threaded in here.
       new Map<string, number>(),
-      fatigueConfig ? ({ config: fatigueConfig, statesByEmployee: fatigueStatesEnteringDay[day] } satisfies CandidateFatigueInput) : undefined
+      fatigueConfig ? ({ config: fatigueConfig, statesByEmployee: fatigueStatesEnteringDay[day] } satisfies CandidateFatigueInput) : undefined,
+      previousDayShift
     );
     dutiesByDay[day] = duties;
     allUnfilled.push(...unfilled);

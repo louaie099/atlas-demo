@@ -10,6 +10,7 @@ import { Stage6OffWindowContext, startForcesPreviousDayOff, endForcesNextDayOff,
 import { Stage6FatigueContext, FatigueCandidateProjection, projectFatigueForShift, explainFatigueChoice } from "./fatigue-planning";
 import { unknownFatigueState } from "./fatigue-model";
 import { HardWorkCaps, HardCapExclusion, wouldExceedConsecutiveDayCap } from "./hard-work-caps";
+import { reachOfDayMinutes, shiftDurationMinutes } from "../shift-interval";
 
 /**
  * HARD WORK CAPS for one Stage-6 day (2026-09-25, hard-constraints
@@ -152,9 +153,27 @@ const BUCKETS_PER_DAY = (24 * 60) / BUCKET_MINUTES;
  * per employee up front, independent of iteration order — rest depends
  * only on that employee's own prior/next-day shift and the candidate
  * code's own entree, never on who else has already been picked.
- * Overnight-wrapping codes are excluded from this pool entirely (same
- * scope as the previous implementation and as
- * selectCompatibleShiftCodes) — General T1 has never used them.
+ *
+ * OVERNIGHT CODES (2026-10-06 activation): AP03, AP04, NT01 and N8 are
+ * real, legal candidates here, exactly like any other catalog code —
+ * they used to be excluded outright (`sortie < entree` was wrongly read
+ * as "unsupported" rather than "wraps past midnight"), which left a real,
+ * nightly dead zone (~23:15-03:45 in the current regime) with zero
+ * generatable capacity for any population. `bucketsCoveredBy` below
+ * credits an overnight code with covering today's own buckets through
+ * end-of-day (lib/shift-interval.ts's reachOfDayMinutes), and — only when
+ * the caller supplies `nextDayDemand` — the following day's own early
+ * buckets too, so a genuinely unmet early-morning requirement on day D+1
+ * (e.g. a 00:01-01:01 Gate/Boarding window no non-overnight code can ever
+ * reach) is real, visible, scoreable coverage for TODAY's greedy, not an
+ * invisible tomorrow-only concern. This is demand-driven, not a blanket
+ * enablement: `if (score === 0) continue` below still means an overnight
+ * code that covers nothing genuinely unmet is never picked over a
+ * cheaper/shorter code, for the exact same reason any other
+ * doesn't-help-today code never is. No cross-WEEK lookahead exists (the
+ * last day of a week has no visibility into next week's Monday) — a
+ * documented, bounded limitation, not a silent gap: see this function's
+ * caller in generate-draft-plan.ts.
  *
  * Cross-day rest is part of shift SELECTION, not just after-the-fact
  * detection: `priorDayShift` carries each employee's effective shift on
@@ -361,7 +380,18 @@ export function generateFlexiblePoolShifts(
   // 15h rest rule below (legalCodesByEmployee), never a separate pass.
   // Omitted = no cap filtering (direct unit callers); the real pipeline
   // (generate-draft-plan.ts) always supplies it.
-  hardCaps?: FlexiblePoolHardCaps
+  hardCaps?: FlexiblePoolHardCaps,
+  // OVERNIGHT DEMAND LOOKAHEAD (2026-10-06 activation) — the IMMEDIATELY
+  // FOLLOWING day's own aggregated demand (same shape as `demand`),
+  // needed so an overnight code picked TODAY can be credited for
+  // genuinely covering tomorrow's early-morning buckets no non-overnight
+  // code could ever reach (see this function's own doc comment). Optional
+  // and defaulted to "no lookahead": every existing caller/test that omits
+  // it keeps the exact prior behavior for same-day coverage, and an
+  // overnight code can still be picked purely for TODAY's own late
+  // buckets without this. The caller omits it for the last day of a
+  // generation window (no next week's demand is available yet).
+  nextDayDemand?: DailyDemand
 ): GeneratedShiftAssignment[] {
   // Every ACTIVE flexible-pool employee is a candidate today — no more
   // "already off per static weekly_shifts" pre-filter. Availability is
@@ -375,14 +405,28 @@ export function generateFlexiblePoolShifts(
   // separate generation, see specialized-team-generation.ts; this
   // function is never handed their demand, but the filter is kept
   // explicit and cheap rather than assumed from the caller).
-  const remaining: Map<string, number>[] = demand.buckets.map((bucket) => {
+  function roleDemandMap(bucket: { demandByRole: Record<string, number> } | undefined): Map<string, number> {
     const m = new Map<string, number>();
+    if (!bucket) return m;
     for (const role of rolesToConsider) {
       const need = bucket.demandByRole[role] ?? 0;
       if (need > 0) m.set(role, need);
     }
     return m;
-  });
+  }
+
+  const remaining: Map<string, number>[] = demand.buckets.map(roleDemandMap);
+
+  // OVERNIGHT DEMAND LOOKAHEAD (2026-10-06 activation) — appended AFTER
+  // today's own BUCKETS_PER_DAY entries, so `remaining[BUCKETS_PER_DAY + j]`
+  // is tomorrow's bucket `j`. Only built when the caller supplied
+  // `nextDayDemand`, and only as far as the longest overnight code in this
+  // day's own catalog could ever reach — never the whole next day, which
+  // no overnight code needs and would just be extra unused bookkeeping.
+  // allCodes (below) resolves which codes are overnight; declared with
+  // `let` here so it can be read after that point without a second catalog
+  // pass.
+  let tailBucketCount = 0;
 
   // STAGE-6 T1 AGGREGATE DEMAND BIAS's own mutable working copy — a
   // SEPARATE remaining-demand track from `remaining` above (which is real,
@@ -400,11 +444,22 @@ export function generateFlexiblePoolShifts(
   // inert unless fatigueContext is enabled) > lexicographic fairness
   // tie-breaks). See stage6CandidateScore below.
 
-  // Every catalog shift code, precomputed once (non-overnight only — see
-  // doc comment above).
-  const allCodes = Object.entries(shiftCatalogForDate(date))
-    .map(([code, { entree, sortie }]) => ({ code, entreeMin: timeToMinutes(entree), sortieMin: timeToMinutes(sortie) }))
-    .filter((c) => c.sortieMin > c.entreeMin);
+  // Every catalog shift code, precomputed once — overnight-wrapping codes
+  // (AP03, AP04, NT01, N8) included, see this function's own doc comment
+  // above on the 2026-10-06 activation.
+  const allCodes = Object.entries(shiftCatalogForDate(date)).map(([code, { entree, sortie }]) => ({
+    code,
+    entreeMin: timeToMinutes(entree),
+    sortieMin: timeToMinutes(sortie),
+  }));
+
+  if (nextDayDemand) {
+    const overnightSortieMinutes = allCodes.filter((c) => c.sortieMin <= c.entreeMin).map((c) => c.sortieMin);
+    if (overnightSortieMinutes.length > 0) {
+      tailBucketCount = Math.ceil(Math.max(...overnightSortieMinutes) / BUCKET_MINUTES);
+      for (let j = 0; j < tailBucketCount; j++) remaining.push(roleDemandMap(nextDayDemand.buckets[j]));
+    }
+  }
 
   // Tier-3 structural foresight, per CODE (employee-independent — depends
   // only on the neighbouring days' real catalogs and the rest floor): does
@@ -440,12 +495,30 @@ export function generateFlexiblePoolShifts(
   // only the end condition changed, from `bucketStart < sortieMin`
   // (any overlap) to `sortieMin >= bucketEnd` (present through the
   // bucket's full close).
+  //
+  // OVERNIGHT EXTENSION (2026-10-06): for a code that wraps past midnight,
+  // "today's" reach is end-of-day (lib/shift-interval.ts's
+  // reachOfDayMinutes), using the exact same asymmetric rule above --
+  // unchanged for every non-overnight code (reachOfDayMinutes returns
+  // sortieMin itself then). When `tailBucketCount > 0` (a next-day lookahead
+  // was supplied), an overnight code ALSO covers virtual buckets
+  // `BUCKETS_PER_DAY + j` (tomorrow's bucket j): the shift has already
+  // started before tomorrow's 00:00, so only the same end-of-bucket test
+  // applies, never a start-side test.
   function bucketsCoveredBy(entreeMin: number, sortieMin: number): number[] {
     const covered: number[] = [];
+    const overnight = sortieMin <= entreeMin;
+    const todayReach = reachOfDayMinutes(entreeMin, sortieMin);
     for (let i = 0; i < BUCKETS_PER_DAY; i++) {
       const bucketStart = i * BUCKET_MINUTES;
       const bucketEnd = bucketStart + BUCKET_MINUTES;
-      if (entreeMin < bucketEnd && sortieMin >= bucketEnd) covered.push(i);
+      if (entreeMin < bucketEnd && todayReach >= bucketEnd) covered.push(i);
+    }
+    if (overnight) {
+      for (let j = 0; j < tailBucketCount; j++) {
+        const bucketEnd = (j + 1) * BUCKET_MINUTES;
+        if (sortieMin >= bucketEnd) covered.push(BUCKETS_PER_DAY + j);
+      }
     }
     return covered;
   }
@@ -670,8 +743,32 @@ export function generateFlexiblePoolShifts(
   ): boolean {
     if (score !== current.score) return score > current.score;
 
-    const durationA = candidate.sortieMin - candidate.entreeMin;
-    const durationB = current.sortieMin - current.entreeMin;
+    // 2026-10-06: when tied on real coverage (score), prefer a NON-overnight
+    // code over an overnight one before ever comparing raw duration. Without
+    // this, the plain hour-count tie-break below gets fooled by overnight
+    // codes: e.g. AP03 (17:45-01:15, 7.5h) is numerically "shorter" than
+    // AP01 (13:45-22:45, 9h), so on an ordinary evening with no real demand
+    // after 22:45 -- where both cover exactly the same hard buckets, tying
+    // the score -- the old duration-only tie-break would pick AP03 anyway,
+    // pushing the employee past midnight and consuming their next day's
+    // rest window for ZERO additional coverage. That is exactly the
+    // "overnight codes technically allowed but selected for the wrong
+    // reason" failure mode the brief calls out: an overnight code must only
+    // ever win by covering MORE real demand (a strictly higher score,
+    // handled above), never merely by looking arithmetically shorter once
+    // coverage already ties. This tier is a no-op whenever both candidates
+    // are overnight, or both are not -- it only ever breaks an
+    // overnight-vs-non-overnight tie, and always toward non-overnight.
+    const overnightA = candidate.sortieMin <= candidate.entreeMin;
+    const overnightB = current.sortieMin <= current.entreeMin;
+    if (overnightA !== overnightB) return !overnightA;
+
+    // 2026-10-06: wrap-aware duration (lib/shift-interval.ts) -- plain
+    // `sortieMin - entreeMin` goes NEGATIVE for an overnight code, which
+    // would make every overnight code look like the shortest possible
+    // shift in this tie-break regardless of its real ~8-13h length.
+    const durationA = shiftDurationMinutes(candidate.entreeMin, candidate.sortieMin);
+    const durationB = shiftDurationMinutes(current.entreeMin, current.sortieMin);
     if (durationA !== durationB) return durationA < durationB; // shortest shift that achieves the same coverage
 
     const hoursA = hoursSoFarThisWeek.get(employee.id) ?? 0;
@@ -730,24 +827,31 @@ export function replayStage6HardCoverage(
       const entreeMin = timeToMinutes(times.entree);
       const sortieMin = timeToMinutes(times.sortie);
       const skills = skillsByEmployee.get(a.employeeId) ?? [];
-      if (sortieMin > entreeMin) {
-        for (let i = 0; i < remaining.length && i < BUCKETS_PER_DAY; i++) {
-          const bucketEnd = (i + 1) * BUCKET_MINUTES;
-          if (!(entreeMin < bucketEnd && sortieMin >= bucketEnd)) continue;
-          let pickedRole: string | null = null;
-          let pickedRemaining = Number.POSITIVE_INFINITY;
-          for (const role of rolesToConsider) {
-            if (!skills.includes(role)) continue;
-            const r = remaining[i].get(role) ?? 0;
-            if (r > 0 && r < pickedRemaining) {
-              pickedRole = role;
-              pickedRemaining = r;
-            }
+      // 2026-10-06: an overnight code (AP03/AP04/NT01/N8) is a real
+      // assignment here too, not skipped -- it covers today's own buckets
+      // through end-of-day (reachOfDayMinutes), the same same-day-only
+      // crediting generateFlexiblePoolShifts' bucketsCoveredBy uses when it
+      // has no next-day lookahead. This replay has no next-day demand
+      // context (hard-cap-repair.ts only re-examines a single day at a
+      // time), so it deliberately does not credit a tomorrow tail either --
+      // same bounded scope as the main greedy without a lookahead supplied.
+      const todayReach = reachOfDayMinutes(entreeMin, sortieMin);
+      for (let i = 0; i < remaining.length && i < BUCKETS_PER_DAY; i++) {
+        const bucketEnd = (i + 1) * BUCKET_MINUTES;
+        if (!(entreeMin < bucketEnd && todayReach >= bucketEnd)) continue;
+        let pickedRole: string | null = null;
+        let pickedRemaining = Number.POSITIVE_INFINITY;
+        for (const role of rolesToConsider) {
+          if (!skills.includes(role)) continue;
+          const r = remaining[i].get(role) ?? 0;
+          if (r > 0 && r < pickedRemaining) {
+            pickedRole = role;
+            pickedRemaining = r;
           }
-          if (pickedRole) {
-            remaining[i].set(pickedRole, pickedRemaining - 1);
-            claimed.add(pickedRole);
-          }
+        }
+        if (pickedRole) {
+          remaining[i].set(pickedRole, pickedRemaining - 1);
+          claimed.add(pickedRole);
         }
       }
     }

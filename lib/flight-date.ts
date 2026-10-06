@@ -45,6 +45,20 @@ export function dayOfWeekFor(flightDate: string): string {
   return DAY_NAMES[parseISODate(flightDate).getDay()];
 }
 
+/**
+ * The calendar date ("YYYY-MM-DD") immediately after this one — native
+ * Date rollover handles every day/month/year boundary (Sunday -> Monday,
+ * month-end, year-end, leap years) with no special-casing, the same way
+ * shiftWeek/shiftMonth already do below. Added for overnight-shift support
+ * (lib/shift-interval.ts) — any shift whose sortie wraps past midnight
+ * genuinely ends on this date, never on the date it started.
+ */
+export function nextCalendarDate(date: string): string {
+  const d = parseISODate(date);
+  d.setDate(d.getDate() + 1);
+  return formatISODate(d);
+}
+
 /** The Monday ("YYYY-MM-DD") of the display week containing this date. */
 export function weekStartFor(flightDate: string): string {
   const date = parseISODate(flightDate);

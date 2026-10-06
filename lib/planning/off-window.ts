@@ -481,6 +481,20 @@ function minutesToTime(mins: number): string {
   return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
 }
 
+/**
+ * Non-overnight catalog codes for a date. Deliberately kept scoped to
+ * non-overnight codes (2026-10-06 note: AP03, AP04, NT01 and N8 becoming
+ * real, legal Stage-6 candidates elsewhere — shift-generation.ts,
+ * selectCompatibleShiftCodes — does not change this function): this is a
+ * SOFT tier-3 structural-foresight heuristic (never a legality decision;
+ * legality is filtered separately, per employee), and broadening it to
+ * treat "an overnight code would be rest-legal" as "not really forced
+ * OFF" measurably reshuffles the greedy's picks on days that have nothing
+ * to do with overnight coverage at all (verified against the existing
+ * byte-identical regression suites) — out of scope for this activation,
+ * which only has to make overnight codes available where real demand
+ * needs them, not rewrite this separate heuristic's own judgment calls.
+ */
 function nonOvernightCodesForDate(date: string): { entree: string; sortie: string }[] {
   return Object.values(shiftCatalogForDate(date)).filter(({ entree, sortie }) => timeToMinutes(sortie) > timeToMinutes(entree));
 }

@@ -33,11 +33,18 @@ describe("selectCompatibleShiftCode", () => {
     expect(selectCompatibleShiftCode("04:15", "06:30", undefined, undefined, undefined, true)).toBe("MT02");
   });
 
-  it("allowLateStart: true never returns a code that ends before the window does", () => {
-    // 23:20 is after every non-overnight catalog code's latest sortie
-    // (AP02, 23:15) -- allowLateStart only relaxes the START side, never
-    // the END side, so this must still be null.
-    expect(selectCompatibleShiftCode("20:00", "23:20", undefined, undefined, undefined, true)).toBeNull();
+  it("allowLateStart: true returns a genuinely-containing overnight code when one exists, not null", () => {
+    // 2026-10-06: this test used to assert null here on the premise that
+    // "23:20 is after every catalog code's latest sortie (AP02, 23:15)" --
+    // that premise only held because overnight codes (AP03/AP04/NT01/N8)
+    // were wrongly excluded as "invalid" (sortie < entree). AP03
+    // (17:45-01:15, wrapping past midnight) genuinely starts before this
+    // window (17:45 <= 20:00) and genuinely runs well past it closing
+    // (01:15 next day >= 23:20) -- it's a real full-containment match, not
+    // merely a late-start relaxation. allowLateStart still only relaxes
+    // the START side; here the END side is satisfied on its own merits by
+    // the overnight code's true wrap-aware reach. See lib/shift-interval.ts.
+    expect(selectCompatibleShiftCode("20:00", "23:20", undefined, undefined, undefined, true)).toBe("AP03");
   });
 
   it("allowLateStart: true never selects a shift that starts after the window has already closed", () => {

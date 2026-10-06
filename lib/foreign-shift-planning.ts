@@ -1,6 +1,7 @@
 import { Employee, Flight, StaffingRequirement } from "./types";
 import { shiftCatalogForDate, LEGACY_BASELINE_DATE } from "./shift-templates";
 import { wouldExceedConsecutiveDayCap } from "./planning/hard-work-caps";
+import { reachOfDayMinutes, shiftDurationMinutes } from "./shift-interval";
 
 /**
  * HARD WORK CAPS for ONE specific employee (2026-09-25, hard-constraints
@@ -68,9 +69,18 @@ function minutesToTime(mins: number): string {
  * makes "Gulf Air at 09:00 → MT02" fall out of the general rule rather
  * than being a special case for Gulf Air.
  *
- * Deliberately does not handle shifts or windows that cross midnight —
- * a documented limitation for overnight company flights, not silently
- * guessed. Returns null (never a fabricated shift) if no catalog code is
+ * Overnight-wrapping catalog codes (AP03, AP04, NT01, N8) are real
+ * candidates here (2026-10-06 activation) — matched against the SAME-DAY
+ * window the same way any other code is, using
+ * lib/shift-interval.ts's reachOfDayMinutes so a shift that keeps running
+ * past midnight is correctly treated as reaching all the way to the end
+ * of `date`, never excluded just because its sortie clock-time is
+ * numerically earlier than its entree. What remains a real, documented
+ * limitation is the WINDOW itself: `windowStart`/`windowEnd` are always
+ * resolved for a single calendar day (demand-aggregation.ts's per-day
+ * buckets, a company's own protected window) and this function does not
+ * itself handle a window that would need to span two calendar days.
+ * Returns null (never a fabricated shift) if no catalog code is
  * compatible.
  *
  * Optional cross-day rest awareness: when `adjacentShiftStart`/
@@ -168,10 +178,10 @@ export function selectCompatibleShiftCodes(
       entreeMin: timeToMinutes(entree),
       sortieMin: timeToMinutes(sortie),
     }))
-    .filter((c) => c.sortieMin > c.entreeMin) // exclude overnight-wrapping codes from this matcher
     .filter(
       (c) =>
-        (allowLateStart ? c.entreeMin <= windowEndMin : c.entreeMin <= windowStartMin) && c.sortieMin >= windowEndMin
+        (allowLateStart ? c.entreeMin <= windowEndMin : c.entreeMin <= windowStartMin) &&
+        reachOfDayMinutes(c.entreeMin, c.sortieMin) >= windowEndMin
     );
 
   if (adjacentShiftStart != null && adjacentShiftEnd != null && minimumRestHours != null) {
@@ -188,8 +198,32 @@ export function selectCompatibleShiftCodes(
     const lossA = Math.max(0, a.entreeMin - windowStartMin);
     const lossB = Math.max(0, b.entreeMin - windowStartMin);
     if (lossA !== lossB) return lossA - lossB;
-    const durationA = a.sortieMin - a.entreeMin;
-    const durationB = b.sortieMin - b.entreeMin;
+
+    // 2026-10-06: prefer a NON-overnight code over an overnight one before
+    // ever comparing duration, when both equally satisfy the window (tied
+    // on start-side loss). Without this, an overnight code can win this
+    // tie-break for the WRONG reason: AP03 (17:45-01:15, 7.5h) is
+    // numerically the shortest catalog entry, so the ascending branch would
+    // always prefer it over a same-fit daytime code; NT01 (17:45-06:30,
+    // 12.75h) is numerically the LONGEST catalog entry, so the
+    // preferExtended descending branch would always prefer it — in both
+    // cases regardless of whether the window genuinely needs anyone past
+    // midnight. That would make an overnight code the default pick for
+    // every tied foreign/specialized-team window, not a demand-driven one.
+    // An overnight code should only ever win here when it is the ONLY
+    // candidate that satisfies the window in the first place (the filter
+    // above already guarantees whatever remains here, including an
+    // overnight-only candidate set, genuinely covers it).
+    const overnightA = a.sortieMin <= a.entreeMin;
+    const overnightB = b.sortieMin <= b.entreeMin;
+    if (overnightA !== overnightB) return overnightA ? 1 : -1;
+
+    // 2026-10-06: wrap-aware duration — plain `sortieMin - entreeMin` is
+    // negative for an overnight code, which would make it look shortest
+    // (or, with preferExtended, win every tie) regardless of its real
+    // length.
+    const durationA = shiftDurationMinutes(a.entreeMin, a.sortieMin);
+    const durationB = shiftDurationMinutes(b.entreeMin, b.sortieMin);
     return preferExtended ? durationB - durationA : durationA - durationB;
   });
 

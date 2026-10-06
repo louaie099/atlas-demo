@@ -2,10 +2,11 @@ import { SupabaseClient } from "@supabase/supabase-js";
 
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { planIdForWeek, fetchAllRosterEntriesForPlan } from "./weekly-plan-service";
+import { previousWeekStart } from "./rotation-context";
 import { getRequirementWindow } from "./requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "./duty-generation";
 import { isFixedPlanningTeam, isTransitTeam } from "../teams";
-import { weekStartFor, DAYS_ORDER } from "../flight-date";
+import { weekStartFor, flightDateFor, DAYS_ORDER } from "../flight-date";
 import { effectiveDeparture } from "../flight-operations";
 import { buildFatigueStatesEnteringDate } from "./fatigue-live-lookup";
 import { CandidateFatigueInput } from "./fatigue-planning";
@@ -202,11 +203,29 @@ export async function getCandidatesForRequirement(
   const notYetAssigned = (employees as Employee[]).filter((e) => !excludeIds.has(e.id));
 
   const rosterRows = plan ? await fetchAllRosterEntriesForPlan(supabase, plan.id) : ([] as WeeklyPlanRosterEntry[]);
+
+  // OVERNIGHT CARRYOVER (2026-10-06 activation) — so Find Agent / Live
+  // Operations can find an employee whose overnight shift (AP03, AP04,
+  // NT01, N8) STARTED the day before this requirement's flight and still
+  // reaches it (see buildDayEffectivePoolFromRosterEntries' own doc
+  // comment). For the week's own Monday, "yesterday" is the PRIOR week's
+  // Sunday — a different plan's roster, fetched only when actually needed
+  // (never for the other six days, which already have their predecessor
+  // in `rosterRows`).
+  const targetDayIndex = DAYS_ORDER.indexOf(targetFlight.day_of_week);
+  const previousDayOfWeek = DAYS_ORDER[(targetDayIndex + DAYS_ORDER.length - 1) % DAYS_ORDER.length];
+  const isWeekStart = targetDayIndex === 0;
+  const previousDate = isWeekStart ? flightDateFor(previousWeekStart(weekStart), previousDayOfWeek) : flightDateFor(weekStart, previousDayOfWeek);
+  const previousRosterRows = isWeekStart
+    ? await fetchAllRosterEntriesForPlan(supabase, planIdForWeek(previousWeekStart(weekStart)))
+    : rosterRows;
+
   const candidatePool = buildDayEffectivePoolFromRosterEntries(
     notYetAssigned,
     rosterRows,
     targetFlight.day_of_week,
-    targetFlight.flight_date
+    targetFlight.flight_date,
+    { dayOfWeek: previousDayOfWeek, date: previousDate, rosterEntries: previousRosterRows }
   );
 
   const window: TimeWindow = getRequirementWindow(requirement, targetFlight);

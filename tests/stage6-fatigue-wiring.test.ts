@@ -698,12 +698,28 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // a37c5bb9e85fdb75, score:Boarding:1 37bb3c051860cb4d. Values after step
 // (1) alone, before the rolePriority fix: plan:2026-08-31
 // 179f850edfee13cd, plan:2026-09-21 fdbb4aedd3957f03.)
+// 2026-10-06 (overnight activation) RE-PIN of the two plan: hashes only:
+// AP03/AP04/NT01/N8 are now real General T1 Pool candidates
+// (lib/planning/shift-generation.ts), and on this CONFIG (max_consecutive_
+// work_days: 999, matching hard-work-caps.test.ts's CAPS_OFF isolation)
+// Sunday's mounir-benali-112 genuinely out-scores souad-benali-99 for an
+// AP03-vs-AP02 pick by a single OFF_WINDOW_STRUCTURE_CONFLICT_WEIGHT unit —
+// a real tier-3 off-window fit difference, not an arbitrary tie (see
+// tests/hard-work-caps.test.ts's "default caps on the demo" test for the
+// full mechanism and its one resulting, honestly-reported unfilled_duty,
+// req-at870-sunday-gate). stage6:/topup:/foreign:/score: are unaffected,
+// confirmed directly: stage6: calls generateFlexiblePoolShifts for Monday
+// alone with no offWindowContext (so tier 3 is inert, score ties resolve
+// exactly as before); topup: uses a synthetic demandDriven map untouched by
+// this phase; foreign: and both score: calls were independently verified
+// byte-identical against this exact CONFIG. (Previous values: plan:2026-08-31
+// ea29fc7f7660c7ed, plan:2026-09-21 4db88ab07fcf0523.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "ea29fc7f7660c7ed",
+  "plan:2026-08-31": "79eff183b7203c28",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "4db88ab07fcf0523",
+  "plan:2026-09-21": "1899064ffedfe68b",
   "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",

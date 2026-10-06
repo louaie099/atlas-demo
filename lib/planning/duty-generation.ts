@@ -3,9 +3,33 @@ import type { CandidateFatigueInput } from "./fatigue-planning";
 import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments, computeForeignCompanyProtectedWindow } from "../foreign-company-window";
-import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay } from "./shift-generation";
+import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay, PriorDayShiftMap } from "./shift-generation";
 import { getShiftTimesAs } from "../shift-templates";
 import { isGenerationDrivenPopulation } from "./workforce-pools";
+import { isOvernightShift } from "../shift-interval";
+
+/**
+ * OVERNIGHT CARRYOVER (2026-10-06 activation): if `priorDayEffective`
+ * (the employee's effective shift on the day immediately before the one
+ * being evaluated) is overnight — wraps past midnight (AP03, AP04, NT01,
+ * N8) — the employee is genuinely, physically still on shift into this
+ * new calendar day, even though they carry no shift of their OWN dated to
+ * it (a roster entry/generated assignment only ever exists on the day a
+ * shift STARTS). This returns the clipped, same-day portion of that
+ * carried-over shift — [00:00, their real sortie] — as a plain TimeWindow,
+ * the exact shape every existing eligibility/overlap check already
+ * expects (TimeWindow, windowsOverlap, isWindowWithinShift,
+ * scoreCandidates' shift_start/shift_end), so nothing downstream needs to
+ * become date-aware itself. Null when there's nothing to carry over (no
+ * prior-day shift at all, or it wasn't overnight).
+ */
+export function overnightCarryoverWindow(
+  priorDayEffective: { shift_start: string; shift_end: string } | null | undefined
+): { shift_start: string; shift_end: string } | null {
+  if (!priorDayEffective) return null;
+  if (!isOvernightShift(priorDayEffective.shift_start, priorDayEffective.shift_end)) return null;
+  return { shift_start: "00:00", shift_end: priorDayEffective.shift_end };
+}
 
 export interface GeneratedDuty {
   requirementId: string;
@@ -183,19 +207,49 @@ export function buildDayEffectivePoolFromRosterEntries(
   dayOfWeek: string,
   // The real calendar date this dayOfWeek label refers to — see
   // effectiveShiftForDay's doc comment on the same parameter.
-  date: string
+  date: string,
+  // OVERNIGHT CARRYOVER (2026-10-06 activation) — the immediately
+  // preceding calendar day's own roster entries, label and date, so an
+  // employee whose shift STARTED that day and is overnight (AP03, AP04,
+  // NT01, N8) is still found here even though no roster row of their own
+  // is ever dated to `dayOfWeek` (a roster entry only exists on the day a
+  // shift STARTS). For `dayOfWeek` being a window's first day, the caller
+  // passes the prior WEEK's own last day's roster — a separate
+  // `rosterEntries` array, since it lives in a different plan — covering
+  // Sunday -> Monday the same way. Optional; omitted = exact prior
+  // behaviour (no carryover candidates), for every existing caller that
+  // hasn't been updated (checkin-zone-assign/candidates, the Agent
+  // Schedule timeline — Check-in zone placement isn't part of this
+  // activation's scope).
+  previousDay?: { dayOfWeek: string; date: string; rosterEntries: WeeklyPlanRosterEntry[] }
 ): Employee[] {
   const byEmployee = new Map<string, WeeklyPlanRosterEntry>();
   for (const entry of rosterEntries) {
     if (entry.day_of_week === dayOfWeek) byEmployee.set(entry.employee_id, entry);
   }
 
+  const byEmployeePrevious = new Map<string, WeeklyPlanRosterEntry>();
+  if (previousDay) {
+    for (const entry of previousDay.rosterEntries) {
+      if (entry.day_of_week === previousDay.dayOfWeek) byEmployeePrevious.set(entry.employee_id, entry);
+    }
+  }
+
   return employees
     .map((e) => {
       const entry = byEmployee.get(e.id);
-      if (!entry || entry.status === "off" || !entry.shift_code) return null;
-      const times = getShiftTimesAs(entry.shift_code, date);
-      return { ...e, shift_start: times.shift_start, shift_end: times.shift_end } as Employee;
+      if (entry && entry.status !== "off" && entry.shift_code) {
+        const times = getShiftTimesAs(entry.shift_code, date);
+        return { ...e, shift_start: times.shift_start, shift_end: times.shift_end } as Employee;
+      }
+      if (previousDay) {
+        const prevEntry = byEmployeePrevious.get(e.id);
+        if (prevEntry && prevEntry.status !== "off" && prevEntry.shift_code) {
+          const carryover = overnightCarryoverWindow(getShiftTimesAs(prevEntry.shift_code, previousDay.date));
+          if (carryover) return { ...e, shift_start: carryover.shift_start, shift_end: carryover.shift_end } as Employee;
+        }
+      }
+      return null;
     })
     .filter((e): e is Employee => e !== null);
 }
@@ -312,7 +366,22 @@ export function generateDutiesForDay(
   // employee's fatigue state ENTERING this day. Optional; only consulted
   // while config.fairness_weights.fatigueWeight > 0 and the input's config
   // is enabled — omitted = exact prior behaviour.
-  fatigue?: CandidateFatigueInput
+  fatigue?: CandidateFatigueInput,
+  // OVERNIGHT CARRYOVER (2026-10-06 activation) — each employee's
+  // effective shift on the day immediately BEFORE `dayOfWeek` (same
+  // PriorDayShiftMap shape shift-generation.ts already threads day-by-day
+  // for rest purposes; for `dayOfWeek`'s own week's first day, the caller
+  // passes the real prior WEEK's boundary context — see
+  // weekly-plan-service.ts's lookupPriorWeekBoundaryContext — so Sunday ->
+  // Monday is covered by the same continuity machinery, not a new one).
+  // When an employee has no shift of their own dated to `dayOfWeek` but
+  // their entry here is overnight, overnightCarryoverWindow gives them a
+  // synthetic same-day window so a genuinely still-on-shift employee is
+  // real, scoreable coverage — not invisible just because no roster row is
+  // ever dated to the day a shift only ENDS on. Optional; omitted = exact
+  // prior behaviour (no carryover candidates), for every existing
+  // caller/test that hasn't been updated.
+  previousDayShift?: PriorDayShiftMap
 ): { duties: GeneratedDuty[]; unfilled: { dayOfWeek: string; requirementId: string; role: string; stillNeeded: number }[] } {
   const dayFlightIds = new Set(flights.filter((f) => f.day_of_week === dayOfWeek).map((f) => f.id));
   const dayRequirements = requirements
@@ -355,7 +424,12 @@ export function generateDutiesForDay(
   // stale snapshot of a different one.
   const dayEffectivePool = allEmployees
     .map((e) => {
-      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts, date);
+      // 2026-10-06: an employee with no shift of their OWN dated to today
+      // can still be real, physical coverage — via overnightCarryoverWindow
+      // — if yesterday's effective shift was overnight and its tail still
+      // reaches into today. Their own today-dated shift always takes
+      // priority when one exists (the ordinary case for every population).
+      const effective = effectiveShiftForDay(e, dayOfWeek, generatedShifts, date) ?? overnightCarryoverWindow(previousDayShift?.get(e.id));
       if (!effective) return null;
       const actualRest = actualRestHoursByDay?.get(`${e.id}|${dayOfWeek}`);
       return {
