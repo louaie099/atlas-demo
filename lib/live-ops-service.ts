@@ -1,6 +1,6 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 
-import { weekStartFor, DAYS_ORDER } from "./flight-date";
+import { weekStartFor, DAYS_ORDER, dayOfWeekFor } from "./flight-date";
 import { loadPersistedPlanView, planIdForWeek } from "./planning/weekly-plan-service";
 import { getRequirementWindow } from "./planning/requirement-window";
 import { getCandidatesForRequirement } from "./planning/candidate-lookup";
@@ -8,6 +8,7 @@ import { effectiveDeparture } from "./flight-operations";
 import { TimeWindow, isWindowWithinShift } from "./scoring";
 import {
   Assignment,
+  AssignmentModification,
   CandidateResult,
   Employee,
   Flight,
@@ -65,6 +66,24 @@ function windowsOverlap(a: TimeWindow, b: TimeWindow): boolean {
 //    before. Because those rows already exist from generation time
 //    onward, this flow has real data to work against for any plan, not
 //    just one that happens to carry the "published" status value.
+/**
+ * Planned-vs-operational traceability for one requirement (2026-10-06,
+ * Live Operations redesign section 12 — "preserve: Planned state versus
+ * Operational state"). Populated whenever the LATEST assignment_modifications
+ * row for this requirement, against the plan's CURRENT revision, replaced
+ * one employee with another (action "replaced" — the only action
+ * confirmReassignment ever writes). Undefined when a requirement's
+ * current occupant has never been operationally changed — i.e. still
+ * exactly what ATLAS/the planner last saved, nothing to trace.
+ */
+export interface LiveOpsRequirementModification {
+  previousEmployeeName: string;
+  newEmployeeName: string;
+  changedAt: string;
+  changedBy: string;
+  reason: string | null;
+}
+
 export interface LiveOpsRequirementView {
   requirement: StaffingRequirement;
   coverageLabel: string;
@@ -72,12 +91,29 @@ export interface LiveOpsRequirementView {
   gap: number;
   assignedEmployees: Employee[];
   proposedEmployees: Employee[];
+  modification?: LiveOpsRequirementModification;
 }
 
 export interface LiveOpsFlightView {
   flight: Flight;
   effectiveDeparture: string;
   requirements: LiveOpsRequirementView[];
+}
+
+/**
+ * Compact workforce summary for the Live Operations header (section 2 of
+ * the redesign spec) — derived from the SAME per-day AgentScheduleEntry
+ * data Monthly Planning's Agent Schedule grid already renders (see
+ * lib/types.ts's AgentDayEntry), never a separate workforce model.
+ * `assignedToday` counts an employee as assigned when they hold at least
+ * one real duty (flight OR T1 zone) that day; `availableToday` is simply
+ * `workingToday - assignedToday`, so the three numbers are always
+ * internally consistent by construction.
+ */
+export interface LiveOpsWorkforceSummary {
+  workingToday: number;
+  assignedToday: number;
+  availableToday: number;
 }
 
 /**
@@ -99,6 +135,7 @@ export interface LiveOpsView {
   weekStart: string;
   plan: { id: string; status: WeeklyPlan["status"]; revision: number } | null;
   flights: LiveOpsFlightView[];
+  workforce: LiveOpsWorkforceSummary;
 }
 
 export async function loadLiveOpsView(supabase: SupabaseClient, date: string): Promise<LiveOpsView> {
@@ -106,30 +143,92 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
   const view = await loadPersistedPlanView(supabase, weekStart, DAYS_ORDER);
 
   if (!view) {
-    return { date, weekStart, plan: null, flights: [] };
+    return { date, weekStart, plan: null, flights: [], workforce: { workingToday: 0, assignedToday: 0, availableToday: 0 } };
+  }
+
+  // Latest "replaced" modification per requirement, scoped to the plan's
+  // CURRENT revision (a modification against a since-discarded revision
+  // describes a different, no-longer-live roster and would mislead rather
+  // than inform) — see LiveOpsRequirementModification's own doc comment.
+  const { data: modRows } = await supabase
+    .from("assignment_modifications")
+    .select("*")
+    .eq("plan_id", view.plan.id)
+    .eq("plan_revision", view.plan.revision)
+    .eq("action", "replaced");
+  const modifications = (modRows ?? []) as AssignmentModification[];
+  const employeesById = new Map(view.roster.flatMap((r) => [...r.assignedEmployees, ...r.proposedEmployees]).map((e) => [e.id, e]));
+  // Any employee referenced only as a FORMER occupant (previous_employee_id)
+  // may no longer appear in the current roster at all -- fall back to a
+  // direct lookup so a replaced-away employee's name still shows correctly.
+  const latestModByRequirement = new Map<string, AssignmentModification>();
+  for (const m of modifications) {
+    const existing = latestModByRequirement.get(m.staffing_requirement_id);
+    if (!existing || m.changed_at > existing.changed_at) latestModByRequirement.set(m.staffing_requirement_id, m);
   }
 
   const dayFlights = view.flights.filter((f) => f.flight_date === date);
 
-  const flights: LiveOpsFlightView[] = dayFlights.map((flight) => {
-    const requirements: LiveOpsRequirementView[] = view.roster
-      .filter((r) => r.flight.id === flight.id)
-      .map((r) => ({
-        requirement: r.requirement,
-        coverageLabel: r.coverageLabel,
-        coverageStatus: r.coverageStatus,
-        gap: r.gap,
-        assignedEmployees: r.assignedEmployees,
-        proposedEmployees: r.proposedEmployees,
-      }));
-    return { flight, effectiveDeparture: effectiveDeparture(flight), requirements };
-  });
+  const flights: LiveOpsFlightView[] = await Promise.all(
+    dayFlights.map(async (flight) => {
+      const requirements: LiveOpsRequirementView[] = await Promise.all(
+        view.roster
+          .filter((r) => r.flight.id === flight.id)
+          .map(async (r) => {
+            const mod = latestModByRequirement.get(r.requirement.id);
+            let modification: LiveOpsRequirementModification | undefined;
+            if (mod && mod.previous_employee_id && mod.new_employee_id) {
+              let previousEmployee = employeesById.get(mod.previous_employee_id);
+              if (!previousEmployee) {
+                const { data: row } = await supabase.from("employees").select("*").eq("id", mod.previous_employee_id).single();
+                previousEmployee = row as Employee | undefined;
+              }
+              const newEmployee = employeesById.get(mod.new_employee_id);
+              modification = {
+                previousEmployeeName: previousEmployee?.name ?? "Unknown",
+                newEmployeeName: newEmployee?.name ?? "Unknown",
+                changedAt: mod.changed_at,
+                changedBy: mod.changed_by,
+                reason: mod.reason,
+              };
+            }
+            return {
+              requirement: r.requirement,
+              coverageLabel: r.coverageLabel,
+              coverageStatus: r.coverageStatus,
+              gap: r.gap,
+              assignedEmployees: r.assignedEmployees,
+              proposedEmployees: r.proposedEmployees,
+              modification,
+            };
+          })
+      );
+      return { flight, effectiveDeparture: effectiveDeparture(flight), requirements };
+    })
+  );
+
+  const dayOfWeek = dayOfWeekFor(date);
+  let workingToday = 0;
+  let assignedToday = 0;
+  for (const entry of view.schedule) {
+    const day = entry.days.find((d) => d.dayOfWeek === dayOfWeek);
+    if (!day || day.status !== "working") continue;
+    workingToday += 1;
+    const hasDuty = day.duties.length > 0 || (day.zoneDuties ?? []).some((z) => z.status === "confirmed" || z.status === "assigned");
+    if (hasDuty) assignedToday += 1;
+  }
+  const workforce: LiveOpsWorkforceSummary = {
+    workingToday,
+    assignedToday,
+    availableToday: Math.max(0, workingToday - assignedToday),
+  };
 
   return {
     date,
     weekStart,
     plan: { id: view.plan.id, status: view.plan.status, revision: view.plan.revision },
     flights,
+    workforce,
   };
 }
 

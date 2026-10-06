@@ -19,7 +19,7 @@ const PHASE_OPTIONS = Object.keys(FLIGHT_PHASE_LABEL) as FlightPhase[];
  * An honest "no eligible replacement" state when replacementCandidates is
  * empty -- never a forced or implied assignment.
  */
-function ConflictCard({
+export function ConflictCard({
   conflict,
   flight,
   onConfirmed,

@@ -60,6 +60,8 @@ export function FlightOpsRow({
   nowMinutesSinceMidnight,
   dayRelation,
   onEdit,
+  onOpen,
+  onOpenRequirement,
   onRequestAssign,
 }: {
   view: LiveOpsFlightView;
@@ -71,7 +73,17 @@ export function FlightOpsRow({
   // clock is a reasonable future enhancement, not needed for this demo.
   nowMinutesSinceMidnight: number | null;
   dayRelation: DayRelation;
+  /** Opens the flight's operational drawer in edit mode directly (the
+   * "Edit flight" button). */
   onEdit: () => void;
+  /** Opens the flight's operational drawer in its default VIEW mode
+   * (2026-10-06 — "everything meaningful should be clickable": the flight
+   * number/whole row opens Flight Operational Details, never just the
+   * edit form). */
+  onOpen: () => void;
+  /** Opens the drawer already focused on one specific staffing
+   * requirement (clicking "Gate 0/2" jumps straight to that section). */
+  onOpenRequirement?: (requirementId: string) => void;
   /** Opens the shared Find Agent/Reassign sheet for one requirement row
    * (2026-10-04 — every requirement row must be actionable: Assign for a
    * gap, Change for an already-covered one). Omit to render the board
@@ -142,8 +154,16 @@ export function FlightOpsRow({
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${dotColorClass[dotColor]} ${pulsing ? "animate-pulse" : ""}`}
             aria-hidden="true"
           />
-          <span className="font-semibold text-ink">{flight.flight_number}</span>
-          <span className="text-sm text-ink">{flight.destination ?? flight.route}</span>
+          <button
+            type="button"
+            onClick={onOpen}
+            className="font-semibold text-ink hover:underline underline-offset-2 decoration-dotted"
+          >
+            {flight.flight_number}
+          </button>
+          <button type="button" onClick={onOpen} className="text-sm text-ink hover:underline underline-offset-2 decoration-dotted">
+            {flight.destination ?? flight.route}
+          </button>
           <TeamBadge name={flight.airline} />
           <span className="text-xs text-muted">{flight.aircraft}</span>
 
@@ -177,9 +197,13 @@ export function FlightOpsRow({
                 key={r.requirement.id}
                 className="flex items-center justify-between gap-3 text-sm rounded-lg bg-surface px-3 py-1.5"
               >
-                <span className="text-ink">
+                <button
+                  type="button"
+                  onClick={() => onOpenRequirement?.(r.requirement.id)}
+                  className="text-ink hover:underline underline-offset-2 decoration-dotted text-left"
+                >
                   {r.coverageLabel} <span className="text-muted">{totalCovered}/{r.requirement.total_requirement}</span>
-                </span>
+                </button>
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                   {totalCovered === 0 ? (
                     <span className="text-xs text-muted">— gap —</span>
@@ -267,7 +291,7 @@ export function FlightOpsRow({
  * disables (but still shows) the action for a Viewer, matching Find
  * Agent's own treatment of the same boundary.
  */
-function EmployeeChip({
+export function EmployeeChip({
   name,
   tone,
   canAct,
