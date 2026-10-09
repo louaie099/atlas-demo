@@ -84,6 +84,49 @@ export interface LiveOpsRequirementModification {
   reason: string | null;
 }
 
+/**
+ * Gap-resolvability classification (2026-10-09, Live Operations gap
+ * triage) — computed EAGERLY for every requirement with gap > 0, using
+ * the EXACT same engine Find Agent already uses
+ * (lib/planning/candidate-lookup.ts's getCandidatesForRequirement), never
+ * a separate or looser eligibility rule. `eligible: true` means at least
+ * one candidate came back "recommended" (a real, rule-compliant person
+ * Atlas could assign right now); `eligible: false` means every candidate
+ * is, at best, "flagged" (would need a Duty Officer override) or there
+ * were no candidates at all — `exclusionSummary` is the SAME cascading
+ * reason breakdown (lib/planning/candidate-lookup.ts's
+ * buildExclusionSummary) Find Agent's own empty state shows, so a
+ * regulator never has to take "no eligible employee" on faith. This
+ * never auto-assigns anyone and never fabricates capacity — it only
+ * reports what Find Agent would already tell a human who clicked in.
+ */
+export type LiveOpsGapResolution =
+  | { eligible: true; candidates: CandidateResult[] }
+  | { eligible: false; candidates: CandidateResult[]; exclusionSummary: { reason: string; count: number }[] };
+
+/**
+ * One currently-assigned (or ATLAS-proposed) employee whose duty on this
+ * requirement is no longer operationally valid because the flight's
+ * REAL (effective) departure now differs from what the assignment was
+ * originally planned against (2026-10-09, Live Operations gap triage).
+ * Reuses evaluateFlightDelayImpact's exact two independent detection
+ * rules below (collision with another of the employee's own duties,
+ * and/or the window no longer fitting inside their shift), computed
+ * eagerly for the CURRENT persisted state rather than only on-demand
+ * inside the Edit Flight "what-if" flow — so a requirement that still
+ * counts as "covered" by headcount alone (an assignment row exists) but
+ * is actually no longer valid is never silently presented as fine.
+ * `requirement.gap` can be 0 even when this array is non-empty: the slot
+ * is nominally filled, but by someone who can no longer actually do it.
+ */
+export interface LiveOpsInvalidatedAssignment {
+  employee: Employee;
+  oldWindow: TimeWindow;
+  newWindow: TimeWindow;
+  collidesWith?: ConflictingAssignment;
+  shiftBoundaryViolation?: ShiftBoundaryViolation;
+}
+
 export interface LiveOpsRequirementView {
   requirement: StaffingRequirement;
   coverageLabel: string;
@@ -92,6 +135,10 @@ export interface LiveOpsRequirementView {
   assignedEmployees: Employee[];
   proposedEmployees: Employee[];
   modification?: LiveOpsRequirementModification;
+  /** Present only when `gap > 0` — see LiveOpsGapResolution's own doc comment. */
+  gapResolution?: LiveOpsGapResolution;
+  /** Always present, empty when nothing is invalidated — see LiveOpsInvalidatedAssignment's own doc comment. */
+  invalidatedAssignments: LiveOpsInvalidatedAssignment[];
 }
 
 export interface LiveOpsFlightView {
@@ -169,6 +216,61 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
 
   const dayFlights = view.flights.filter((f) => f.flight_date === date);
 
+  // GAP TRIAGE (2026-10-09) — built once for the whole day, reused by
+  // every requirement below. See LiveOpsInvalidatedAssignment's own doc
+  // comment: this is the same "this employee's other same-day duties"
+  // input evaluateFlightDelayImpact builds from raw Assignment rows, but
+  // sourced from view.roster (already loaded, already resolved to real
+  // employees) so no extra DB round trip is needed to compute it eagerly
+  // for every flight on the board, not just the one flight a human
+  // happens to have opened in the Edit Flight drawer.
+  const sameDayCommitments = new Map<string, { requirement: StaffingRequirement; flight: Flight }[]>();
+  for (const r of view.roster) {
+    if (r.flight.day_of_week !== dayOfWeekFor(date)) continue;
+    for (const e of [...r.assignedEmployees, ...r.proposedEmployees]) {
+      sameDayCommitments.set(e.id, [...(sameDayCommitments.get(e.id) ?? []), { requirement: r.requirement, flight: r.flight }]);
+    }
+  }
+
+  function findInvalidatedAssignments(requirement: StaffingRequirement, flight: Flight, employees: Employee[]): LiveOpsInvalidatedAssignment[] {
+    const flightEffectiveDeparture = effectiveDeparture(flight);
+    if (flightEffectiveDeparture === flight.scheduled_departure) return []; // no operational change at all -- nothing to invalidate
+    const oldWindow = getRequirementWindow(requirement, flight);
+    const newWindow = getRequirementWindow(requirement, { ...flight, scheduled_departure: flightEffectiveDeparture });
+    if (oldWindow.start === newWindow.start && oldWindow.end === newWindow.end) return []; // this requirement's own window didn't actually move
+
+    const invalidated: LiveOpsInvalidatedAssignment[] = [];
+    for (const employee of employees) {
+      const shiftBoundaryViolation: ShiftBoundaryViolation | undefined =
+        !isWindowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
+        isWindowWithinShift(oldWindow, employee.shift_start, employee.shift_end) &&
+        employee.shift_start &&
+        employee.shift_end
+          ? { shiftStart: employee.shift_start, shiftEnd: employee.shift_end }
+          : undefined;
+
+      let collidesWith: ConflictingAssignment | undefined;
+      for (const c of sameDayCommitments.get(employee.id) ?? []) {
+        if (c.requirement.id === requirement.id) continue;
+        const otherEffectiveDeparture = effectiveDeparture(c.flight);
+        const otherOldWindow = getRequirementWindow(c.requirement, c.flight);
+        const otherNewWindow = getRequirementWindow(c.requirement, { ...c.flight, scheduled_departure: otherEffectiveDeparture });
+        // Only a NEWLY caused collision counts — see evaluateFlightDelayImpact's
+        // own doc comment on `priorOverlap` for why a pre-existing overlap on
+        // either side must never be reported as something this change caused.
+        if (windowsOverlap(newWindow, otherNewWindow) && !windowsOverlap(oldWindow, otherOldWindow)) {
+          collidesWith = { requirement: c.requirement, flight: c.flight, window: otherNewWindow };
+          break;
+        }
+      }
+
+      if (shiftBoundaryViolation || collidesWith) {
+        invalidated.push({ employee, oldWindow, newWindow, collidesWith, shiftBoundaryViolation });
+      }
+    }
+    return invalidated;
+  }
+
   const flights: LiveOpsFlightView[] = await Promise.all(
     dayFlights.map(async (flight) => {
       const requirements: LiveOpsRequirementView[] = await Promise.all(
@@ -192,6 +294,25 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
                 reason: mod.reason,
               };
             }
+
+            // GAP RESOLVABILITY (2026-10-09) — only meaningful when there
+            // is actually something unfilled; computed through the exact
+            // same engine Find Agent uses, never a separate rule, and
+            // never auto-applied (see LiveOpsGapResolution's own doc
+            // comment).
+            let gapResolution: LiveOpsGapResolution | undefined;
+            if (r.gap > 0) {
+              const lookup = await getCandidatesForRequirement(supabase, r.requirement.id);
+              if (lookup.ok) {
+                const eligible = lookup.candidates.some((c) => c.status === "recommended");
+                gapResolution = eligible
+                  ? { eligible: true, candidates: lookup.candidates }
+                  : { eligible: false, candidates: lookup.candidates, exclusionSummary: lookup.exclusionSummary ?? [] };
+              }
+            }
+
+            const invalidatedAssignments = findInvalidatedAssignments(r.requirement, flight, [...r.assignedEmployees, ...r.proposedEmployees]);
+
             return {
               requirement: r.requirement,
               coverageLabel: r.coverageLabel,
@@ -200,6 +321,8 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
               assignedEmployees: r.assignedEmployees,
               proposedEmployees: r.proposedEmployees,
               modification,
+              gapResolution,
+              invalidatedAssignments,
             };
           })
       );

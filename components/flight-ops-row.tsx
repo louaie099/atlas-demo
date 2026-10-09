@@ -1,6 +1,7 @@
 "use client";
 
-import { LiveOpsFlightView } from "@/lib/live-ops-service";
+import { useState } from "react";
+import { LiveOpsFlightView, LiveOpsRequirementView } from "@/lib/live-ops-service";
 import { FLIGHT_STATE_LABEL, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
 import { FLIGHT_PHASE_LABEL, resolveFlightPhase } from "@/lib/flight-phase";
 import { canManageOperations } from "@/lib/roles";
@@ -193,10 +194,8 @@ export function FlightOpsRow({
             const totalCovered = r.assignedEmployees.length + r.proposedEmployees.length;
             const hasGap = totalCovered < r.requirement.total_requirement;
             return (
-              <div
-                key={r.requirement.id}
-                className="flex items-center justify-between gap-3 text-sm rounded-lg bg-surface px-3 py-1.5"
-              >
+              <div key={r.requirement.id} className="flex flex-col gap-1 rounded-lg bg-surface px-3 py-1.5">
+              <div className="flex items-center justify-between gap-3 text-sm">
                 <button
                   type="button"
                   onClick={() => onOpenRequirement?.(r.requirement.id)}
@@ -274,11 +273,86 @@ export function FlightOpsRow({
                   <Badge tone={requirementTone[r.coverageStatus]}>{r.coverageStatus}</Badge>
                 </div>
               </div>
+              <GapTriageDetail requirementView={r} />
+              </div>
             );
           })}
           {requirements.length === 0 && <p className="text-xs text-muted">No staffing requirements for this flight.</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Gap-triage strip for one requirement row (2026-10-09, Live Operations
+ * gap classification). Surfaces, without ever acting on its own, the
+ * three distinctions a regulator needs when a requirement isn't simply
+ * "covered":
+ *  1. an unfilled requirement WITH a real eligible candidate ("Resolvable")
+ *  2. an unfilled requirement with no eligible candidate at all ("No
+ *     eligible employee" — the honest exclusion breakdown is one click
+ *     away, the exact same reasons Find Agent's own empty state shows)
+ *  3. a requirement that reads as fully covered by headcount but whose
+ *     current occupant's duty was invalidated by a flight-time change
+ *     ("Invalidated by flight change")
+ * Never assigns anyone and never hides a genuine shortage behind a vaguer
+ * label — see LiveOpsGapResolution/LiveOpsInvalidatedAssignment's own doc
+ * comments in lib/live-ops-service.ts for exactly what each case means.
+ */
+function GapTriageDetail({ requirementView: r }: { requirementView: LiveOpsRequirementView }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasGapInfo = Boolean(r.gapResolution);
+  const hasInvalidated = r.invalidatedAssignments.length > 0;
+  if (!hasGapInfo && !hasInvalidated) return null;
+
+  return (
+    <div className="flex flex-col gap-1 pl-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        {hasInvalidated && (
+          <button type="button" onClick={() => setExpanded((v) => !v)} className="text-left">
+            <Badge tone="warn">Invalidated by flight change ({r.invalidatedAssignments.length})</Badge>
+          </button>
+        )}
+        {r.gapResolution && (
+          <button type="button" onClick={() => setExpanded((v) => !v)} className="text-left">
+            <Badge tone={r.gapResolution.eligible ? "good" : "bad"}>
+              {r.gapResolution.eligible ? "Resolvable — eligible employee available" : "No eligible employee"}
+            </Badge>
+          </button>
+        )}
+      </div>
+      {expanded && (
+        <div className="text-xs text-muted flex flex-col gap-1 pb-1">
+          {r.invalidatedAssignments.map((inv) => (
+            <p key={inv.employee.id}>
+              <span className="font-medium text-ink">{inv.employee.name}</span>: planned window {inv.oldWindow.start}–
+              {inv.oldWindow.end} is now {inv.newWindow.start}–{inv.newWindow.end}
+              {inv.collidesWith && <> — collides with their {inv.collidesWith.flight.flight_number} duty</>}
+              {inv.shiftBoundaryViolation && (
+                <> — falls outside their shift ({inv.shiftBoundaryViolation.shiftStart}–{inv.shiftBoundaryViolation.shiftEnd})</>
+              )}
+            </p>
+          ))}
+          {r.gapResolution?.eligible === true && (
+            <p>
+              Eligible now: {r.gapResolution.candidates.filter((c) => c.status === "recommended").map((c) => c.employee.name).join(", ")}
+            </p>
+          )}
+          {r.gapResolution?.eligible === false && (
+            <>
+              <p>No employee is currently eligible. Reasons:</p>
+              <ul className="list-disc pl-4">
+                {r.gapResolution.exclusionSummary.map((ex) => (
+                  <li key={ex.reason}>
+                    {ex.reason} ({ex.count})
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { deriveFlightState } from "../lib/live-ops-flight-state";
 import { Flight, StaffingRequirement } from "../lib/types";
-import { LiveOpsFlightView } from "../lib/live-ops-service";
+import { LiveOpsFlightView, LiveOpsRequirementView } from "../lib/live-ops-service";
 
 function makeFlight(overrides: Partial<Flight> = {}): Flight {
   return {
@@ -47,6 +47,19 @@ const requirement: StaffingRequirement = {
   needs_configuration: false,
 };
 
+function makeRequirementView(overrides: Partial<LiveOpsRequirementView> = {}): LiveOpsRequirementView {
+  return {
+    requirement,
+    coverageLabel: "Boarding",
+    coverageStatus: "assigned",
+    gap: 0,
+    assignedEmployees: [],
+    proposedEmployees: [],
+    invalidatedAssignments: [],
+    ...overrides,
+  };
+}
+
 function makeView(overrides: Partial<LiveOpsFlightView> = {}): LiveOpsFlightView {
   const flight = overrides.flight ?? makeFlight();
   return {
@@ -60,21 +73,21 @@ function makeView(overrides: Partial<LiveOpsFlightView> = {}): LiveOpsFlightView
 describe("deriveFlightState", () => {
   it("is covered when fully assigned, not delayed, no active conflict", () => {
     const view = makeView({
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "assigned", gap: 0, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "assigned", gap: 0 })],
     });
     expect(deriveFlightState(view, false)).toBe("covered");
   });
 
   it("is gap when any requirement has coverageStatus gap", () => {
     const view = makeView({
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "gap", gap: 1, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "gap", gap: 1 })],
     });
     expect(deriveFlightState(view, false)).toBe("gap");
   });
 
   it("treats a requirement-level conflict status as gap priority", () => {
     const view = makeView({
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "conflict", gap: 0, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "conflict", gap: 0 })],
     });
     expect(deriveFlightState(view, false)).toBe("gap");
   });
@@ -83,7 +96,7 @@ describe("deriveFlightState", () => {
     const flight = makeFlight({ status: "delayed" });
     const view = makeView({
       flight,
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "assigned", gap: 0, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "assigned", gap: 0 })],
     });
     expect(deriveFlightState(view, false)).toBe("delayed");
   });
@@ -93,7 +106,7 @@ describe("deriveFlightState", () => {
     const view = makeView({
       flight,
       effectiveDeparture: "15:00",
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "assigned", gap: 0, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "assigned", gap: 0 })],
     });
     expect(deriveFlightState(view, false)).toBe("delayed");
   });
@@ -102,7 +115,7 @@ describe("deriveFlightState", () => {
     const flight = makeFlight({ status: "delayed" });
     const view = makeView({
       flight,
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "gap", gap: 1, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "gap", gap: 1 })],
     });
     expect(deriveFlightState(view, true)).toBe("conflict");
   });
@@ -111,7 +124,7 @@ describe("deriveFlightState", () => {
     const flight = makeFlight({ status: "delayed" });
     const view = makeView({
       flight,
-      requirements: [{ requirement, coverageLabel: "Boarding", coverageStatus: "gap", gap: 1, assignedEmployees: [], proposedEmployees: [] }],
+      requirements: [makeRequirementView({ coverageStatus: "gap", gap: 1 })],
     });
     expect(deriveFlightState(view, false)).toBe("gap");
   });

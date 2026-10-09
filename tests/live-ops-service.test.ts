@@ -356,6 +356,84 @@ describe("live-ops-service — loadLiveOpsView", () => {
   });
 });
 
+describe("live-ops-service — loadLiveOpsView gap triage (2026-10-09)", () => {
+  it("classifies an unfilled requirement as eligible when a real candidate exists (category 1)", async () => {
+    const fake = new FakeSupabase();
+    const { req2 } = seedBaseFixture(fake);
+    // Add a second seat to req-2 (Gate) with nobody covering it -- emp-b
+    // is free, Gate-qualified, and not rest/overlap-excluded: a genuine
+    // category-1 gap.
+    const reqs = fake.table("staffing_requirements") as unknown as StaffingRequirement[];
+    reqs.find((r) => r.id === req2.id)!.total_requirement = 2;
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight2View = view.flights.find((f) => f.flight.id === "flight-2")!;
+    const req2View = flight2View.requirements.find((r) => r.requirement.id === "req-2")!;
+
+    expect(req2View.gap).toBe(1);
+    expect(req2View.gapResolution?.eligible).toBe(true);
+    if (req2View.gapResolution?.eligible !== true) throw new Error("unreachable");
+    expect(req2View.gapResolution.candidates.some((c) => c.employee.id === "emp-b" && c.status === "recommended")).toBe(true);
+  });
+
+  it("classifies an unfilled requirement as having no eligible employee, with the exclusion breakdown attached (category 2)", async () => {
+    const fake = new FakeSupabase();
+    const { req2 } = seedBaseFixture(fake);
+    const reqs = fake.table("staffing_requirements") as unknown as StaffingRequirement[];
+    reqs.find((r) => r.id === req2.id)!.total_requirement = 2;
+    // Remove emp-b's Gate qualification -- now nobody at all can cover
+    // the second seat.
+    const employees = fake.table("employees") as unknown as Employee[];
+    const empB = employees.find((e) => e.id === "emp-b")!;
+    empB.skills = ["Boarding"];
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight2View = view.flights.find((f) => f.flight.id === "flight-2")!;
+    const req2View = flight2View.requirements.find((r) => r.requirement.id === "req-2")!;
+
+    expect(req2View.gap).toBe(1);
+    expect(req2View.gapResolution?.eligible).toBe(false);
+    if (req2View.gapResolution?.eligible !== false) throw new Error("unreachable");
+    expect(req2View.gapResolution.exclusionSummary.length).toBeGreaterThan(0);
+  });
+
+  it("flags a currently-assigned employee's duty as invalidated once the flight's real departure moves it into collision with their own other duty (category 3), even though headcount still reads covered", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+    // Same operational delay as the evaluateFlightDelayImpact collision
+    // test above: flight-1 09:00 -> 10:30 now collides with flight-2's
+    // 10:00-11:00 Gate window, both held by emp-a.
+    await fake.from("flights").update({ actual_departure: "10:30" }).eq("id", "flight-1");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight1View = view.flights.find((f) => f.flight.id === "flight-1")!;
+    const req1View = flight1View.requirements.find((r) => r.requirement.id === "req-1")!;
+
+    // Headcount alone still reads "covered" -- gap is 0, emp-a is still
+    // the assigned employee -- but the duty itself is no longer valid.
+    expect(req1View.gap).toBe(0);
+    expect(req1View.invalidatedAssignments).toHaveLength(1);
+    const invalidated = req1View.invalidatedAssignments[0];
+    expect(invalidated.employee.id).toBe("emp-a");
+    expect(invalidated.oldWindow).toEqual({ start: "08:00", end: "09:00" });
+    expect(invalidated.newWindow).toEqual({ start: "09:30", end: "10:30" });
+    expect(invalidated.collidesWith?.requirement.id).toBe("req-2");
+    expect(invalidated.shiftBoundaryViolation).toBeUndefined();
+  });
+
+  it("does not flag an invalidated assignment that was already colliding before the delay (pre-existing, not newly caused)", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+    // No operational change at all -- nothing should ever be flagged.
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    for (const f of view.flights) {
+      for (const r of f.requirements) {
+        expect(r.invalidatedAssignments).toHaveLength(0);
+      }
+    }
+  });
+});
+
 describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", () => {
   it("detects no conflict before any operational change", async () => {
     const fake = new FakeSupabase();
