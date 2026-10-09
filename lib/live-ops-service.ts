@@ -86,8 +86,9 @@ export interface LiveOpsRequirementModification {
 
 /**
  * Gap-resolvability classification (2026-10-09, Live Operations gap
- * triage) — computed EAGERLY for every requirement with gap > 0, using
- * the EXACT same engine Find Agent already uses
+ * triage) — computed EAGERLY for every requirement whose EFFECTIVE
+ * (invalidation-corrected — see LiveOpsInvalidatedAssignment) gap is > 0,
+ * using the EXACT same engine Find Agent already uses
  * (lib/planning/candidate-lookup.ts's getCandidatesForRequirement), never
  * a separate or looser eligibility rule. `eligible: true` means at least
  * one candidate came back "recommended" (a real, rule-compliant person
@@ -116,8 +117,15 @@ export type LiveOpsGapResolution =
  * inside the Edit Flight "what-if" flow — so a requirement that still
  * counts as "covered" by headcount alone (an assignment row exists) but
  * is actually no longer valid is never silently presented as fine.
- * `requirement.gap` can be 0 even when this array is non-empty: the slot
- * is nominally filled, but by someone who can no longer actually do it.
+ *
+ * 2026-10-09 (invalidated-coverage fix): `LiveOpsRequirementView.gap`/
+ * `coverageStatus` below are now computed EXCLUDING every employee who
+ * appears here — so, unlike when this array was first introduced,
+ * `gap` can NO LONGER read 0 while this array is non-empty. The original
+ * Assignment row is never deleted or modified (it's still the real,
+ * persisted planned assignment — see `assignedEmployees`/
+ * `proposedEmployees`, which are untouched raw lists), but it no longer
+ * counts toward operational coverage once it shows up here.
  */
 export interface LiveOpsInvalidatedAssignment {
   employee: Employee;
@@ -130,12 +138,30 @@ export interface LiveOpsInvalidatedAssignment {
 export interface LiveOpsRequirementView {
   requirement: StaffingRequirement;
   coverageLabel: string;
+  /**
+   * EFFECTIVE, operational coverage status — "conflict" (not "gap") when
+   * the shortfall exists because one or more previously-valid assignments
+   * were invalidated by a flight change (see LiveOpsInvalidatedAssignment);
+   * plain "gap" when the shortfall is an ordinary, never-staffed one.
+   * This is a Live-Ops-only view correction: Monthly Planning's own
+   * RosterRequirementView/weekly-plan-view.ts computation is untouched.
+   */
   coverageStatus: RosterRequirementView["coverageStatus"];
+  /**
+   * EFFECTIVE gap — `total_requirement` minus only the employees in
+   * `assignedEmployees`/`proposedEmployees` who are NOT also listed in
+   * `invalidatedAssignments`. An employee whose duty has been invalidated
+   * still appears in `assignedEmployees`/`proposedEmployees` (their real
+   * Assignment row still exists — see LiveOpsInvalidatedAssignment's own
+   * doc comment) but no longer counts toward this number.
+   */
   gap: number;
+  /** Raw, untouched list of real Assignment rows — includes an invalidated employee; never filtered for display. */
   assignedEmployees: Employee[];
+  /** Raw, untouched list of ATLAS-proposed (engine-generated) picks — same invalidation caveat as `assignedEmployees`. */
   proposedEmployees: Employee[];
   modification?: LiveOpsRequirementModification;
-  /** Present only when `gap > 0` — see LiveOpsGapResolution's own doc comment. */
+  /** Present only when the EFFECTIVE `gap` (above) is > 0 — see LiveOpsGapResolution's own doc comment. */
   gapResolution?: LiveOpsGapResolution;
   /** Always present, empty when nothing is invalidated — see LiveOpsInvalidatedAssignment's own doc comment. */
   invalidatedAssignments: LiveOpsInvalidatedAssignment[];
@@ -295,13 +321,53 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
               };
             }
 
+            // OPERATIONAL (EFFECTIVE) COVERAGE (2026-10-09 fix) — the
+            // planning-time gap/coverageStatus computed in
+            // weekly-plan-view.ts counts raw headcount only, which is
+            // exactly right for Monthly Planning (nothing there can ever
+            // go operationally stale) but wrong here: an assignment whose
+            // employee is no longer valid for this window must not count
+            // as coverage, per the product's explicit requirement ("never
+            // count invalid assignments as valid coverage"). Computed
+            // once, before gapResolution, so every downstream consumer
+            // (gapResolution's own "is there still a real gap" check,
+            // deriveFlightState, the board's attention ordering, the
+            // header counters, flight-ops-row.tsx's display) sees ONE
+            // already-corrected number, rather than each having to
+            // separately discount a raw one. Never touches
+            // r.assignedEmployees/r.proposedEmployees themselves, nor
+            // anything in weekly-plan-view.ts/Monthly Planning's own
+            // RosterRequirementView — this is strictly a Live Ops view
+            // correction, scoped to this function's own return shape.
+            const invalidatedAssignments = findInvalidatedAssignments(r.requirement, flight, [...r.assignedEmployees, ...r.proposedEmployees]);
+            const invalidatedEmployeeIds = new Set(invalidatedAssignments.map((ia) => ia.employee.id));
+            const effectiveAssignedCount = r.assignedEmployees.filter((e) => !invalidatedEmployeeIds.has(e.id)).length;
+            const effectiveProposedCount = r.proposedEmployees.filter((e) => !invalidatedEmployeeIds.has(e.id)).length;
+            const effectiveGap = Math.max(0, r.requirement.total_requirement - effectiveAssignedCount - effectiveProposedCount);
+            // "conflict" (reserved in RequirementCoverageStatus specifically
+            // for an operational event, never a planning-time state — see
+            // computeCoverageStatus's own doc comment in weekly-plan-view.ts)
+            // distinguishes "this shortfall exists because a flight change
+            // broke a previously valid assignment" from a plain, ordinary
+            // "nobody was ever assigned" gap. deriveFlightState already
+            // treats a requirement-level "conflict" the same as "gap" for
+            // board/attention purposes (see its own tests) — so this is a
+            // more honest, more specific signal for the regulator, not a
+            // behavior change for board placement.
+            const effectiveCoverageStatus: RosterRequirementView["coverageStatus"] =
+              effectiveGap === 0 ? "assigned" : invalidatedAssignments.length > 0 ? "conflict" : "gap";
+
             // GAP RESOLVABILITY (2026-10-09) — only meaningful when there
             // is actually something unfilled; computed through the exact
             // same engine Find Agent uses, never a separate rule, and
             // never auto-applied (see LiveOpsGapResolution's own doc
-            // comment).
+            // comment). Gated on the EFFECTIVE gap (post-invalidation),
+            // not the raw planning-time one, so a requirement that reads
+            // "covered" by headcount but has lost a valid occupant to a
+            // flight change still gets real replacement candidates
+            // surfaced here, same as an ordinary unfilled gap would.
             let gapResolution: LiveOpsGapResolution | undefined;
-            if (r.gap > 0) {
+            if (effectiveGap > 0) {
               const lookup = await getCandidatesForRequirement(supabase, r.requirement.id);
               if (lookup.ok) {
                 const eligible = lookup.candidates.some((c) => c.status === "recommended");
@@ -311,13 +377,11 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
               }
             }
 
-            const invalidatedAssignments = findInvalidatedAssignments(r.requirement, flight, [...r.assignedEmployees, ...r.proposedEmployees]);
-
             return {
               requirement: r.requirement,
               coverageLabel: r.coverageLabel,
-              coverageStatus: r.coverageStatus,
-              gap: r.gap,
+              coverageStatus: effectiveCoverageStatus,
+              gap: effectiveGap,
               assignedEmployees: r.assignedEmployees,
               proposedEmployees: r.proposedEmployees,
               modification,

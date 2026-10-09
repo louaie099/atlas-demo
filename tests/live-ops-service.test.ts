@@ -397,7 +397,7 @@ describe("live-ops-service — loadLiveOpsView gap triage (2026-10-09)", () => {
     expect(req2View.gapResolution.exclusionSummary.length).toBeGreaterThan(0);
   });
 
-  it("flags a currently-assigned employee's duty as invalidated once the flight's real departure moves it into collision with their own other duty (category 3), even though headcount still reads covered", async () => {
+  it("flags a currently-assigned employee's duty as invalidated once the flight's real departure moves it into collision with their own other duty (category 3), and (2026-10-09 fix) correctly drops effective coverage instead of still reading covered", async () => {
     const fake = new FakeSupabase();
     seedBaseFixture(fake);
     // Same operational delay as the evaluateFlightDelayImpact collision
@@ -409,9 +409,18 @@ describe("live-ops-service — loadLiveOpsView gap triage (2026-10-09)", () => {
     const flight1View = view.flights.find((f) => f.flight.id === "flight-1")!;
     const req1View = flight1View.requirements.find((r) => r.requirement.id === "req-1")!;
 
-    // Headcount alone still reads "covered" -- gap is 0, emp-a is still
-    // the assigned employee -- but the duty itself is no longer valid.
-    expect(req1View.gap).toBe(0);
+    // Fixed 2026-10-09: this used to read gap:0/"covered" here (see this
+    // test's own prior assertions) purely because the stale Assignment
+    // row still existed -- that was exactly the bug. emp-a's duty is
+    // invalidated, so it no longer counts toward coverage: req-1 (total
+    // requirement 1) now has an EFFECTIVE gap of 1, and the status is the
+    // more specific "conflict" (an operational event broke a previously
+    // valid assignment), not a plain "gap". The Assignment row itself is
+    // untouched -- emp-a still appears in assignedEmployees, preserved as
+    // planned history.
+    expect(req1View.gap).toBe(1);
+    expect(req1View.coverageStatus).toBe("conflict");
+    expect(req1View.assignedEmployees.map((e) => e.id)).toEqual(["emp-a"]);
     expect(req1View.invalidatedAssignments).toHaveLength(1);
     const invalidated = req1View.invalidatedAssignments[0];
     expect(invalidated.employee.id).toBe("emp-a");
@@ -419,18 +428,214 @@ describe("live-ops-service — loadLiveOpsView gap triage (2026-10-09)", () => {
     expect(invalidated.newWindow).toEqual({ start: "09:30", end: "10:30" });
     expect(invalidated.collidesWith?.requirement.id).toBe("req-2");
     expect(invalidated.shiftBoundaryViolation).toBeUndefined();
+
+    // The newly-real gap must also come with real replacement candidates
+    // -- emp-b is free, Gate/Boarding-qualified, not otherwise committed.
+    expect(req1View.gapResolution?.eligible).toBe(true);
+    if (req1View.gapResolution?.eligible !== true) throw new Error("unreachable");
+    expect(req1View.gapResolution.candidates.some((c) => c.employee.id === "emp-b")).toBe(true);
   });
 
-  it("does not flag an invalidated assignment that was already colliding before the delay (pre-existing, not newly caused)", async () => {
+  it("does not flag an invalidated assignment that was already colliding before the delay (pre-existing, not newly caused), and leaves effective coverage exactly as raw headcount would read (no invalid assignments)", async () => {
     const fake = new FakeSupabase();
     seedBaseFixture(fake);
-    // No operational change at all -- nothing should ever be flagged.
+    // No operational change at all -- nothing should ever be flagged, and
+    // the invalidation fix must be a complete no-op here: both
+    // requirements are genuinely, validly covered by raw headcount alone.
     const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
     for (const f of view.flights) {
       for (const r of f.requirements) {
         expect(r.invalidatedAssignments).toHaveLength(0);
+        expect(r.gap).toBe(0);
+        expect(r.coverageStatus).toBe("assigned");
       }
     }
+  });
+});
+
+describe("live-ops-service — invalidated-assignment effective coverage (2026-10-09 fix)", () => {
+  it("counts only the invalidated employee against the requirement when one of two assigned employees on a Dreamliner becomes invalid", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    // Turn req-2/flight-2 into a 2-seat Dreamliner Gate requirement held
+    // by both emp-a and emp-b. Dreamliner lead is 90 min, so at its
+    // original 11:00 departure the window is 09:30-11:00.
+    await fake.from("flights").update({ aircraft: "Boeing 787-9" }).eq("id", "flight-2");
+    const reqs = fake.table("staffing_requirements") as unknown as StaffingRequirement[];
+    reqs.find((r) => r.id === "req-2")!.total_requirement = 2;
+    await fake.from("assignments").insert({
+      id: "assign-2b",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-2",
+      employee_id: "emp-b",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    });
+    // Narrow only emp-a's shift so the delay pushes their window past
+    // their own shift end -- emp-b's default (08:00-18:15) shift still
+    // comfortably covers the new window, so only emp-a should invalidate.
+    const employees = fake.table("employees") as unknown as Employee[];
+    employees.find((e) => e.id === "emp-a")!.shift_end = "11:30";
+    await fake.from("flights").update({ actual_departure: "12:30" }).eq("id", "flight-2");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight2View = view.flights.find((f) => f.flight.id === "flight-2")!;
+    const req2View = flight2View.requirements.find((r) => r.requirement.id === "req-2")!;
+
+    expect(req2View.invalidatedAssignments.map((ia) => ia.employee.id)).toEqual(["emp-a"]);
+    // 2 required, 1 (emp-b) still effectively valid -> effective gap of 1.
+    expect(req2View.gap).toBe(1);
+    expect(req2View.coverageStatus).toBe("conflict");
+    // Both Assignment rows are untouched -- nothing deleted or modified.
+    expect(req2View.assignedEmployees.map((e) => e.id).sort()).toEqual(["emp-a", "emp-b"]);
+  });
+
+  it("counts an effective gap equal to the full requirement when ALL currently-assigned employees are invalidated", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    await fake.from("flights").update({ aircraft: "Boeing 787-9" }).eq("id", "flight-2");
+    const reqs = fake.table("staffing_requirements") as unknown as StaffingRequirement[];
+    reqs.find((r) => r.id === "req-2")!.total_requirement = 2;
+    await fake.from("assignments").insert({
+      id: "assign-2b",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-2",
+      employee_id: "emp-b",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    });
+    // This time BOTH employees' shifts are too narrow for the delayed window.
+    const employees = fake.table("employees") as unknown as Employee[];
+    employees.find((e) => e.id === "emp-a")!.shift_end = "11:30";
+    employees.find((e) => e.id === "emp-b")!.shift_end = "11:00";
+    await fake.from("flights").update({ actual_departure: "12:30" }).eq("id", "flight-2");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flight2View = view.flights.find((f) => f.flight.id === "flight-2")!;
+    const req2View = flight2View.requirements.find((r) => r.requirement.id === "req-2")!;
+
+    expect(req2View.invalidatedAssignments.map((ia) => ia.employee.id).sort()).toEqual(["emp-a", "emp-b"]);
+    expect(req2View.gap).toBe(2);
+    expect(req2View.coverageStatus).toBe("conflict");
+  });
+
+  // ---- AT815 acceptance scenario -------------------------------------------
+  // Mirrors the agreed end-to-end scenario exactly (a Dreamliner Gate
+  // requirement, one assigned agent whose shift ends before the delayed
+  // window, departure pushed from 13:45 to 18:45) using the existing,
+  // generic data model and mechanisms only -- nothing here is a special
+  // case keyed on a flight number or employee name in any production code
+  // path; this is purely test fixture data shaped like the real scenario.
+  function seedAT815Fixture(fake: FakeSupabase) {
+    const marouane = makeEmployee({ id: "emp-marouane", name: "Marouane Benali", skills: ["Gate", "Boarding"], shift_start: "06:15", shift_end: "14:45" });
+    // AP02 (13:45-23:15) comfortably covers the delayed 17:15-18:45
+    // window -- unlike NR02 (08:00-18:15), used elsewhere in this file,
+    // which would fall just short of its 18:45 end. The candidate pool
+    // Find Agent scores against derives shift times from the roster
+    // entry's shift_code (see buildDayEffectivePoolFromRosterEntries), so
+    // these raw fields and the roster shift_code below must agree.
+    const replacement = makeEmployee({ id: "emp-replacement", name: "Replacement Agent", skills: ["Gate", "Boarding"], shift_start: "13:45", shift_end: "23:15" });
+    const flight = makeFlight({
+      id: "flight-at815",
+      flight_number: "AT815",
+      aircraft: "Boeing 787-9",
+      scheduled_departure: "13:45",
+      day_of_week: "Monday",
+      flight_date: WEEK_START,
+    });
+    const req = makeRequirement({ id: "req-at815-gate", flight_id: "flight-at815", role: "Gate", total_requirement: 1 });
+    const assignment: Assignment = {
+      id: "assign-at815",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-at815-gate",
+      employee_id: "emp-marouane",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    };
+    const rosterMarouane: WeeklyPlanRosterEntry = { id: "roster-marouane", plan_id: PLAN_ID, employee_id: "emp-marouane", day_of_week: "Monday", status: "working", shift_code: "MT03" };
+    const rosterReplacement: WeeklyPlanRosterEntry = { id: "roster-replacement", plan_id: PLAN_ID, employee_id: "emp-replacement", day_of_week: "Monday", status: "working", shift_code: "AP02" };
+    const plan: WeeklyPlan = {
+      id: PLAN_ID,
+      week_start: WEEK_START,
+      week_label: "Test Week",
+      status: "draft",
+      revision: 1,
+      generated_at: new Date().toISOString(),
+      published_at: null,
+      generated_from_hash: "test-hash",
+      config_snapshot: CONFIG,
+      issues: [],
+      configuration_issues: [],
+    };
+
+    fake.from("employees").insert([marouane, replacement] as unknown as FakeRow[]);
+    fake.from("flights").insert([flight] as unknown as FakeRow[]);
+    fake.from("staffing_requirements").insert([req] as unknown as FakeRow[]);
+    fake.from("assignments").insert([assignment] as unknown as FakeRow[]);
+    fake.from("weekly_plans").insert([plan] as unknown as FakeRow[]);
+    fake.from("weekly_plan_roster_entries").insert([rosterMarouane, rosterReplacement] as unknown as FakeRow[]);
+
+    return { flight, req, marouane, replacement };
+  }
+
+  it("AT815: departure 13:45 -> 18:45 recalculates the Dreamliner Gate window to 17:15-18:45, invalidates the MT03 agent (shift ends 14:45), and surfaces an eligible replacement", async () => {
+    const fake = new FakeSupabase();
+    seedAT815Fixture(fake);
+    await fake.from("flights").update({ actual_departure: "18:45" }).eq("id", "flight-at815");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-at815")!;
+    const reqView = flightView.requirements.find((r) => r.requirement.id === "req-at815-gate")!;
+
+    expect(flightView.effectiveDeparture).toBe("18:45");
+    expect(reqView.invalidatedAssignments).toHaveLength(1);
+    const invalidated = reqView.invalidatedAssignments[0];
+    expect(invalidated.employee.id).toBe("emp-marouane");
+    expect(invalidated.oldWindow).toEqual({ start: "12:15", end: "13:45" });
+    expect(invalidated.newWindow).toEqual({ start: "17:15", end: "18:45" });
+    expect(invalidated.shiftBoundaryViolation).toEqual({ shiftStart: "06:15", shiftEnd: "14:45" });
+
+    // Original planned assignment preserved as-is -- never deleted/modified.
+    expect(reqView.assignedEmployees.map((e) => e.id)).toEqual(["emp-marouane"]);
+    // Gate coverage decreases accordingly: 1 required, 0 effectively valid.
+    expect(reqView.gap).toBe(1);
+    expect(reqView.coverageStatus).toBe("conflict");
+    // Find Agent evaluates the NEW window and finds the eligible replacement.
+    expect(reqView.gapResolution?.eligible).toBe(true);
+    if (reqView.gapResolution?.eligible !== true) throw new Error("unreachable");
+    expect(reqView.gapResolution.candidates.some((c) => c.employee.id === "emp-replacement" && c.status === "recommended")).toBe(true);
+  });
+
+  it("AT815: operational coverage recovers and the issue resolves once the regulator confirms the eligible replacement", async () => {
+    const fake = new FakeSupabase();
+    seedAT815Fixture(fake);
+    await fake.from("flights").update({ actual_departure: "18:45" }).eq("id", "flight-at815");
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-at815-gate",
+      oldEmployeeId: "emp-marouane",
+      newEmployeeId: "emp-replacement",
+      reason: "AT815 delayed to 18:45 -- original agent's MT03 shift ends 14:45.",
+    });
+    expect(result.ok).toBe(true);
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-at815")!;
+    const reqView = flightView.requirements.find((r) => r.requirement.id === "req-at815-gate")!;
+
+    // Operational coverage updates and the issue resolves.
+    expect(reqView.assignedEmployees.map((e) => e.id)).toEqual(["emp-replacement"]);
+    expect(reqView.invalidatedAssignments).toHaveLength(0);
+    expect(reqView.gap).toBe(0);
+    expect(reqView.coverageStatus).toBe("assigned");
+    // The change is traceable.
+    expect(reqView.modification?.previousEmployeeName).toBe("Marouane Benali");
+    expect(reqView.modification?.newEmployeeName).toBe("Replacement Agent");
   });
 });
 

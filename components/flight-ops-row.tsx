@@ -191,8 +191,20 @@ export function FlightOpsRow({
 
         <div className="flex flex-col gap-1.5">
           {requirements.map((r) => {
-            const totalCovered = r.assignedEmployees.length + r.proposedEmployees.length;
-            const hasGap = totalCovered < r.requirement.total_requirement;
+            // rawFilled: are there any real assignment/proposal rows at
+            // all for this requirement -- decides whether to show chips
+            // or the "— gap —" placeholder. effectiveFilled/hasGap come
+            // straight from the view's own, already-invalidation-corrected
+            // `gap` (lib/live-ops-service.ts) -- never recomputed from raw
+            // headcount here, so the row can never show a number the rest
+            // of the board (deriveFlightState, header counters) disagrees
+            // with. A requirement can have rawFilled > 0 (an assignment
+            // row genuinely exists) while still having a gap > 0 (that
+            // row's employee was invalidated by a flight change).
+            const rawFilled = r.assignedEmployees.length + r.proposedEmployees.length;
+            const effectiveFilled = Math.max(0, r.requirement.total_requirement - r.gap);
+            const hasGap = r.gap > 0;
+            const invalidatedEmployeeIds = new Set(r.invalidatedAssignments.map((ia) => ia.employee.id));
             return (
               <div key={r.requirement.id} className="flex flex-col gap-1 rounded-lg bg-surface px-3 py-1.5">
               <div className="flex items-center justify-between gap-3 text-sm">
@@ -201,10 +213,10 @@ export function FlightOpsRow({
                   onClick={() => onOpenRequirement?.(r.requirement.id)}
                   className="text-ink hover:underline underline-offset-2 decoration-dotted text-left"
                 >
-                  {r.coverageLabel} <span className="text-muted">{totalCovered}/{r.requirement.total_requirement}</span>
+                  {r.coverageLabel} <span className="text-muted">{effectiveFilled}/{r.requirement.total_requirement}</span>
                 </button>
                 <div className="flex items-center gap-2 flex-wrap justify-end">
-                  {totalCovered === 0 ? (
+                  {rawFilled === 0 ? (
                     <span className="text-xs text-muted">— gap —</span>
                   ) : (
                     <>
@@ -213,6 +225,7 @@ export function FlightOpsRow({
                           key={e.id}
                           name={e.name}
                           tone="assigned"
+                          invalid={invalidatedEmployeeIds.has(e.id)}
                           canAct={canAct}
                           onReassign={
                             onRequestAssign
@@ -241,6 +254,7 @@ export function FlightOpsRow({
                           key={e.id}
                           name={e.name}
                           tone="proposed"
+                          invalid={invalidatedEmployeeIds.has(e.id)}
                           canAct={canAct}
                           onReassign={
                             onRequestAssign
@@ -370,15 +384,24 @@ export function EmployeeChip({
   tone,
   canAct,
   onReassign,
+  invalid = false,
 }: {
   name: string;
   tone: "assigned" | "proposed";
   canAct: boolean;
   onReassign?: () => void;
+  /** True when this specific employee's duty was invalidated by a flight
+   * change (see LiveOpsInvalidatedAssignment) -- the Assignment row is
+   * untouched and still rendered here (it's still the real, preserved
+   * planned assignment), but visually flagged so the regulator knows
+   * which chip's "Change" action resolves the requirement's effective
+   * gap, without having to cross-reference GapTriageDetail's text below. */
+  invalid?: boolean;
 }) {
-  const toneClass = tone === "assigned" ? "bg-gray-100 text-ink" : "bg-brand-50 text-brand-700";
+  const toneClass = invalid ? "bg-warn-50 text-warn-700 ring-1 ring-warn-500/40" : tone === "assigned" ? "bg-gray-100 text-ink" : "bg-brand-50 text-brand-700";
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${toneClass}`}>
+      {invalid && <span aria-hidden="true">⚠</span>}
       {name}
       {onReassign && (
         <button
