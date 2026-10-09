@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { todayISO } from "@/lib/flight-date";
-import { LiveOpsFlightView, LiveOpsImpact, LiveOpsView } from "@/lib/live-ops-service";
+import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
 import { BOARD_SECTION_LABEL, BoardSection, groupFlights } from "@/lib/live-ops-board";
-import { buildDelayImpactNotification, LiveOpsNotification } from "@/lib/live-ops-notifications";
+import { acknowledgeAlert, OperationalAlert, reconcileAlerts } from "@/lib/live-ops-alerts";
 import { FlightOpsRow, DayRelation, LiveOpsAssignRequest } from "@/components/flight-ops-row";
 import { FlightDrawer } from "@/components/flight-drawer";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
@@ -33,10 +33,17 @@ export default function OperationsPage() {
   const [assignRequest, setAssignRequest] = useState<LiveOpsAssignRequest | null>(null);
   const [filter, setFilter] = useState<FlightFilter>("all");
 
-  // Notification/Attention Center — client-side/in-memory for this pass
-  // (see lib/live-ops-notifications.ts's own doc comment on why).
-  const [notifications, setNotifications] = useState<LiveOpsNotification[]>([]);
-  const [toast, setToast] = useState<LiveOpsNotification | null>(null);
+  // Attention Center (Live Operations phase 2) — reconciled from the live
+  // view on every refresh (see lib/live-ops-alerts.ts's own doc comment
+  // for the full lifecycle: detection never depends on this drawer, or
+  // any drawer, having been opened). Still client-side/in-memory for this
+  // pass — a genuinely open problem is re-detected from the live data on
+  // every fetch, so a page reload can never make it look resolved; see
+  // APPLY_NOTES for the one trade-off this leaves (an "acknowledged"
+  // marker doesn't survive a hard reload) and the smallest follow-up that
+  // would close it.
+  const [alerts, setAlerts] = useState<OperationalAlert[]>([]);
+  const [toast, setToast] = useState<OperationalAlert | null>(null);
 
   function loadLiveOps(forDate: string) {
     setLoading(true);
@@ -62,21 +69,14 @@ export default function OperationsPage() {
     });
   }
 
-  function handleNotify(impact: LiveOpsImpact) {
-    const notification = buildDelayImpactNotification(impact.flight, impact);
-    if (!notification) return;
-    setNotifications((prev) => [notification, ...prev]);
-    setToast(notification);
-  }
-
   function openFlight(flightId: string, requirementId?: string) {
     setOpenFlightId(flightId);
     setFocusRequirementId(requirementId);
   }
 
-  function handleNotificationOpen(notification: LiveOpsNotification) {
-    setNotifications((prev) => prev.map((n) => (n.id === notification.id ? { ...n, state: "acknowledged" } : n)));
-    openFlight(notification.flightId, notification.requirementIds[0]);
+  function handleAlertOpen(alert: OperationalAlert) {
+    setAlerts((prev) => acknowledgeAlert(prev, alert.id));
+    openFlight(alert.flightId, alert.requirementIds[0]);
   }
 
   const allFlights = view?.flights ?? [];
@@ -97,6 +97,33 @@ export default function OperationsPage() {
     return now.getHours() * 60 + now.getMinutes();
   })() : null;
   const dayRelation: DayRelation = date < today ? "past" : date > today ? "future" : "today";
+
+  // Re-derive the Attention Center every time the board data itself
+  // changes -- the regulator saving a flight edit (onSaved), confirming a
+  // replacement (onAssigned), or simply switching dates all call
+  // loadLiveOps, which lands here; there is no separate polling
+  // mechanism, matching section 6's "use the application's existing
+  // refresh mechanisms."
+  useEffect(() => {
+    if (!view) return;
+    setAlerts((prev) => {
+      const next = reconcileAlerts(prev, view.flights, nowMinutesSinceMidnight);
+      // A toast fires only for an alert that is genuinely new THIS
+      // refresh (first-ever detection, or a real reappearance after
+      // resolution) — never for one that was already open, so saving an
+      // unrelated flight never re-pops a toast for an existing problem
+      // (section 7: avoid overwhelming the regulator with repeated
+      // alerts for the same flight).
+      const prevByFlight = new Map(prev.map((a) => [a.flightId, a]));
+      const freshlyNew = next.find((a) => {
+        const was = prevByFlight.get(a.flightId);
+        return a.state === "new" && (!was || was.state === "resolved");
+      });
+      if (freshlyNew) setToast(freshlyNew);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   const filtered = allFlights.filter((f) => {
     if (filter === "all") return true;
@@ -131,7 +158,7 @@ export default function OperationsPage() {
                   onChange={(e) => setDate(e.target.value)}
                 />
               </label>
-              <NotificationCenter notifications={notifications} onOpen={handleNotificationOpen} />
+              <NotificationCenter alerts={alerts} onOpen={handleAlertOpen} />
             </div>
           }
         />
@@ -195,7 +222,6 @@ export default function OperationsPage() {
           }}
           onSaved={() => loadLiveOps(date)}
           onConflictStateChange={handleConflictStateChange}
-          onNotify={handleNotify}
           onRequestAssign={setAssignRequest}
         />
       )}
@@ -214,9 +240,9 @@ export default function OperationsPage() {
 
       {toast && (
         <NotificationToast
-          notification={toast}
+          alert={toast}
           onView={() => {
-            handleNotificationOpen(toast);
+            handleAlertOpen(toast);
             setToast(null);
           }}
           onDismiss={() => setToast(null)}

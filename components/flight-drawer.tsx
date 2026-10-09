@@ -31,15 +31,19 @@ const PHASE_OPTIONS = Object.keys(FLIGHT_PHASE_LABEL) as FlightPhase[];
  *    saving still PATCHes the flight then evaluates impact, exactly as
  *    EditFlightDrawer did; the only difference is the result renders back
  *    into this same drawer's STAFFING section instead of a separate
- *    conflict-only screen, and a real new conflict is also reported
- *    upward via `onNotify` for the toast/attention-center.
+ *    conflict-only screen. This drawer no longer builds or emits a
+ *    notification of its own (2026-10-09, Live Operations phase 2) — the
+ *    Attention Center is reconciled entirely from the live /api/live-ops
+ *    view on every refresh (see lib/live-ops-alerts.ts), including the
+ *    one `onSaved` below already triggers, so a new alert for this flight
+ *    appears the same way any other flight's would, with no special-cased
+ *    drawer callback required.
  */
 export function FlightDrawer({
   view,
   onClose,
   onSaved,
   onConflictStateChange,
-  onNotify,
   onRequestAssign,
   focusRequirementId,
 }: {
@@ -47,7 +51,6 @@ export function FlightDrawer({
   onClose: () => void;
   onSaved: () => void;
   onConflictStateChange: (flightId: string, active: boolean) => void;
-  onNotify: (impact: LiveOpsImpact) => void;
   onRequestAssign: (request: LiveOpsAssignRequest) => void;
   /** A notification click's target requirement — scrolled to and briefly highlighted on open. */
   focusRequirementId?: string;
@@ -151,7 +154,6 @@ export function FlightDrawer({
       setImpact(impactData as LiveOpsImpact);
       setResolvedIds(new Set());
       onConflictStateChange(flight.id, impactData.conflicts.length > 0);
-      if (impactData.conflicts.length > 0) onNotify(impactData as LiveOpsImpact);
       onSaved();
       setMode("view");
     } catch {

@@ -5,6 +5,7 @@ import { planIdForWeek } from "../lib/planning/weekly-plan-service";
 import { getCandidatesForRequirement } from "../lib/planning/candidate-lookup";
 import { loadLiveOpsView, evaluateFlightDelayImpact, confirmReassignment } from "../lib/live-ops-service";
 import { deriveFlightState } from "../lib/live-ops-flight-state";
+import { acknowledgeAlert, activeAlerts, reconcileAlerts } from "../lib/live-ops-alerts";
 import { effectiveDeparture } from "../lib/flight-operations";
 import { Assignment, AssignmentModification, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "../lib/types";
 
@@ -664,6 +665,58 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
     // The change is traceable.
     expect(reqView.modification?.previousEmployeeName).toBe("Marouane Benali");
     expect(reqView.modification?.newEmployeeName).toBe("Replacement Agent");
+  });
+
+  it("AT815: the full Proactive Notifications acceptance scenario -- detected, consolidated, acknowledged, then auto-resolved on confirmed replacement -- end-to-end through the REAL loadLiveOpsView, with no evaluate-impact/drawer call anywhere in this test (2026-10-09, Live Operations phase 2)", async () => {
+    const fake = new FakeSupabase();
+    seedAT815Fixture(fake);
+
+    // 1. The regulator delays AT815 from 13:45 to 18:45 -- an ordinary
+    // operational PATCH, exactly what app/api/flights/[id]/operational
+    // does. Nothing here calls evaluate-impact or opens any drawer.
+    await fake.from("flights").update({ actual_departure: "18:45" }).eq("id", "flight-at815");
+
+    // 2. ATLAS detects the invalidated assignment and updates effective
+    // coverage purely from an ordinary GET /api/live-ops-equivalent read.
+    const viewAfterDelay = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const alertsAfterDelay = reconcileAlerts([], viewAfterDelay.flights, null);
+    const at815Alert = alertsAfterDelay.find((a) => a.flightId === "flight-at815");
+    expect(at815Alert).toBeDefined();
+    expect(at815Alert!.state).toBe("new");
+    expect(at815Alert!.kind).toBe("invalidation");
+    expect(at815Alert!.requirementIds).toContain("req-at815-gate");
+
+    // 3. A second, unrelated refresh (e.g. the regulator just switching
+    // tabs) must not mint a second alert for the same flight.
+    const alertsAfterSecondRefresh = reconcileAlerts(alertsAfterDelay, viewAfterDelay.flights, null);
+    expect(alertsAfterSecondRefresh.filter((a) => a.flightId === "flight-at815")).toHaveLength(1);
+    expect(alertsAfterSecondRefresh.find((a) => a.flightId === "flight-at815")!.id).toBe(at815Alert!.id);
+
+    // 4. The regulator acknowledges the alert -- this must not resolve it.
+    const acknowledged = acknowledgeAlert(alertsAfterSecondRefresh, at815Alert!.id);
+    expect(acknowledged.find((a) => a.flightId === "flight-at815")!.state).toBe("acknowledged");
+
+    // 5. The regulator confirms an eligible replacement through the exact
+    // same confirmReassignment path Find Agent already uses.
+    const reassignResult = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-at815-gate",
+      oldEmployeeId: "emp-marouane",
+      newEmployeeId: "emp-replacement",
+      reason: "AT815 delayed to 18:45 -- original agent's MT03 shift ends 14:45.",
+    });
+    expect(reassignResult.ok).toBe(true);
+
+    // 6. Once valid staffing coverage is restored, ATLAS automatically
+    // marks the alert Resolved on the very next ordinary refresh -- no
+    // manual "resolve" action, and the acknowledged state is correctly
+    // superseded by resolution, not the other way around.
+    const viewAfterReplacement = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const alertsAfterReplacement = reconcileAlerts(acknowledged, viewAfterReplacement.flights, null);
+    const resolvedAlert = alertsAfterReplacement.find((a) => a.flightId === "flight-at815");
+    expect(resolvedAlert).toBeDefined();
+    expect(resolvedAlert!.state).toBe("resolved");
+    expect(resolvedAlert!.id).toBe(at815Alert!.id);
+    expect(activeAlerts(alertsAfterReplacement).some((a) => a.flightId === "flight-at815")).toBe(false);
   });
 });
 
