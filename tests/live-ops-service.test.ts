@@ -4,6 +4,7 @@ import { CONFIG } from "../lib/seed-data";
 import { planIdForWeek } from "../lib/planning/weekly-plan-service";
 import { getCandidatesForRequirement } from "../lib/planning/candidate-lookup";
 import { loadLiveOpsView, evaluateFlightDelayImpact, confirmReassignment } from "../lib/live-ops-service";
+import { deriveFlightState } from "../lib/live-ops-flight-state";
 import { effectiveDeparture } from "../lib/flight-operations";
 import { Assignment, AssignmentModification, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "../lib/types";
 
@@ -609,6 +610,33 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
     expect(reqView.gapResolution?.eligible).toBe(true);
     if (reqView.gapResolution?.eligible !== true) throw new Error("unreachable");
     expect(reqView.gapResolution.candidates.some((c) => c.employee.id === "emp-replacement" && c.status === "recommended")).toBe(true);
+  });
+
+  it("AT815: the flight-level board state is 'gap' (Needs Action), never 'delayed' (At Risk) -- end-to-end through deriveFlightState against the REAL loadLiveOpsView output, not a hand-built fixture (2026-10-09, regression for the reported 'still shows At Risk' bug)", async () => {
+    const fake = new FakeSupabase();
+    seedAT815Fixture(fake);
+    await fake.from("flights").update({ actual_departure: "18:45" }).eq("id", "flight-at815");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-at815")!;
+
+    // The flight IS delayed (effectiveDeparture !== scheduled_departure) --
+    // if coverageStatus/gap weren't wired into board state, this would
+    // read "delayed" ("At Risk" in the header/filter), exactly the bug
+    // reported. The invalidated assignment must take priority.
+    expect(flightView.effectiveDeparture).not.toBe(flightView.flight.scheduled_departure);
+    expect(deriveFlightState(flightView, false)).toBe("gap");
+    expect(deriveFlightState(flightView, false)).not.toBe("delayed");
+
+    // Same check the header's "At Risk" / "Needs Action" counters actually
+    // run (see components/live-ops-header.tsx's countFor and
+    // app/operations/page.tsx's filter predicate): this flight must count
+    // toward needsAction ("gap"/"conflict"), never atRisk ("delayed").
+    const state = deriveFlightState(flightView, false);
+    const countsAsAtRisk = state === "delayed";
+    const countsAsNeedsAction = state === "gap" || state === "conflict";
+    expect(countsAsAtRisk).toBe(false);
+    expect(countsAsNeedsAction).toBe(true);
   });
 
   it("AT815: operational coverage recovers and the issue resolves once the regulator confirms the eligible replacement", async () => {
