@@ -5,6 +5,7 @@ import { computeEmployeeDaySummary } from "@/lib/employee-status";
 import { DAYS_WITH_DATA } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight, AuditLogEntry } from "@/lib/types";
 import { ROLE_HEADER, getRoleFromHeader, canManageEmployees } from "@/lib/roles";
+import { fetchAllTableRows } from "@/lib/planning/weekly-plan-service";
 
 export const dynamic = "force-dynamic";
 
@@ -13,21 +14,27 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
 
   const [
     { data: employee, error: empErr },
-    { data: assignments, error: assignErr },
-    { data: requirements, error: reqErr },
-    { data: flights, error: flightErr },
+    assignments,
+    requirements,
+    flights,
     { data: auditEntries, error: auditErr },
   ] = await Promise.all([
     supabase.from("employees").select("*").eq("id", params.id).single(),
-    supabase.from("assignments").select("*"),
-    supabase.from("staffing_requirements").select("*"),
-    supabase.from("flights").select("*"),
+    // 2026-10-09 (pagination audit — see app/api/assign/route.ts's own
+    // doc comment for the full incident): these three used to be a bare
+    // `.select("*")`, silently truncated past PostgREST's default
+    // 1000-row cap. This route's own profile/history view is deliberately
+    // all-time (not scoped to one week), so the fix here is pagination
+    // only, not week-scoping.
+    fetchAllTableRows<Assignment>(supabase, "assignments"),
+    fetchAllTableRows<StaffingRequirement>(supabase, "staffing_requirements"),
+    fetchAllTableRows<Flight>(supabase, "flights"),
     supabase.from("audit_log_entries").select("*").order("step_number", { ascending: true }),
   ]);
 
   if (empErr || !employee) return NextResponse.json({ error: "Employee not found" }, { status: 404 });
-  if (assignErr || reqErr || flightErr || auditErr) {
-    return NextResponse.json({ error: (assignErr || reqErr || flightErr || auditErr)?.message }, { status: 500 });
+  if (auditErr) {
+    return NextResponse.json({ error: auditErr.message }, { status: 500 });
   }
 
   const emp = employee as Employee;

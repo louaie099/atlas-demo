@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { CURRENT_WEEK_START } from "@/lib/seed-data";
-import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
+import { planIdForWeek, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "@/lib/planning/weekly-plan-service";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { flightDateFor } from "@/lib/flight-date";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, ZoneCheckinAssignment } from "@/lib/types";
@@ -88,10 +88,16 @@ export async function POST(req: Request) {
     );
   }
 
-  const [{ data: allAssignments }, { data: allRequirements }, { data: allFlights }] = await Promise.all([
-    supabase.from("assignments").select("*"),
-    supabase.from("staffing_requirements").select("*"),
-    supabase.from("flights").select("*"),
+  // 2026-10-09 (pagination/cross-week-leakage audit — see
+  // app/api/assign/route.ts's own doc comment for the full incident):
+  // scoped to this plan's own week instead of a bare, unscoped,
+  // unpaginated `.select("*")`.
+  const { data: weekFlightsRaw } = await supabase.from("flights").select("*").eq("week_start", plan.week_start);
+  const allFlights = (weekFlightsRaw ?? []) as Flight[];
+  const weekFlightIds = allFlights.map((f) => f.id);
+  const [allAssignments, allRequirements] = await Promise.all([
+    fetchAllAssignmentsForPlan(supabase, plan.id),
+    fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
   ]);
 
   const window: TimeWindow = { start: requirement.window_start, end: requirement.window_end };

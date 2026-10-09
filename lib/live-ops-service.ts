@@ -1,7 +1,7 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 
 import { weekStartFor, DAYS_ORDER, dayOfWeekFor } from "./flight-date";
-import { loadPersistedPlanView, planIdForWeek } from "./planning/weekly-plan-service";
+import { loadPersistedPlanView, planIdForWeek, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "./planning/weekly-plan-service";
 import { getRequirementWindow } from "./planning/requirement-window";
 import { getCandidatesForRequirement } from "./planning/candidate-lookup";
 import { effectiveDeparture } from "./flight-operations";
@@ -296,15 +296,29 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
   if (reqErr) return { error: reqErr.message, status: 500 };
   const requirements = (requirementRows ?? []) as StaffingRequirement[];
 
-  const [{ data: allAssignments, error: assignErr }, { data: allRequirements, error: allReqErr }, { data: allFlights, error: allFlightErr }, { data: allEmployees, error: empErr }] =
-    await Promise.all([
-      supabase.from("assignments").select("*"),
-      supabase.from("staffing_requirements").select("*"),
-      supabase.from("flights").select("*"),
-      supabase.from("employees").select("*"),
-    ]);
-  if (assignErr || allReqErr || allFlightErr || empErr) {
-    return { error: (assignErr || allReqErr || allFlightErr || empErr)!.message, status: 500 };
+  // 2026-10-09 (pagination/cross-week-leakage audit — see
+  // app/api/assign/route.ts's own doc comment for the full incident):
+  // these three used to be a bare, unscoped `.select("*")` across every
+  // week the demo has ever generated. That both risks silent truncation
+  // past PostgREST's default 1000-row cap, and feeds otherCommitmentsAt's
+  // day_of_week-LABEL-only comparison below real risk of matching an
+  // unrelated week's same weekday. Scoped to this flight's own week —
+  // every requirement/assignment this function ever looks at belongs to
+  // a flight on the SAME day_of_week as the one being evaluated, which is
+  // only ever meaningful within one week in the first place.
+  const flightWeekStart = weekStartFor(flight.flight_date);
+  const { data: weekFlightsRaw, error: allFlightErr } = await supabase.from("flights").select("*").eq("week_start", flightWeekStart);
+  if (allFlightErr) return { error: allFlightErr.message, status: 500 };
+  const allFlights = (weekFlightsRaw ?? []) as Flight[];
+  const weekFlightIds = allFlights.map((f) => f.id);
+
+  const [{ data: allEmployees, error: empErr }, allAssignments, allRequirements] = await Promise.all([
+    supabase.from("employees").select("*"),
+    fetchAllAssignmentsForPlan(supabase, planIdForWeek(flightWeekStart)),
+    fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
+  ]);
+  if (empErr) {
+    return { error: empErr.message, status: 500 };
   }
 
   const employeesById = new Map((allEmployees as Employee[]).map((e) => [e.id, e]));

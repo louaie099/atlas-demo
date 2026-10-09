@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates } from "@/lib/scoring";
 import { weekStartFor, flightDateFor, DAYS_ORDER } from "@/lib/flight-date";
-import { planIdForWeek } from "@/lib/planning/weekly-plan-service";
+import { planIdForWeek, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "@/lib/planning/weekly-plan-service";
 import { previousWeekStart } from "@/lib/planning/rotation-context";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
@@ -94,10 +94,35 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "No plan exists for this requirement's week — generate one first." }, { status: 409 });
   }
 
-  const [{ data: allAssignments }, { data: allRequirements }, { data: allFlights }] = await Promise.all([
-    supabase.from("assignments").select("*"),
-    supabase.from("staffing_requirements").select("*"),
-    supabase.from("flights").select("*"),
+  // 2026-10-09 (pagination/cross-week-leakage audit): this used to be a
+  // bare, unscoped `supabase.from("assignments"/"staffing_requirements"/
+  // "flights").select("*")` across the ENTIRE table, every week the demo
+  // has ever generated -- which crosses PostgREST's default 1000-row cap
+  // within a single ordinary week's worth of real flight data, silently
+  // truncating with no error. That truncation is exactly what let the
+  // "already assigned" duplicate-safety check below miss an
+  // already-persisted row and fall through to a raw Postgres `duplicate
+  // key value violates unique constraint "assignments_pkey"` crash on a
+  // second attempt -- confirmed live (AT587/Gate, 2026-10-09): the FIRST
+  // Assign click had, in fact, already succeeded; Live Operations' own
+  // read of the same table (loadPersistedPlanView, same root cause, now
+  // fixed the same way) just as easily truncated and so never showed it
+  // as covered, which is what made that first, successful click look like
+  // "nothing happened." Scoping to this requirement's own week (this
+  // plan's assignments, this week's flights/requirements) both bounds the
+  // row count well under the cap and closes a second, independent bug:
+  // computeBusyWindowsForDay only ever compares a Flight.day_of_week
+  // LABEL, never the real calendar date, so the old unscoped fetch could
+  // make an employee's unrelated assignment from a DIFFERENT week's same
+  // weekday incorrectly read as a busy-window conflict here.
+  const { data: weekFlightsRaw, error: weekFlightsErr } = await supabase.from("flights").select("*").eq("week_start", weekStart);
+  if (weekFlightsErr) return NextResponse.json({ error: weekFlightsErr.message }, { status: 500 });
+  const allFlights = (weekFlightsRaw ?? []) as Flight[];
+  const weekFlightIds = allFlights.map((f) => f.id);
+
+  const [allAssignments, allRequirements] = await Promise.all([
+    fetchAllAssignmentsForPlan(supabase, plan.id),
+    fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
   ]);
 
   const existingForRequirement = (allAssignments as Assignment[]).filter(

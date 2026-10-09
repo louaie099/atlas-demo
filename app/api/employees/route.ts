@@ -5,22 +5,29 @@ import { computeEmployeeDaySummary } from "@/lib/employee-status";
 import { DEMO_TODAY } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight } from "@/lib/types";
 import { ROLE_HEADER, getRoleFromHeader, canManageEmployees } from "@/lib/roles";
+import { fetchAllTableRows } from "@/lib/planning/weekly-plan-service";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = getSupabaseServerClient();
 
-  const [{ data: employees, error: empErr }, { data: assignments, error: assignErr }, { data: requirements, error: reqErr }, { data: flights, error: flightErr }] =
-    await Promise.all([
-      supabase.from("employees").select("*").order("name", { ascending: true }),
-      supabase.from("assignments").select("*"),
-      supabase.from("staffing_requirements").select("*"),
-      supabase.from("flights").select("*"),
-    ]);
+  const [{ data: employees, error: empErr }, assignments, requirements, flights] = await Promise.all([
+    supabase.from("employees").select("*").order("name", { ascending: true }),
+    // 2026-10-09 (pagination audit — see app/api/assign/route.ts's own
+    // doc comment for the full incident): these three used to be a bare
+    // `.select("*")`, silently truncated past PostgREST's default
+    // 1000-row cap once the demo's real month of flight data grew past
+    // it. This route deliberately looks across every week (an employee's
+    // profile is all-time, not scoped to one), so the fix here is
+    // pagination only, not week-scoping.
+    fetchAllTableRows<Assignment>(supabase, "assignments"),
+    fetchAllTableRows<StaffingRequirement>(supabase, "staffing_requirements"),
+    fetchAllTableRows<Flight>(supabase, "flights"),
+  ]);
 
-  if (empErr || assignErr || reqErr || flightErr) {
-    return NextResponse.json({ error: (empErr || assignErr || reqErr || flightErr)?.message }, { status: 500 });
+  if (empErr) {
+    return NextResponse.json({ error: empErr.message }, { status: 500 });
   }
 
   // Enrich each employee with today's operational status, computed from

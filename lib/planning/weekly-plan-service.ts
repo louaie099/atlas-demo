@@ -483,6 +483,92 @@ export async function fetchAllAssignmentsForPlan(supabase: SupabaseClient, planI
 }
 
 /**
+ * `staffing_requirements` has no week_start column of its own (see
+ * loadPersistedPlanView's own doc comment) -- it only ever belongs to a
+ * week via its flight_id -- so "this week's requirements" is always
+ * `.in("flight_id", flightIds)`. That, like every other plain `.select()`
+ * against this table, is subject to the same 1000-row PostgREST cap (a
+ * real, representative week here is ~70 flights/day * ~2.3 requirements/
+ * flight * 7 days =~ 1125 rows -- already past the cap on an ordinary
+ * week, not just a theoretical future scale concern). Paginated the same
+ * way as fetchAllAssignmentsForPlan/fetchAllRosterEntriesForPlan above.
+ */
+export async function fetchAllRequirementsForFlightIds(supabase: SupabaseClient, flightIds: string[]): Promise<StaffingRequirement[]> {
+  if (flightIds.length === 0) return [];
+  const PAGE_SIZE = 1000;
+  const all: StaffingRequirement[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from("staffing_requirements")
+      .select("*")
+      .in("flight_id", flightIds)
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`Fetching requirements for flights failed: ${error.message}`);
+    const page = (data ?? []) as StaffingRequirement[];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
+
+/**
+ * The un-week-scoped twin of the two helpers above -- for the handful of
+ * callers (Find Agent / manual Assign's own server-side re-validation,
+ * Live Operations' delay-impact evaluation, Check-in zone assign/
+ * candidates) that historically fetched `assignments`/`staffing_
+ * requirements`/`flights` WHOLESALE with a bare `.select("*")`, across
+ * every week the demo has ever generated, not just the one week actually
+ * relevant to the request being served.
+ *
+ * This was always wrong in two compounding ways, both closed by scoping
+ * to the request's own week wherever a caller can (see each call site's
+ * own doc comment) -- this generic helper exists only for the remaining
+ * callers that have no natural week to scope to (e.g. an employee's
+ * all-time profile/audit view, which legitimately wants every week):
+ *  1. Silent truncation: once any of these three tables passes
+ *     PostgREST's default 1000-row `.select()` cap -- which a full real
+ *     month of CMN/RAM flight data does, easily, for all three -- the
+ *     unscoped read silently returns only the first page, with no error.
+ *     Confirmed in production (2026-10-09): this is exactly what let a
+ *     just-persisted manual Assignment go undetected by `/api/assign`'s
+ *     own "already assigned" duplicate-safety check on a retry, which
+ *     then crashed with a raw Postgres `duplicate key value violates
+ *     unique constraint "assignments_pkey"` instead of a clean, actionable
+ *     error -- the assignment had, in fact, already succeeded on the
+ *     FIRST click; Live Operations' own read of the same table (see
+ *     loadPersistedPlanView) just as easily truncates the same way and so
+ *     didn't show it as covered, which is what made that first,
+ *     successful click look like "nothing happened."
+ *  2. Cross-week leakage: `computeBusyWindowsForDay` (lib/planning/
+ *     duty-generation.ts) only ever compares a `Flight.day_of_week`
+ *     LABEL ("Monday") against the day being evaluated -- never the real
+ *     calendar date -- so an unscoped, every-week fetch can make an
+ *     employee's entirely unrelated assignment from a DIFFERENT week's
+ *     Monday register as a busy-window conflict for THIS week's Monday.
+ *     weekly-plan-service.ts's own loadPersistedPlanView already
+ *     documents fixing this exact leakage once before (its "Flights are
+ *     fetched FIRST and used to scope requirements" comment above); the
+ *     callers this helper is a fallback for never received that same
+ *     fix.
+ */
+export async function fetchAllTableRows<T>(supabase: SupabaseClient, table: string): Promise<T[]> {
+  const PAGE_SIZE = 1000;
+  const all: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase.from(table).select("*").range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`Fetching all rows of "${table}" failed: ${error.message}`);
+    const page = (data ?? []) as T[];
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
+
+/**
  * READ-YOUR-OWN-WRITE verification, run at the end of every operation
  * that persists a plan revision (persistDraftPlanBundle above and
  * regenerateDraftPlan's own update+replace below). This is the direct fix
@@ -1000,23 +1086,36 @@ export async function loadPersistedPlanView(
   if (flightErr) throw new Error(flightErr.message);
   const flightIds = (flights ?? []).map((f) => f.id);
 
+  // assignments/requirements (2026-10-09): both were previously a plain
+  // `.select()` here too -- `assignments` scoped by plan_id but still
+  // unpaginated, `requirements` scoped by flightIds but likewise
+  // unpaginated -- and both tables cross PostgREST's default 1000-row cap
+  // within a single ordinary week (~70 flights/day * ~2.3 requirements/
+  // flight * 7 days =~ 1125 requirement rows; a comparable count of
+  // assignment rows once most of them are staffed). A silently truncated
+  // read here is exactly what let a real, already-persisted manual
+  // Assignment (from /api/assign) go on showing as an uncovered "gap" in
+  // Live Operations -- see fetchAllRequirementsForFlightIds' and
+  // fetchAllTableRows' own doc comments for the full incident. Both now
+  // use the same paginated helpers fetchAllRosterEntriesForPlan already
+  // used just below.
   const [
     rosterEntries,
-    { data: assignments, error: assignErr },
-    { data: requirements, error: reqErr },
+    assignments,
+    requirements,
     { data: employees, error: empErr },
     { data: zoneRequirementRows, error: zoneReqErr },
     { data: zoneAssignmentRows, error: zoneAssignErr },
   ] = await Promise.all([
     fetchAllRosterEntriesForPlan(supabase, planId),
-    supabase.from("assignments").select("*").eq("plan_id", planId),
-    flightIds.length > 0 ? supabase.from("staffing_requirements").select("*").in("flight_id", flightIds) : Promise.resolve({ data: [], error: null }),
+    fetchAllAssignmentsForPlan(supabase, planId),
+    fetchAllRequirementsForFlightIds(supabase, flightIds),
     supabase.from("employees").select("*"),
     supabase.from("checkin_zone_requirements").select("*").eq("plan_id", planId),
     supabase.from("checkin_zone_assignments").select("*").eq("plan_id", planId),
   ]);
-  if (assignErr || reqErr || empErr || zoneReqErr || zoneAssignErr) {
-    throw new Error((assignErr || reqErr || empErr || zoneReqErr || zoneAssignErr)!.message);
+  if (empErr || zoneReqErr || zoneAssignErr) {
+    throw new Error((empErr || zoneReqErr || zoneAssignErr)!.message);
   }
 
   const zoneRequirementIds = (zoneRequirementRows ?? []).map((r) => r.id as string);

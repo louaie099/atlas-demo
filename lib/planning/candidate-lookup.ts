@@ -1,7 +1,7 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 
 import { scoreCandidates, TimeWindow } from "../scoring";
-import { planIdForWeek, fetchAllRosterEntriesForPlan } from "./weekly-plan-service";
+import { planIdForWeek, fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "./weekly-plan-service";
 import { previousWeekStart } from "./rotation-context";
 import { getRequirementWindow } from "./requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "./duty-generation";
@@ -171,15 +171,26 @@ export async function getCandidatesForRequirement(
     return { ok: false, status: 409, error: "No plan exists for this requirement's week — generate one first." };
   }
 
-  const [{ data: allAssignments, error: assignErr }, { data: allRequirements, error: allReqErr }, { data: allFlights, error: allFlightErr }] =
-    await Promise.all([
-      supabase.from("assignments").select("*"),
-      supabase.from("staffing_requirements").select("*"),
-      supabase.from("flights").select("*"),
-    ]);
-  if (assignErr || allReqErr || allFlightErr) {
-    return { ok: false, status: 500, error: (assignErr || allReqErr || allFlightErr)!.message };
-  }
+  // 2026-10-09 (pagination/cross-week-leakage audit — see
+  // app/api/assign/route.ts's own doc comment on this exact fix for the
+  // full incident): these three used to be a bare, unscoped
+  // `.select("*")` across every week the demo has ever generated, which
+  // silently truncates past PostgREST's default 1000-row cap (an
+  // ordinary week's worth of requirements alone already crosses it) and
+  // lets computeBusyWindowsForDay's day_of_week-label-only comparison
+  // bleed busy windows across unrelated weeks. Scoped to this
+  // requirement's own week instead -- `tasksAssignedThisScope` below only
+  // ever looks at the target date anyway, so nothing here needed
+  // cross-week data in the first place.
+  const { data: weekFlightsRaw, error: allFlightErr } = await supabase.from("flights").select("*").eq("week_start", weekStart);
+  if (allFlightErr) return { ok: false, status: 500, error: allFlightErr.message };
+  const allFlights = (weekFlightsRaw ?? []) as Flight[];
+  const weekFlightIds = allFlights.map((f) => f.id);
+
+  const [allAssignments, allRequirements] = await Promise.all([
+    fetchAllAssignmentsForPlan(supabase, plan.id),
+    fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
+  ]);
 
   // Operational-delay fix (2026-10-04): getRequirementWindow deliberately
   // never reads actual_departure (see lib/flight-operations.ts's own doc
