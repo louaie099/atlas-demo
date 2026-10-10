@@ -1099,6 +1099,18 @@ export async function loadPersistedPlanView(
   // fetchAllTableRows' own doc comments for the full incident. Both now
   // use the same paginated helpers fetchAllRosterEntriesForPlan already
   // used just below.
+  // OVERNIGHT CARRYOVER, week boundary (2026-10-10, Phase 1): this week's
+  // FIRST displayed day needs the immediately preceding calendar week's
+  // own last-day roster to resolve a cross-midnight carryover shift
+  // (NT01 etc.) into its early-morning hours -- see
+  // persisted-plan-view.ts's previousDayCarryoverContext. Fetched the
+  // same one-week-back way lookupPriorWeekBoundaryContext already does
+  // for shift generation's own cross-week rest checks. A nonexistent
+  // predecessor plan id simply yields zero matching roster rows here
+  // (fetchAllRosterEntriesForPlan filters by plan_id, never errors on no
+  // match), so this never needs a separate existence check first.
+  const priorWeekPlanId = planIdForWeek(previousWeekStart(weekStart));
+
   const [
     rosterEntries,
     assignments,
@@ -1106,6 +1118,7 @@ export async function loadPersistedPlanView(
     { data: employees, error: empErr },
     { data: zoneRequirementRows, error: zoneReqErr },
     { data: zoneAssignmentRows, error: zoneAssignErr },
+    previousWeekLastDayRosterEntries,
   ] = await Promise.all([
     fetchAllRosterEntriesForPlan(supabase, planId),
     fetchAllAssignmentsForPlan(supabase, planId),
@@ -1113,6 +1126,7 @@ export async function loadPersistedPlanView(
     supabase.from("employees").select("*"),
     supabase.from("checkin_zone_requirements").select("*").eq("plan_id", planId),
     supabase.from("checkin_zone_assignments").select("*").eq("plan_id", planId),
+    fetchAllRosterEntriesForPlan(supabase, priorWeekPlanId),
   ]);
   if (empErr || zoneReqErr || zoneAssignErr) {
     throw new Error((empErr || zoneReqErr || zoneAssignErr)!.message);
@@ -1144,6 +1158,7 @@ export async function loadPersistedPlanView(
     employees as Employee[],
     daysOrder,
     zoneRequirements,
-    zoneAssignmentRows as ZoneCheckinAssignment[]
+    zoneAssignmentRows as ZoneCheckinAssignment[],
+    previousWeekLastDayRosterEntries
   );
 }

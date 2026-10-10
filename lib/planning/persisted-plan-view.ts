@@ -18,6 +18,7 @@ import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments } from "../foreign-company-window";
 import { getShiftTimesAs } from "../shift-templates";
 import { flightDateFor } from "../flight-date";
+import { previousWeekStart } from "./rotation-context";
 import { PlanIssue } from "./validation";
 import { CheckinZoneId, CHECKIN_ZONES, ORDINARY_CHECKIN_ZONES } from "../checkin-zones";
 import {
@@ -103,6 +104,45 @@ function zoneWindowsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: 
 }
 
 /**
+ * OVERNIGHT CARRYOVER (2026-10-10, Phase 1): this day's `previousDay`
+ * context for buildEligibleEmployeeAvailabilityForDay/
+ * buildDayEffectivePoolFromRosterEntries — the immediately preceding
+ * calendar day's own roster entries, label, and date.
+ *
+ * For every day but the first in `daysOrder`, that's simply the day
+ * before it in THIS SAME plan's own roster — already in scope, no extra
+ * fetch needed.
+ *
+ * For `daysOrder[0]` (a displayed week's first day — Monday today), the
+ * immediately preceding calendar day is the LAST day of the PRIOR
+ * calendar week's own plan, which lives in a different plan's roster
+ * entries entirely. `previousWeekLastDayRosterEntries`, when the caller
+ * found and supplied one (see weekly-plan-service.ts's
+ * loadPersistedPlanView, which fetches it the same one-week-back way
+ * lookupPriorWeekBoundaryContext already does for shift generation's own
+ * cross-week rest checks), supplies that. Returns undefined (the exact
+ * prior behavior: no carryover candidates) when no such data is
+ * available — consistent with this codebase's established convention of
+ * never silently assuming data that was never fetched.
+ */
+function previousDayCarryoverContext(
+  daysOrder: string[],
+  weekStart: string,
+  dayIndex: number,
+  thisWeekRosterEntries: WeeklyPlanRosterEntry[],
+  previousWeekLastDayRosterEntries: WeeklyPlanRosterEntry[]
+): { dayOfWeek: string; date: string; rosterEntries: WeeklyPlanRosterEntry[] } | undefined {
+  if (dayIndex > 0) {
+    const previousDayOfWeek = daysOrder[dayIndex - 1];
+    return { dayOfWeek: previousDayOfWeek, date: flightDateFor(weekStart, previousDayOfWeek), rosterEntries: thisWeekRosterEntries };
+  }
+  if (previousWeekLastDayRosterEntries.length === 0) return undefined;
+  const priorWeekStart = previousWeekStart(weekStart);
+  const priorLastDay = daysOrder[daysOrder.length - 1];
+  return { dayOfWeek: priorLastDay, date: flightDateFor(priorWeekStart, priorLastDay), rosterEntries: previousWeekLastDayRosterEntries };
+}
+
+/**
  * Builds this plan's zone coverage views for every day, combining:
  *  - ORDINARY zones (Main/Italy-Spain/Domestic): the derived
  *    Required/Available atomic-interval timeline
@@ -127,7 +167,8 @@ function buildZoneCoverageViews(
   assignments: Assignment[],
   requirements: StaffingRequirement[],
   checkinPolicy: import("./checkin-demand").CheckinDemandPolicy,
-  zonePolicy?: import("./checkin-zone-demand").ZoneCheckinDemandPolicy
+  zonePolicy?: import("./checkin-zone-demand").ZoneCheckinDemandPolicy,
+  previousWeekLastDayRosterEntries: WeeklyPlanRosterEntry[] = []
 ): ZoneCoverageView[] {
   const employeesById = new Map(employees.map((e) => [e.id, e]));
   const flightsById = new Map(flights.map((f) => [f.id, f]));
@@ -135,7 +176,8 @@ function buildZoneCoverageViews(
 
   const views: ZoneCoverageView[] = [];
 
-  for (const day of daysOrder) {
+  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
+    const day = daysOrder[dayIndex];
     const dayRequirements = zoneRequirements.filter((r) => r.day_of_week === day);
 
     const findOverlappingRequirementId = (zone: CheckinZoneId, start: string, end: string): string | null => {
@@ -156,6 +198,8 @@ function buildZoneCoverageViews(
     };
 
     // ORDINARY zones — derived Required/Available timeline.
+    const previousDay = previousDayCarryoverContext(daysOrder, weekStart, dayIndex, rosterEntries, previousWeekLastDayRosterEntries);
+    const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
     const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(
       day,
       employees,
@@ -164,9 +208,10 @@ function buildZoneCoverageViews(
       requirements,
       flights,
       checkinPolicy,
-      flightDateFor(weekStart, day)
+      flightDateFor(weekStart, day),
+      previousDay
     );
-    const rowsByZone = buildZoneCoverageRowsForDay(day, flights, eligibleAvailability, zonePolicy);
+    const rowsByZone = buildZoneCoverageRowsForDay(day, flights, eligibleAvailability, zonePolicy, nextDayOfWeek);
 
     for (const zone of ORDINARY_CHECKIN_ZONES) {
       for (const row of rowsByZone[zone] ?? []) {
@@ -245,7 +290,17 @@ export function buildPersistedWeeklyPlanView(
   employees: Employee[],
   daysOrder: string[],
   zoneRequirements: ZoneCheckinRequirement[] = [],
-  zoneAssignments: ZoneCheckinAssignment[] = []
+  zoneAssignments: ZoneCheckinAssignment[] = [],
+  // OVERNIGHT CARRYOVER, week boundary (2026-10-10, Phase 1): the
+  // immediately preceding calendar week's own plan's LAST displayed day
+  // roster entries, when the caller found and fetched one (see
+  // weekly-plan-service.ts's loadPersistedPlanView, mirroring
+  // lookupPriorWeekBoundaryContext's existing one-week-back lookup for
+  // shift generation). Used ONLY to resolve `daysOrder[0]`'s (this week's
+  // first displayed day) own previous-day carryover — see
+  // previousDayCarryoverContext above. Optional; omitted/empty = exact
+  // prior behavior for this week's first day (no carryover candidates).
+  previousWeekLastDayRosterEntries: WeeklyPlanRosterEntry[] = []
 ): PersistedWeeklyPlanView {
   const items: CoverageItem[] = assignments.map((a) => ({
     requirementId: a.staffing_requirement_id,
@@ -272,7 +327,8 @@ export function buildPersistedWeeklyPlanView(
     plan.config_snapshot.checkin_demand_policy,
     zoneAssignments,
     zoneRequirements,
-    plan.config_snapshot.zone_checkin_demand_policy
+    plan.config_snapshot.zone_checkin_demand_policy,
+    previousWeekLastDayRosterEntries
   );
   const zoneCoverage = buildZoneCoverageViews(
     daysOrder,
@@ -285,7 +341,8 @@ export function buildPersistedWeeklyPlanView(
     assignments,
     requirements,
     plan.config_snapshot.checkin_demand_policy,
-    plan.config_snapshot.zone_checkin_demand_policy
+    plan.config_snapshot.zone_checkin_demand_policy,
+    previousWeekLastDayRosterEntries
   );
 
   return { plan, flights, roster, schedule, zoneCoverage };
@@ -303,7 +360,8 @@ function buildPersistedAgentScheduleEntries(
   checkinPolicy: import("./checkin-demand").CheckinDemandPolicy,
   zoneAssignments: ZoneCheckinAssignment[] = [],
   zoneRequirements: ZoneCheckinRequirement[] = [],
-  zonePolicy?: import("./checkin-zone-demand").ZoneCheckinDemandPolicy
+  zonePolicy?: import("./checkin-zone-demand").ZoneCheckinDemandPolicy,
+  previousWeekLastDayRosterEntries: WeeklyPlanRosterEntry[] = []
 ): AgentScheduleEntry[] {
   const requirementsById = new Map<string, StaffingRequirement>(requirements.map((r) => [r.id, r]));
   const flightsById = new Map<string, Flight>(flights.map((f) => [f.id, f]));
@@ -330,7 +388,10 @@ function buildPersistedAgentScheduleEntries(
   // this replaces the old persisted "atlas_generated" checkin_zone_assignments
   // rows entirely.
   const derivedPeriodsByDay = new Map<string, ReturnType<typeof buildDailyCapacityTimeline>>();
-  for (const day of daysOrder) {
+  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
+    const day = daysOrder[dayIndex];
+    const previousDay = previousDayCarryoverContext(daysOrder, weekStart, dayIndex, rosterEntries, previousWeekLastDayRosterEntries);
+    const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
     const eligibleAvailability = buildEligibleEmployeeAvailabilityForDay(
       day,
       employees,
@@ -339,9 +400,10 @@ function buildPersistedAgentScheduleEntries(
       requirements,
       flights,
       checkinPolicy,
-      flightDateFor(weekStart, day)
+      flightDateFor(weekStart, day),
+      previousDay
     );
-    derivedPeriodsByDay.set(day, buildDailyCapacityTimeline(day, flights, eligibleAvailability, zonePolicy));
+    derivedPeriodsByDay.set(day, buildDailyCapacityTimeline(day, flights, eligibleAvailability, zonePolicy, nextDayOfWeek));
   }
 
   const issuesByEmployeeDay = new Map<string, PlanIssue[]>();

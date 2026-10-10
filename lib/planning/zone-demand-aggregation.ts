@@ -7,6 +7,7 @@ import {
   checkinIncrementForFlight,
   zoneBaseAgents,
   zoneMinimumPerActiveFlight,
+  flightCheckinSpilloverMinutesIntoPreviousDay,
 } from "./checkin-zone-demand";
 
 const BUCKET_MINUTES = 30;
@@ -58,12 +59,27 @@ export interface ZoneDailyDemand {
  * them, even before any complexity delta). This is the "combined workload
  * in that zone" step of the product owner's pipeline description — never
  * N independent per-flight totals summed.
+ *
+ * CROSS-MIDNIGHT DEMAND (2026-10-10, additive/opt-in): an early-morning
+ * flight belonging to the FOLLOWING calendar day (`nextDayOfWeek`, when
+ * supplied) can have its Check-in-open window begin before midnight —
+ * i.e. during THIS day's own tail end. Such a flight's spillover portion
+ * (flightCheckinSpilloverMinutesIntoPreviousDay) is folded into THIS
+ * day's buckets here, using its own unclamped window — never its
+ * ordinary, clamped getFlightCheckinWindow (evaluated separately, exactly
+ * as before, when that flight's own day is itself processed) — so this
+ * can never double-count a flight's demand across the boundary. Omitting
+ * `nextDayOfWeek` (every existing caller, and both
+ * aggregateT1DemandProfileForDay/peakAggregateT1DemandMinuteForDay below,
+ * which must stay byte-identical for Stage 6's shift-selection bias) is
+ * the exact prior behavior.
  */
 export function aggregateZoneDailyDemand(
   dayOfWeek: string,
   zone: CheckinZoneId,
   flights: Flight[],
-  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
+  nextDayOfWeek?: string
 ): ZoneDailyDemand {
   const buckets: ZoneDemandBucket[] = Array.from({ length: BUCKETS_PER_DAY }, (_, i) => ({
     start: minutesToTime(i * BUCKET_MINUTES),
@@ -102,6 +118,28 @@ export function aggregateZoneDailyDemand(
     }
   }
 
+  // CROSS-MIDNIGHT spillover from the FOLLOWING day's early-morning
+  // flights (see this function's own doc comment) — additive only, and
+  // only when the caller opted in via `nextDayOfWeek`.
+  const nextDayFlights = nextDayOfWeek ? flights.filter((f) => f.day_of_week === nextDayOfWeek) : [];
+  for (const flight of nextDayFlights) {
+    const contribution = checkinIncrementForFlight(flight, policy);
+    if (!contribution || contribution.zone !== zone) continue;
+
+    const spill = flightCheckinSpilloverMinutesIntoPreviousDay(flight, policy);
+    if (!spill) continue;
+
+    for (let i = 0; i < BUCKETS_PER_DAY; i++) {
+      const bucketStart = i * BUCKET_MINUTES;
+      const bucketEnd = bucketStart + BUCKET_MINUTES;
+      if (!(spill.startMinutes < bucketEnd && bucketStart < spill.endMinutes)) continue;
+
+      incrementSumByBucket[i] += contribution.increment;
+      activeCountByBucket[i] += 1;
+      buckets[i].contributingFlightIds.push(flight.id);
+    }
+  }
+
   for (let i = 0; i < BUCKETS_PER_DAY; i++) {
     if (activeCountByBucket[i] === 0) continue;
     const floor = perFlightFloor * activeCountByBucket[i];
@@ -115,11 +153,12 @@ export function aggregateZoneDailyDemand(
 export function aggregateAllZonesDailyDemand(
   dayOfWeek: string,
   flights: Flight[],
-  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
+  nextDayOfWeek?: string
 ): Record<CheckinZoneId, ZoneDailyDemand> {
   const result = {} as Record<CheckinZoneId, ZoneDailyDemand>;
   for (const zone of CHECKIN_ZONE_IDS) {
-    result[zone] = aggregateZoneDailyDemand(dayOfWeek, zone, flights, policy);
+    result[zone] = aggregateZoneDailyDemand(dayOfWeek, zone, flights, policy, nextDayOfWeek);
   }
   return result;
 }

@@ -1054,9 +1054,29 @@ export function generateDraftWeeklyPlan(
   // was wrong.
   const zoneRequirementsByDay: Record<string, ZoneRequirementDraft[]> = {};
 
-  for (const day of daysOrder) {
-    const dayFlights = flights.filter((f) => f.day_of_week === day && f.operator_type === "atlas_managed");
-    const zoneDemandByZone = aggregateAllZonesDailyDemand(day, dayFlights, config.zone_checkin_demand_policy);
+  // Scoped once, outside the loop: aggregateZoneDailyDemand/
+  // aggregateAllZonesDailyDemand filter by day_of_week INTERNALLY (for
+  // both `day` and the new optional `nextDayOfWeek` below), so the
+  // existing atlas_managed scoping has to live in the array passed in,
+  // not in a per-day pre-filter, or the cross-midnight spillover lookup
+  // below would silently pick up non-atlas_managed flights it never did
+  // before.
+  const atlasManagedFlights = flights.filter((f) => f.operator_type === "atlas_managed");
+
+  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
+    const day = daysOrder[dayIndex];
+    // CROSS-MIDNIGHT DEMAND (2026-10-10, Phase 1): the day immediately
+    // after `day` -- cyclic within THIS SAME displayed week (for the
+    // week's last day, this wraps to the week's own first day, which is
+    // already in `flights` -- no cross-week fetch is needed on the
+    // DEMAND side; only the overnight-employee-AVAILABILITY side has a
+    // real week-boundary case, handled separately in
+    // persisted-plan-view.ts). aggregateAllZonesDailyDemand only ever
+    // uses this to fold in an early-morning next-day flight's Check-in
+    // spillover into THIS day's own tail-end buckets -- see that
+    // function's own doc comment for why this can never double-count.
+    const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
+    const zoneDemandByZone = aggregateAllZonesDailyDemand(day, atlasManagedFlights, config.zone_checkin_demand_policy, nextDayOfWeek);
 
     const zoneRequirements: ZoneRequirementDraft[] = [];
     for (const zone of CHECKIN_ZONE_IDS) {

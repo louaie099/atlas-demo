@@ -8,6 +8,7 @@ import {
   checkinIncrementForFlight,
   zoneBaseAgents,
   zoneMinimumPerActiveFlight,
+  flightCheckinSpilloverMinutesIntoPreviousDay,
 } from "./checkin-zone-demand";
 import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "./duty-generation";
@@ -90,18 +91,30 @@ import { CheckinDemandPolicy } from "./checkin-demand";
  * than a hypothetical whole-shift optimizer would choose — the Required/
  * Available/Gap numbers are always correct at each instant regardless.
  *
- * KNOWN, DELIBERATE LIMITATIONS (unchanged from the modules this reuses,
- * not introduced here):
- *  - A flight's Check-in-open window is clamped to [00:00, departure) for
- *    that same calendar day (see checkin-zone-demand.ts's
- *    getFlightCheckinWindow) — an early-morning flight's window does not
- *    reach back into the previous day. This mirrors the existing
- *    zone-demand-aggregation.ts bucket model exactly; fixing cross-day
- *    flight windows is out of scope here.
- *  - An overnight employee shift (shift_end numerically before
- *    shift_start) is not unwrapped across midnight, exactly like
- *    subtractBusyWindows already behaves — again a pre-existing modeling
- *    limitation, not something this refactor introduces or is asked to fix.
+ * CROSS-MIDNIGHT CORRECTNESS (2026-10-10, Phase 1 — Overnight Continuity):
+ * the two limitations this module's doc comment used to document here as
+ * deliberate/out-of-scope are now fixed, both additively:
+ *  - An early-morning flight's Check-in-open window can now reach back
+ *    into the previous calendar day, when that day's own
+ *    buildDailyCapacityTimeline/buildZoneCoverageRowsForDay call supplies
+ *    `nextDayOfWeek` (see requiredForZoneAtInstant's
+ *    `nextDayFlights`/checkin-zone-demand.ts's
+ *    flightCheckinSpilloverMinutesIntoPreviousDay). getFlightCheckinWindow
+ *    itself is UNCHANGED (still clamped) — every existing caller, and
+ *    Stage 6's own T1 demand-bias input (zone-demand-aggregation.ts's
+ *    aggregateT1DemandProfileForDay/peakAggregateT1DemandMinuteForDay),
+ *    sees byte-identical behavior.
+ *  - An overnight employee shift (one that started the PREVIOUS calendar
+ *    day and is still running into this one — AP03, AP04, NT01, N8) is
+ *    now found here too, via buildEligibleEmployeeAvailabilityForDay's
+ *    optional `previousDay` parameter, which reuses
+ *    duty-generation.ts's existing buildDayEffectivePoolFromRosterEntries
+ *    overnight-carryover mechanism unchanged (already used correctly by
+ *    candidate-lookup.ts and the Agent Schedule). Omitting `previousDay`
+ *    (every caller that hasn't opted in) is the exact prior behavior.
+ * Both are opt-in/additive specifically so this module's own INPUT to
+ * Stage 6 shift generation (via zone-demand-aggregation.ts) can never
+ * silently change — see that module's own doc comments.
  */
 
 function timeToMinutes(t: string): number {
@@ -148,7 +161,16 @@ function requiredForZoneAtInstant(
   zone: CheckinZoneId,
   tMinutes: number,
   flights: Flight[],
-  policy: ZoneCheckinDemandPolicy
+  policy: ZoneCheckinDemandPolicy,
+  // CROSS-MIDNIGHT DEMAND (2026-10-10, additive/opt-in): the FOLLOWING
+  // calendar day's own flights, so an early-morning flight whose
+  // Check-in-open window begins before midnight is counted here using its
+  // spillover window (flightCheckinSpilloverMinutesIntoPreviousDay) —
+  // never its ordinary clamped getFlightCheckinWindow (evaluated
+  // separately when that flight's own day is processed), so a flight can
+  // never be double-counted across the boundary. Defaults to empty — the
+  // exact prior behavior — for every call site that hasn't opted in.
+  nextDayFlights: Flight[] = []
 ): { required: number; flightIds: string[] } {
   let incrementSum = 0;
   let activeCount = 0;
@@ -161,6 +183,18 @@ function requiredForZoneAtInstant(
     const startMin = timeToMinutes(window.start);
     const endMin = timeToMinutes(window.end);
     if (startMin <= tMinutes && tMinutes < endMin) {
+      incrementSum += contribution.increment;
+      activeCount += 1;
+      flightIds.push(flight.id);
+    }
+  }
+
+  for (const flight of nextDayFlights) {
+    const contribution = checkinIncrementForFlight(flight, policy);
+    if (!contribution || contribution.zone !== zone) continue;
+    const spill = flightCheckinSpilloverMinutesIntoPreviousDay(flight, policy);
+    if (!spill) continue;
+    if (spill.startMinutes <= tMinutes && tMinutes < spill.endMinutes) {
       incrementSum += contribution.increment;
       activeCount += 1;
       flightIds.push(flight.id);
@@ -269,9 +303,18 @@ export function buildDailyCapacityTimeline(
   dayOfWeek: string,
   flights: Flight[],
   eligibleEmployees: EmployeeAvailabilityInput[],
-  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
+  // CROSS-MIDNIGHT DEMAND (2026-10-10, additive/opt-in): the label of the
+  // calendar day immediately AFTER `dayOfWeek` — supplied by the caller
+  // only when it has a full week's flights in scope (every real caller
+  // does; see persisted-plan-view.ts) so this day's own tail-end buckets
+  // can include the following day's early-morning flights' Check-in
+  // spillover (see requiredForZoneAtInstant above). Omitted (the exact
+  // prior behavior) for any caller that hasn't opted in.
+  nextDayOfWeek?: string
 ): CapacityAtomicPeriod[] {
   const dayFlights = flights.filter((f) => f.day_of_week === dayOfWeek);
+  const nextDayFlights = nextDayOfWeek ? flights.filter((f) => f.day_of_week === nextDayOfWeek) : [];
 
   const boundaries = new Set<number>();
   boundaries.add(0);
@@ -288,6 +331,15 @@ export function buildDailyCapacityTimeline(
     const window = getFlightCheckinWindow(flight, policy);
     boundaries.add(timeToMinutes(window.start));
     boundaries.add(timeToMinutes(window.end));
+  }
+
+  for (const flight of nextDayFlights) {
+    const contribution = checkinIncrementForFlight(flight, policy);
+    if (!contribution) continue;
+    const spill = flightCheckinSpilloverMinutesIntoPreviousDay(flight, policy);
+    if (!spill) continue;
+    boundaries.add(spill.startMinutes);
+    boundaries.add(spill.endMinutes);
   }
 
   for (const availability of eligibleEmployees) {
@@ -313,7 +365,7 @@ export function buildDailyCapacityTimeline(
     const requiredByZone: Partial<Record<CheckinZoneId, number>> = {};
     const contributingFlightIdsByZone: Partial<Record<CheckinZoneId, string[]>> = {};
     for (const zone of ORDINARY_CHECKIN_ZONES) {
-      const { required, flightIds } = requiredForZoneAtInstant(zone, start, dayFlights, policy);
+      const { required, flightIds } = requiredForZoneAtInstant(zone, start, dayFlights, policy, nextDayFlights);
       requiredByZone[zone] = required;
       contributingFlightIdsByZone[zone] = flightIds;
     }
@@ -463,9 +515,19 @@ export function buildEligibleEmployeeAvailabilityForDay(
   // which shift regime's entrée/sortie each rostered employee's shift
   // boundary uses (see lib/shift-templates.ts). Required: every real
   // caller reads against a real weekStart.
-  date: string
+  date: string,
+  // OVERNIGHT CARRYOVER (2026-10-10 activation): the immediately
+  // preceding calendar day's own roster entries/label/date, threaded
+  // straight through to buildDayEffectivePoolFromRosterEntries's existing
+  // `previousDay` mechanism (same shape, same semantics — see that
+  // function's own doc comment) so an employee whose shift STARTED the
+  // day before and is overnight (AP03, AP04, NT01, N8) is still found
+  // here as available during this day's early-morning hours, even though
+  // no roster row of their own is ever dated to `dayOfWeek`. Optional;
+  // omitted = exact prior behavior (no carryover candidates).
+  previousDay?: { dayOfWeek: string; date: string; rosterEntries: WeeklyPlanRosterEntry[] }
 ): EmployeeAvailabilityInput[] {
-  const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(employees, rosterEntries, dayOfWeek, date);
+  const dayEffectivePool = buildDayEffectivePoolFromRosterEntries(employees, rosterEntries, dayOfWeek, date, previousDay);
   const eligiblePool = dayEffectivePool.filter(isEligibleForDefaultCheckinPlacement) as (Employee & {
     shift_start: string;
     shift_end: string;
@@ -492,9 +554,12 @@ export function buildZoneCoverageRowsForDay(
   dayOfWeek: string,
   flights: Flight[],
   eligibleEmployees: EmployeeAvailabilityInput[],
-  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY
+  policy: ZoneCheckinDemandPolicy = DEFAULT_ZONE_CHECKIN_DEMAND_POLICY,
+  // CROSS-MIDNIGHT DEMAND — see buildDailyCapacityTimeline's own doc
+  // comment; threaded straight through.
+  nextDayOfWeek?: string
 ): Record<CheckinZoneId, ZoneCoverageRow[]> {
-  const periods = buildDailyCapacityTimeline(dayOfWeek, flights, eligibleEmployees, policy);
+  const periods = buildDailyCapacityTimeline(dayOfWeek, flights, eligibleEmployees, policy, nextDayOfWeek);
   const result = {} as Record<CheckinZoneId, ZoneCoverageRow[]>;
   for (const zone of ORDINARY_CHECKIN_ZONES) {
     result[zone] = mergeAtomicPeriodsForZone(zone, dayOfWeek, periods);

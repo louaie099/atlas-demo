@@ -120,12 +120,63 @@ function minutesToTime(mins: number): string {
   return `${String(Math.floor(wrapped / 60)).padStart(2, "0")}:${String(wrapped % 60).padStart(2, "0")}`;
 }
 
-/** Same window shape as checkin-demand.ts's getCheckinWindow, but for the zone-level policy — a flight's own Check-in-open interval, before it's combined with every other flight sharing its zone. */
+/** Same window shape as checkin-demand.ts's getCheckinWindow, but for the zone-level policy — a flight's own Check-in-open interval, before it's combined with every other flight sharing its zone. CLAMPED to [00:00, departure) for the flight's own scheduled-departure calendar day — this is the pre-existing, unchanged behavior every existing caller (and Stage 6's T1 demand-bias input) still gets; see getFlightCheckinWindowUnclamped/flightCheckinSpilloverMinutesIntoPreviousDay below for the additive, opt-in cross-midnight handling. */
 export function getFlightCheckinWindow(flight: Flight, policy: ZoneCheckinDemandPolicy): { start: string; end: string } {
   const departureMinutes = timeToMinutes(flight.scheduled_departure);
   const startMinutes = Math.max(0, departureMinutes - policy.open_minutes_before_departure);
   const endMinutes = Math.max(0, departureMinutes - policy.close_minutes_before_departure);
   return { start: minutesToTime(startMinutes), end: minutesToTime(Math.max(startMinutes, endMinutes)) };
+}
+
+/**
+ * UNCLAMPED variant of getFlightCheckinWindow — the raw, signed-minute
+ * window relative to the flight's own scheduled-departure calendar day,
+ * with NO Math.max(0, ...) floor. A negative `startMinutes` means the
+ * window genuinely reaches back before midnight of that day (an
+ * early-morning flight whose Check-in opens the previous calendar day).
+ * Never used by any existing caller — only by
+ * flightCheckinSpilloverMinutesIntoPreviousDay below, which is itself only
+ * consulted by callers that explicitly opt in to cross-midnight demand
+ * (an optional `nextDayOfWeek`/`nextDayFlights` parameter — see
+ * zone-demand-aggregation.ts and checkin-capacity-timeline.ts).
+ */
+export function getFlightCheckinWindowUnclamped(flight: Flight, policy: ZoneCheckinDemandPolicy): { startMinutes: number; endMinutes: number } {
+  const departureMinutes = timeToMinutes(flight.scheduled_departure);
+  const startMinutes = departureMinutes - policy.open_minutes_before_departure;
+  const endMinutes = departureMinutes - policy.close_minutes_before_departure;
+  return { startMinutes, endMinutes: Math.max(startMinutes, endMinutes) };
+}
+
+/**
+ * The portion (if any) of a flight's Check-in-open window that falls
+ * BEFORE midnight of the flight's own scheduled-departure calendar day —
+ * i.e. the real previous-calendar-day spillover for an early-morning
+ * flight (e.g. a 03:15 departure with a 240-minute opening reaches back to
+ * 23:15 the night before). Returns null when the window never reaches
+ * back past midnight (the ordinary case for every flight whose departure
+ * is not within `open_minutes_before_departure` of midnight).
+ *
+ * Expressed in minutes on the PREVIOUS calendar day's own 0..1440 clock
+ * (close to end-of-day — e.g. 1395..1440 for the 23:15 example above;
+ * `endMinutes` may legitimately equal 1440, representing exactly
+ * midnight, so this deliberately returns numbers, never an "HH:MM"
+ * string, which cannot represent 24:00). This is ADDITIVE-ONLY by
+ * construction: it only ever describes the part of the window strictly
+ * before midnight, never touching [0, this flight's own endMinutes) —
+ * the flight's unchanged, clamped getFlightCheckinWindow forward portion
+ * — so a caller that evaluates this flight once as a `nextDayFlights`
+ * spillover on the previous day and once normally on its own day can
+ * never double-count any minute.
+ */
+export function flightCheckinSpilloverMinutesIntoPreviousDay(
+  flight: Flight,
+  policy: ZoneCheckinDemandPolicy
+): { startMinutes: number; endMinutes: number } | null {
+  const { startMinutes, endMinutes } = getFlightCheckinWindowUnclamped(flight, policy);
+  if (startMinutes >= 0) return null; // window never reaches back past midnight
+  const spillEndMinutes = Math.min(endMinutes, 0); // only the part still before midnight
+  if (spillEndMinutes <= startMinutes) return null; // degenerate/empty (should not occur given endMinutes >= startMinutes above)
+  return { startMinutes: startMinutes + 1440, endMinutes: spillEndMinutes + 1440 };
 }
 
 /**
