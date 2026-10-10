@@ -1,9 +1,16 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 
 import { weekStartFor, DAYS_ORDER, dayOfWeekFor } from "./flight-date";
-import { loadPersistedPlanView, planIdForWeek, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "./planning/weekly-plan-service";
+import {
+  loadPersistedPlanView,
+  planIdForWeek,
+  fetchAllAssignmentsForPlan,
+  fetchAllRequirementsForFlightIds,
+  fetchAllRosterEntriesForPlan,
+} from "./planning/weekly-plan-service";
 import { getRequirementWindow } from "./planning/requirement-window";
 import { getCandidatesForRequirement } from "./planning/candidate-lookup";
+import { buildDayEffectivePoolFromRosterEntries } from "./planning/duty-generation";
 import { effectiveDeparture } from "./flight-operations";
 import { TimeWindow, isWindowWithinShift } from "./scoring";
 import {
@@ -258,6 +265,57 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
     }
   }
 
+  // EFFECTIVE (real, day-correct) shift bounds per employee for THIS date
+  // (2026-10-10 fix — see this constant's own incident below). `employee.
+  // shift_start`/`shift_end` on the raw Employee row is a STATIC,
+  // generation-time baseline (set once, from that employee's CATEGORY
+  // default shift_code, resolved against lib/shift-templates.ts's
+  // LEGACY_BASELINE_DATE — see lib/employee-generator.ts's own doc
+  // comment) and is NEVER updated afterward by anything (confirmed: no
+  // code anywhere issues an UPDATE against employees.shift_start/
+  // shift_end). For a flexible General T1 Pool member, Stage 6 assigns a
+  // DIFFERENT real shift_code per day (persisted as a
+  // WeeklyPlanRosterEntry), which can be completely unrelated to that
+  // employee's category baseline -- e.g. a baseline of AP01 (13:45-22:45)
+  // while actually rostered to NR01 (08:00-ish) that day. Reading the
+  // stale baseline here silently broke exactly the scenario Live
+  // Operations exists to catch: an employee validly covering an EARLY
+  // duty under their REAL roster-assigned shift reads as still "within
+  // shift" for a delay pushed into their baseline's own (wide,
+  // unrelated) afternoon/evening hours, so no violation is ever reported
+  // -- not a hypothetical, this is the exact AT401/Sanaa Benali case
+  // reported 2026-10-10: real shift NR01 (ends ~17:00) correctly covered
+  // the original 11:40-12:40 Gate duty, but the STATIC baseline (AP01,
+  // 13:45-22:45) made the delayed 17:40-18:40 window look "still within
+  // shift" -- and, since the baseline ALSO didn't cover the ORIGINAL
+  // window either, the "was valid before, now invalid" check never even
+  // triggered, silently suppressing the violation in both directions.
+  // view.schedule (AgentScheduleEntry[], already loaded by
+  // loadPersistedPlanView — no extra fetch needed) already carries the
+  // real, per-day-resolved shift via AgentDayEntry.shiftStart/shiftEnd
+  // (see lib/types.ts's own doc comment: "the REAL effective code for
+  // this day... never the employee's static shift_code") — the exact
+  // same source Monthly Planning's Agent Schedule grid and
+  // lib/planning/duty-generation.ts's buildDayEffectivePoolFromRosterEntries
+  // already use for every OTHER shift-aware decision. This map makes that
+  // same real data available to the one place that was still reading the
+  // stale baseline. Falls back to the raw Employee fields (old behavior,
+  // unchanged) for anyone this day's schedule has no entry for (e.g. a
+  // Duty Officer, excluded from the Agent Schedule grid) rather than
+  // guessing.
+  const todayDayOfWeek = dayOfWeekFor(date);
+  const effectiveShiftByEmployeeToday = new Map<string, { shift_start: string; shift_end: string }>();
+  for (const entry of view.schedule) {
+    const day = entry.days.find((d) => d.dayOfWeek === todayDayOfWeek);
+    if (day && day.status === "working" && day.shiftStart && day.shiftEnd) {
+      effectiveShiftByEmployeeToday.set(entry.employee.id, { shift_start: day.shiftStart, shift_end: day.shiftEnd });
+    }
+  }
+  function effectiveShiftFor(employee: Employee): { shift_start: string | null; shift_end: string | null } {
+    const effective = effectiveShiftByEmployeeToday.get(employee.id);
+    return effective ?? { shift_start: employee.shift_start, shift_end: employee.shift_end };
+  }
+
   function findInvalidatedAssignments(requirement: StaffingRequirement, flight: Flight, employees: Employee[]): LiveOpsInvalidatedAssignment[] {
     const flightEffectiveDeparture = effectiveDeparture(flight);
     if (flightEffectiveDeparture === flight.scheduled_departure) return []; // no operational change at all -- nothing to invalidate
@@ -267,12 +325,13 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
 
     const invalidated: LiveOpsInvalidatedAssignment[] = [];
     for (const employee of employees) {
+      const { shift_start: effectiveShiftStart, shift_end: effectiveShiftEnd } = effectiveShiftFor(employee);
       const shiftBoundaryViolation: ShiftBoundaryViolation | undefined =
-        !isWindowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
-        isWindowWithinShift(oldWindow, employee.shift_start, employee.shift_end) &&
-        employee.shift_start &&
-        employee.shift_end
-          ? { shiftStart: employee.shift_start, shiftEnd: employee.shift_end }
+        !isWindowWithinShift(newWindow, effectiveShiftStart, effectiveShiftEnd) &&
+        isWindowWithinShift(oldWindow, effectiveShiftStart, effectiveShiftEnd) &&
+        effectiveShiftStart &&
+        effectiveShiftEnd
+          ? { shiftStart: effectiveShiftStart, shiftEnd: effectiveShiftEnd }
           : undefined;
 
       let collidesWith: ConflictingAssignment | undefined;
@@ -499,16 +558,30 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
   const allFlights = (weekFlightsRaw ?? []) as Flight[];
   const weekFlightIds = allFlights.map((f) => f.id);
 
-  const [{ data: allEmployees, error: empErr }, allAssignments, allRequirements] = await Promise.all([
+  const [{ data: allEmployees, error: empErr }, allAssignments, allRequirements, rosterEntries] = await Promise.all([
     supabase.from("employees").select("*"),
     fetchAllAssignmentsForPlan(supabase, planIdForWeek(flightWeekStart)),
     fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
+    fetchAllRosterEntriesForPlan(supabase, planIdForWeek(flightWeekStart)),
   ]);
   if (empErr) {
     return { error: empErr.message, status: 500 };
   }
 
   const employeesById = new Map((allEmployees as Employee[]).map((e) => [e.id, e]));
+  // EFFECTIVE (real, day-correct) shift bounds for this flight's specific
+  // day — see loadLiveOpsView's sibling fix (lib/live-ops-service.ts, same
+  // 2026-10-10 incident) for the full explanation of why the raw
+  // employee.shift_start/shift_end fields below are a stale, generation-
+  // time baseline rather than this employee's actual roster-assigned
+  // shift for today. Reuses the exact same, already-tested helper
+  // lib/planning/candidate-lookup.ts relies on for eligibility — never a
+  // second, newly-invented resolution rule.
+  const effectivePool = buildDayEffectivePoolFromRosterEntries(allEmployees as Employee[], rosterEntries, flight.day_of_week, flight.flight_date);
+  const effectiveShiftByEmployee = new Map(effectivePool.map((e) => [e.id, { shift_start: e.shift_start, shift_end: e.shift_end }]));
+  function effectiveShiftFor(employee: Employee): { shift_start: string | null; shift_end: string | null } {
+    return effectiveShiftByEmployee.get(employee.id) ?? { shift_start: employee.shift_start, shift_end: employee.shift_end };
+  }
   // Operational-delay fix (2026-10-04, sibling of the same fix in
   // lib/planning/candidate-lookup.ts): getRequirementWindow deliberately
   // never reads actual_departure -- every caller must substitute it in via
@@ -612,12 +685,13 @@ export async function evaluateFlightDelayImpact(supabase: SupabaseClient, flight
       // when the OLD window was still within shift (a pre-existing
       // out-of-shift assignment is a separate, already-existing data
       // problem, not something this delay just caused).
+      const { shift_start: effectiveShiftStart, shift_end: effectiveShiftEnd } = effectiveShiftFor(employee);
       const newlyOutOfShift =
-        !isWindowWithinShift(newWindow, employee.shift_start, employee.shift_end) &&
-        isWindowWithinShift(oldWindow, employee.shift_start, employee.shift_end);
+        !isWindowWithinShift(newWindow, effectiveShiftStart, effectiveShiftEnd) &&
+        isWindowWithinShift(oldWindow, effectiveShiftStart, effectiveShiftEnd);
       const shiftBoundaryViolation: ShiftBoundaryViolation | undefined =
-        newlyOutOfShift && employee.shift_start && employee.shift_end
-          ? { shiftStart: employee.shift_start, shiftEnd: employee.shift_end }
+        newlyOutOfShift && effectiveShiftStart && effectiveShiftEnd
+          ? { shiftStart: effectiveShiftStart, shiftEnd: effectiveShiftEnd }
           : undefined;
 
       if (!collidesWith && !shiftBoundaryViolation) continue;

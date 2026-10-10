@@ -202,7 +202,10 @@ function makeRequirement(overrides: Partial<StaffingRequirement>): StaffingRequi
 }
 
 function seedAt815Fixture(fake: FakeSupabase) {
-  // Marouane: MT03 05:45-14:45, originally on AT815 Gate 12:15-13:45.
+  // Marouane: raw row says MT03 05:45-14:45, originally on AT815 Gate
+  // 12:15-13:45. The real MT03 catalog value at WEEK_START (pre-2026-09-20
+  // regime) is 05:45-15:45 -- the invalidation/conflict check (2026-10-10
+  // fix) reads that roster-resolved value, not this approximate raw row.
   const marouane = makeEmployee({ id: "emp-marouane", name: "Marouane Benali", shift_code: "MT03", shift_start: "05:45", shift_end: "14:45" });
   // Youssef: a later shift that actually covers AT815's post-delay Gate window.
   const youssef = makeEmployee({ id: "emp-youssef", name: "Youssef", shift_code: "AP01", shift_start: "13:45", shift_end: "22:45" });
@@ -268,7 +271,11 @@ describe("Live Operations redesign — AT815 delay scenario end to end", () => {
     if ("error" in impactResult) throw new Error(impactResult.error);
     expect(impactResult.conflicts).toHaveLength(1);
     expect(impactResult.conflicts[0].employee.id).toBe("emp-marouane");
-    expect(impactResult.conflicts[0].shiftBoundaryViolation).toEqual({ shiftStart: "05:45", shiftEnd: "14:45" });
+    // The violation reports the roster-resolved EFFECTIVE shift for MT03
+    // at WEEK_START (the pre-2026-09-20 regime: 05:45-15:45), per the
+    // 2026-10-10 fix -- Marouane's raw employee-row shift_end ("14:45",
+    // set above) is an approximation, not the real catalog value.
+    expect(impactResult.conflicts[0].shiftBoundaryViolation).toEqual({ shiftStart: "05:45", shiftEnd: "15:45" });
     expect(impactResult.conflicts[0].replacementCandidates.some((c) => c.employee.id === "emp-youssef")).toBe(true);
 
     // Exactly one aggregated notification, not one per conflict.

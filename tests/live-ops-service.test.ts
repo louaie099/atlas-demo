@@ -478,8 +478,14 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
     // Narrow only emp-a's shift so the delay pushes their window past
     // their own shift end -- emp-b's default (08:00-18:15) shift still
     // comfortably covers the new window, so only emp-a should invalidate.
+    // The invalidation check now reads the roster-resolved EFFECTIVE shift
+    // (2026-10-10 fix), not the raw employee row, so emp-a's roster entry
+    // is removed here too -- with no roster entry for the day, the view
+    // falls back to the raw (narrowed) fields, same as an untracked
+    // employee would.
     const employees = fake.table("employees") as unknown as Employee[];
     employees.find((e) => e.id === "emp-a")!.shift_end = "11:30";
+    await fake.from("weekly_plan_roster_entries").delete().eq("employee_id", "emp-a");
     await fake.from("flights").update({ actual_departure: "12:30" }).eq("id", "flight-2");
 
     const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
@@ -510,10 +516,15 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
       created_by: "Test Setup",
       assigned_at: new Date().toISOString(),
     });
-    // This time BOTH employees' shifts are too narrow for the delayed window.
+    // This time BOTH employees' shifts are too narrow for the delayed
+    // window. As above, both roster entries are removed so the view falls
+    // back to these narrowed raw fields instead of the roster-resolved
+    // (NR02, 08:00-18:15) shift.
     const employees = fake.table("employees") as unknown as Employee[];
     employees.find((e) => e.id === "emp-a")!.shift_end = "11:30";
     employees.find((e) => e.id === "emp-b")!.shift_end = "11:00";
+    await fake.from("weekly_plan_roster_entries").delete().eq("employee_id", "emp-a");
+    await fake.from("weekly_plan_roster_entries").delete().eq("employee_id", "emp-b");
     await fake.from("flights").update({ actual_departure: "12:30" }).eq("id", "flight-2");
 
     const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
@@ -533,13 +544,18 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
   // case keyed on a flight number or employee name in any production code
   // path; this is purely test fixture data shaped like the real scenario.
   function seedAT815Fixture(fake: FakeSupabase) {
+    // Marouane's raw shift_start/shift_end are deliberately stale/approximate
+    // (06:15-14:45) -- the invalidation check (2026-10-10 fix) and the
+    // candidate pool Find Agent scores against both now derive the REAL
+    // effective shift from the roster entry's shift_code via
+    // getShiftTimesAs (see buildDayEffectivePoolFromRosterEntries), which
+    // for MT03 at WEEK_START (pre-2026-09-20 regime) resolves to
+    // 05:45-15:45, not these raw fields. Kept deliberately mismatched here
+    // to prove the fix reads the roster-resolved value, not the raw row.
     const marouane = makeEmployee({ id: "emp-marouane", name: "Marouane Benali", skills: ["Gate", "Boarding"], shift_start: "06:15", shift_end: "14:45" });
     // AP02 (13:45-23:15) comfortably covers the delayed 17:15-18:45
     // window -- unlike NR02 (08:00-18:15), used elsewhere in this file,
-    // which would fall just short of its 18:45 end. The candidate pool
-    // Find Agent scores against derives shift times from the roster
-    // entry's shift_code (see buildDayEffectivePoolFromRosterEntries), so
-    // these raw fields and the roster shift_code below must agree.
+    // which would fall just short of its 18:45 end.
     const replacement = makeEmployee({ id: "emp-replacement", name: "Replacement Agent", skills: ["Gate", "Boarding"], shift_start: "13:45", shift_end: "23:15" });
     const flight = makeFlight({
       id: "flight-at815",
@@ -600,7 +616,11 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
     expect(invalidated.employee.id).toBe("emp-marouane");
     expect(invalidated.oldWindow).toEqual({ start: "12:15", end: "13:45" });
     expect(invalidated.newWindow).toEqual({ start: "17:15", end: "18:45" });
-    expect(invalidated.shiftBoundaryViolation).toEqual({ shiftStart: "06:15", shiftEnd: "14:45" });
+    // The violation now reports the roster-resolved EFFECTIVE shift for
+    // MT03 at WEEK_START (the pre-2026-09-20 regime: 05:45-15:45), not
+    // Marouane's raw employee-row fields (06:15-14:45 below), per the
+    // 2026-10-10 fix.
+    expect(invalidated.shiftBoundaryViolation).toEqual({ shiftStart: "05:45", shiftEnd: "15:45" });
 
     // Original planned assignment preserved as-is -- never deleted/modified.
     expect(reqView.assignedEmployees.map((e) => e.id)).toEqual(["emp-marouane"]);
@@ -720,6 +740,139 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
   });
 });
 
+describe("live-ops-service — invalidation reads the EFFECTIVE, roster-resolved shift, not the stale generation-time baseline (2026-10-10 fix, AT401/Sanaa Benali incident)", () => {
+  // Reported 2026-10-10: delaying AT401 (12:40 -> 18:40) still showed
+  // "At Risk" with the Gate agent (a General T1 Pool member) NOT marked
+  // invalid, even though patches 0100-0102 were confirmed present and
+  // correct in the sandbox. Root cause, confirmed against the real seed
+  // data (lib/seed-data.ts's generated "Sanaa Benali"): her General T1
+  // Pool CATEGORY default shift_code is AP01 (13:45-22:45) — set ONCE at
+  // generation time into the raw employees.shift_start/shift_end columns
+  // (lib/employee-generator.ts, resolved against shift-templates.ts's
+  // frozen LEGACY_BASELINE_DATE) and never updated again by anything
+  // afterward. Her REAL, roster-assigned shift for the day in question
+  // was a completely different code (what let her validly cover the
+  // original 11:40-12:40 Gate window in the first place) — but
+  // findInvalidatedAssignments/evaluateFlightDelayImpact read the raw,
+  // stale employees.shift_start/shift_end directly, so AP01's wide
+  // 13:45-22:45 span made the delayed 17:40-18:40 window look "still
+  // within shift" (and, since that same stale baseline ALSO never
+  // covered the ORIGINAL window, the "was valid before, now invalid"
+  // check never triggered at all -- silently suppressing the violation
+  // in both directions). This reproduces that exact shape with a
+  // hand-built fixture whose raw Employee row is DELIBERATELY the
+  // mismatched baseline (13:45-22:45) while its WeeklyPlanRosterEntry
+  // carries the real, different, narrower shift_code -- every other
+  // fixture in this file (by design, see seedAT815Fixture's own comment:
+  // "these raw fields and the roster shift_code below must agree") kept
+  // the two in sync, which is exactly why this was never caught before.
+  function seedMismatchedBaselineFixture(fake: FakeSupabase) {
+    // Raw baseline: AP01-shaped (13:45-22:45) -- comfortably contains the
+    // delayed 17:40-18:40 window, and does NOT contain the original
+    // 11:40-12:40 window.
+    const employee = makeEmployee({ id: "emp-sanaa", name: "Sanaa Benali", skills: ["Gate", "Boarding"], shift_start: "13:45", shift_end: "22:45" });
+    const flight = makeFlight({
+      id: "flight-at401",
+      flight_number: "AT401",
+      aircraft: "Boeing 737-800",
+      scheduled_departure: "12:40",
+      day_of_week: "Monday",
+      flight_date: WEEK_START,
+    });
+    const req = makeRequirement({ id: "req-at401-gate", flight_id: "flight-at401", role: "Gate", total_requirement: 1 });
+    const assignment: Assignment = {
+      id: "assign-at401",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-at401-gate",
+      employee_id: "emp-sanaa",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    };
+    // The REAL roster-assigned shift for this day -- NR01 resolves (at
+    // WEEK_START, pre-2026-09-20 regime) to 08:00-16:45: comfortably
+    // covers the original 11:40-12:40 window, nowhere near the delayed
+    // 17:40-18:40 one. Deliberately NOT the same as the raw employee
+    // fields above -- that mismatch is the entire point of this fixture.
+    const roster: WeeklyPlanRosterEntry = { id: "roster-sanaa", plan_id: PLAN_ID, employee_id: "emp-sanaa", day_of_week: "Monday", status: "working", shift_code: "NR01" };
+    const plan: WeeklyPlan = {
+      id: PLAN_ID,
+      week_start: WEEK_START,
+      week_label: "Test Week",
+      status: "draft",
+      revision: 1,
+      generated_at: new Date().toISOString(),
+      published_at: null,
+      generated_from_hash: "test-hash",
+      config_snapshot: CONFIG,
+      issues: [],
+      configuration_issues: [],
+    };
+
+    fake.from("employees").insert([employee] as unknown as FakeRow[]);
+    fake.from("flights").insert([flight] as unknown as FakeRow[]);
+    fake.from("staffing_requirements").insert([req] as unknown as FakeRow[]);
+    fake.from("assignments").insert([assignment] as unknown as FakeRow[]);
+    fake.from("weekly_plans").insert([plan] as unknown as FakeRow[]);
+    fake.from("weekly_plan_roster_entries").insert([roster] as unknown as FakeRow[]);
+
+    return { flight, req, employee };
+  }
+
+  it("flags the invalidation using the REAL roster-assigned shift (NR01, ends 16:45) even though the raw employee baseline (AP01, 13:45-22:45) would wrongly read as still covering the delayed window", async () => {
+    const fake = new FakeSupabase();
+    seedMismatchedBaselineFixture(fake);
+    await fake.from("flights").update({ actual_departure: "18:40" }).eq("id", "flight-at401");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-at401")!;
+    const reqView = flightView.requirements.find((r) => r.requirement.id === "req-at401-gate")!;
+
+    expect(reqView.invalidatedAssignments).toHaveLength(1);
+    expect(reqView.invalidatedAssignments[0].employee.id).toBe("emp-sanaa");
+    expect(reqView.invalidatedAssignments[0].shiftBoundaryViolation?.shiftEnd).toBe("16:45"); // NR01's real end, never the raw 22:45 baseline
+    expect(reqView.gap).toBe(1);
+    expect(reqView.coverageStatus).toBe("conflict");
+    expect(deriveFlightState(flightView, false)).toBe("gap"); // "Needs Action", never "At Risk"
+
+    // evaluateFlightDelayImpact (the Edit Flight drawer's own check) must
+    // agree -- both detection paths read the same effective shift now.
+    const impact = await evaluateFlightDelayImpact(fake as unknown as SupabaseClient, "flight-at401");
+    if ("error" in impact) throw new Error(impact.error);
+    expect(impact.conflicts).toHaveLength(1);
+    expect(impact.conflicts[0].employee.id).toBe("emp-sanaa");
+    expect(impact.conflicts[0].shiftBoundaryViolation?.shiftEnd).toBe("16:45");
+  });
+
+  it("does NOT falsely invalidate when the real roster shift covers the delayed window even though the raw employee baseline would not", async () => {
+    const fake = new FakeSupabase();
+    seedMismatchedBaselineFixture(fake);
+    // INVERSE mismatch: a narrow raw baseline (08:00-10:00) that would,
+    // on its own, wrongly suggest this employee is invalid for BOTH
+    // windows -- while their REAL roster-assigned shift for the day
+    // (switched here from NR01 to AP01, 13:45-22:45) comfortably covers
+    // both the original 11:40-12:40 window and the delayed 17:40-18:40
+    // one. Proves the fix isn't one-directional: it must also stop a
+    // stale baseline from manufacturing a violation that isn't real.
+    await fake.from("employees").update({ shift_start: "08:00", shift_end: "10:00" }).eq("id", "emp-sanaa");
+    await fake.from("weekly_plan_roster_entries").update({ shift_code: "AP01" }).eq("id", "roster-sanaa");
+    await fake.from("flights").update({ actual_departure: "18:40" }).eq("id", "flight-at401");
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-at401")!;
+    const reqView = flightView.requirements.find((r) => r.requirement.id === "req-at401-gate")!;
+
+    // The raw baseline (08:00-10:00) never covered the original window
+    // either, so a naive "was valid before" check would also suppress a
+    // real violation here -- but there ISN'T a real violation, because
+    // the REAL roster shift (AP01, 13:45-22:45) comfortably covers both
+    // the original 11:40-12:40 window and the delayed 17:40-18:40 one.
+    expect(reqView.invalidatedAssignments).toHaveLength(0);
+    expect(reqView.gap).toBe(0);
+    expect(reqView.coverageStatus).toBe("assigned");
+  });
+});
+
 describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", () => {
   it("detects no conflict before any operational change", async () => {
     const fake = new FakeSupabase();
@@ -788,9 +941,14 @@ describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", 
     // than anything in this fixture, so no fixture-wide test would ever
     // hit a shift boundary by accident. Narrow it here, specifically for
     // this test, to just past flight-1's original 08:00-09:00 window.
+    // The conflict check now reads the roster-resolved EFFECTIVE shift
+    // (2026-10-10 fix), not the raw employee row, so emp-a's roster entry
+    // is removed here too -- with no roster entry for the day, the check
+    // falls back to the raw (narrowed) fields below.
     const employees = fake.table("employees") as unknown as Employee[];
     const empA = employees.find((e) => e.id === "emp-a")!;
     empA.shift_end = "09:30";
+    await fake.from("weekly_plan_roster_entries").delete().eq("employee_id", "emp-a");
 
     // Delay flight-1 so its new window (09:30-10:30) ends after emp-a's
     // 09:30 shift end AND newly overlaps emp-a's existing flight-2 Gate
@@ -825,9 +983,12 @@ describe("live-ops-service — evaluateFlightDelayImpact (conflict detection)", 
     assignments.length = 0;
     assignments.push(...withoutAssign2);
 
+    // As above, remove emp-a's roster entry so the narrowed raw field
+    // below is what the check actually reads.
     const employees = fake.table("employees") as unknown as Employee[];
     const empA = employees.find((e) => e.id === "emp-a")!;
     empA.shift_end = "09:30";
+    await fake.from("weekly_plan_roster_entries").delete().eq("employee_id", "emp-a");
 
     // New window becomes 09:00-10:00 -- past the 09:30 shift end, but
     // nowhere near flight-2's now-irrelevant (and now unassigned) window.
