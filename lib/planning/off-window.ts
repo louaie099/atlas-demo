@@ -171,6 +171,79 @@ export function estimateDailyRequiredHeadcount(
   return Math.max(peak, Math.ceil(personBuckets / bucketsPerShift));
 }
 
+/**
+ * GLOBAL CROSS-POPULATION OFF-DAY CAP (2026-10-20). Each population's own
+ * window search below — planPreferredOffWindows for the flexible pool,
+ * planSpecializedOffWindows (specialized-team-generation.ts) for
+ * Profiling/Mesure and each foreign company — runs independently, by
+ * design: each answers a different population's own demand shape (see
+ * generate-draft-plan.ts's own doc comment on this split). Nothing before
+ * this shared what the OTHER populations already decided: if the flexible
+ * pool's own water-filling, Profiling/Mesure's own water-filling, and a
+ * foreign company's own water-filling each INDEPENDENTLY judge the same
+ * calendar day (e.g. Monday) to be their own quietest day, every one of
+ * them can place OFF people there with zero visibility into what the
+ * others already did — producing exactly the cross-week-compounding OFF
+ * clustering (and the staffing gaps it causes) this is meant to close off.
+ *
+ * GlobalOffDayCap is a single mutable object the caller (generate-draft-
+ * plan.ts) builds ONCE per week and threads through every population's
+ * window search, in the SAME order those populations already run. It adds
+ * one shared constraint ON TOP OF (never instead of) each population's own
+ * demand-based preference: a candidate window is skipped if placing it
+ * would push a day's TOTAL cross-population OFF headcount above
+ * `cap[day]` — the cap is company-wide, never per-population. Running
+ * totals are updated by recordPlacedOffWindow once a population finalizes
+ * its own windows, so the NEXT population's search sees the real picture.
+ *
+ * Like every other OFF-window guard here this only NARROWS candidates,
+ * never widens past legality, and like every other guard, if every window
+ * for one employee would be excluded the search falls back to the
+ * unrestricted best window (never leave someone without a preference) —
+ * this is a scheduling heuristic to spread load, never a hard legal rule,
+ * so it must never be the reason someone ends up with no OFF days at all.
+ *
+ * `cap` is a single flat per-day ceiling, deliberately simple (an
+ * engineering judgment call, not a confirmed RAM number): the even share
+ * of this week's total OFF entitlement across the week's days, rounded up,
+ * plus a small slack so it doesn't fight the separate "OFF days must be
+ * one consecutive block" hard rule. `totalEligibleEmployees` is meant to
+ * be every employee who goes through ANY of these window searches
+ * (flexible pool + Profiling/Mesure + every foreign company) — passing a
+ * looser superset (e.g. all active employees) only makes the cap a little
+ * more generous, never unsafe, so callers are not required to filter
+ * precisely.
+ */
+export interface GlobalOffDayCap {
+  /** Max people, across every population combined, allowed OFF on each day (index == daysOrder index). */
+  readonly cap: readonly number[];
+  /** Mutated in place by recordPlacedOffWindow as each population places its windows. */
+  countSoFar: number[];
+}
+
+/** Builds a flat (same ceiling every day) GlobalOffDayCap — see its own doc comment for the reasoning. */
+export function buildGlobalOffDayCap(dayCount: number, totalEligibleEmployees: number, normalWeeklyOffDays: number, slack = 2): GlobalOffDayCap {
+  const evenShare = (totalEligibleEmployees * normalWeeklyOffDays) / Math.max(1, dayCount);
+  const perDayCap = Math.ceil(evenShare) + slack;
+  return { cap: Array(dayCount).fill(perDayCap), countSoFar: Array(dayCount).fill(0) };
+}
+
+/** True if every day of the candidate window still has room under the global cap. No cap supplied = always allowed. */
+export function globalOffDayCapAllowsStart(daysOrder: string[], globalCap: GlobalOffDayCap | undefined, start: number, length: number): boolean {
+  if (!globalCap) return true;
+  for (let k = 0; k < length; k++) {
+    const d = (start + k) % daysOrder.length;
+    if (globalCap.countSoFar[d] + 1 > globalCap.cap[d]) return false;
+  }
+  return true;
+}
+
+/** Records one employee's finalized window against the shared running totals. No-op if no cap was supplied. */
+export function recordPlacedOffWindow(daysOrder: string[], globalCap: GlobalOffDayCap | undefined, windowDays: ReadonlySet<string>): void {
+  if (!globalCap) return;
+  for (let i = 0; i < daysOrder.length; i++) if (windowDays.has(daysOrder[i])) globalCap.countSoFar[i]++;
+}
+
 export interface PlanPreferredOffWindowsInput {
   daysOrder: string[];
   weekStart: string;
@@ -201,6 +274,11 @@ export interface PlanPreferredOffWindowsInput {
    * anything about OFF/OFF blocks itself. Omitted = no extra filter.
    */
   isAllowedStart?: (employeeId: string, start: number) => boolean;
+  /**
+   * See GlobalOffDayCap's own doc comment. Omitted = exact prior behavior
+   * (no cross-population awareness, each search independent).
+   */
+  globalOffDayCap?: GlobalOffDayCap;
 }
 
 /**
@@ -252,7 +330,13 @@ export function planPreferredOffWindows(input: PlanPreferredOffWindowsInput): Ma
   const flexible = employees.filter(isFlexibleGeneralPool).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   if (flexible.length === 0) return new Map();
 
-  return planDemandAwareOffWindows({
+  const globalCap = input.globalOffDayCap;
+  const isAllowedStart = globalCap
+    ? (employeeId: string, start: number) =>
+        (input.isAllowedStart ? input.isAllowedStart(employeeId, start) : true) && globalOffDayCapAllowsStart(daysOrder, globalCap, start, offDaysTarget)
+    : input.isAllowedStart;
+
+  const plan = planDemandAwareOffWindows({
     daysOrder,
     employeeIds: flexible.map((e) => e.id),
     requiredByDay: daysOrder.map((day) =>
@@ -260,8 +344,15 @@ export function planPreferredOffWindows(input: PlanPreferredOffWindowsInput): Ma
     ),
     offDaysTarget,
     priorDayOffEmployeeIds: input.priorDayOffEmployeeIds,
-    isAllowedStart: input.isAllowedStart,
-  }).windows;
+    isAllowedStart,
+  });
+  // Recorded AFTER this population's own windows are finalized (not
+  // employee-by-employee during the search above) -- see GlobalOffDayCap's
+  // doc comment: the point is cross-population visibility for whichever
+  // population plans next, not re-deriving the within-call spreading
+  // planDemandAwareOffWindows' own offCapacity already does.
+  for (const w of plan.windows.values()) recordPlacedOffWindow(daysOrder, globalCap, w);
+  return plan.windows;
 }
 
 /**

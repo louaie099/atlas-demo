@@ -2,7 +2,7 @@ import { Employee, Flight, Assignment, Config, StaffingRequirement } from "../ty
 import { computeWeeklyStaffingRequirements } from "./weekly-requirements";
 import { aggregateDailyDemand, DailyDemand } from "./demand-aggregation";
 import { generateFlexiblePoolShifts, GeneratedShiftAssignment, PriorDayShiftMap, enforceRestInvariantAcrossWeek, DroppedShiftForRest, STAGE6_DEFAULT_ROLES } from "./shift-generation";
-import { planPreferredOffWindows, Stage6OffWindowContext, windowIncludesDayZero } from "./off-window";
+import { planPreferredOffWindows, Stage6OffWindowContext, windowIncludesDayZero, buildGlobalOffDayCap } from "./off-window";
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
@@ -658,6 +658,19 @@ export function generateDraftWeeklyPlan(
   // which apply the same priority internally) untouched.
   const priorDayOffEmployeeIdsForFlexiblePool = new Set(priorDayOffEmployeeIds);
   for (const id of requiresFirstDayOffEmployeeIds) priorDayOffEmployeeIdsForFlexiblePool.delete(id);
+  // CROSS-POPULATION OFF-DAY SPREAD (2026-10-20, see off-window.ts's
+  // GlobalOffDayCap doc comment). Built ONCE per week, from every active
+  // employee as a safe (slightly loose, never unsafe) stand-in for "every
+  // employee who goes through an OFF-window search" -- and threaded, by
+  // the SAME reference, through the flexible pool's search here AND
+  // specializedOffDayRules() below, so Profiling/Mesure and every foreign
+  // company see the running total this population already placed, and
+  // vice versa. Without this, each population's own water-filling is
+  // demand-aware WITHIN itself but blind to what every other population
+  // independently decided about the same calendar day -- which is exactly
+  // how a day like Monday ends up disproportionately OFF-heavy even though
+  // no single population's own search ever looks unreasonable in isolation.
+  const globalOffDayCap = buildGlobalOffDayCap(daysOrder.length, employees.filter((e) => e.active).length, config.normal_weekly_off_days);
   const preferredOffDaysByEmployee = (planningOptions.offWindowStructureBias ?? OFF_WINDOW_STRUCTURE_BIAS_ENABLED)
     ? planPreferredOffWindows({
         daysOrder,
@@ -668,6 +681,7 @@ export function generateDraftWeeklyPlan(
         offDaysTarget: offWindowLength,
         roles: STAGE6_DEFAULT_ROLES,
         priorDayOffEmployeeIds: priorDayOffEmployeeIdsForFlexiblePool,
+        globalOffDayCap,
         isAllowedStart:
           requiresFirstDayOffEmployeeIds.size > 0
             ? (employeeId, start) => !requiresFirstDayOffEmployeeIds.has(employeeId) || windowIncludesDayZero(daysOrder.length, offWindowLength, start)
@@ -756,6 +770,9 @@ export function generateDraftWeeklyPlan(
     consecutive: config.normal_off_days_consecutive,
     priorDayOffEmployeeIds,
     requiresFirstDayOffEmployeeIds,
+    // SAME shared object as the flexible pool's search above -- see its
+    // construction comment and off-window.ts's GlobalOffDayCap doc.
+    globalOffDayCap,
   });
   const profilingMesureExclusions: HardCapExclusion[] = [];
   const profilingMesureRepairs: HardCapRepair[] = [];

@@ -14,7 +14,7 @@ import { fatigueScoreSteps } from "./stage6-score-tiers";
 import { HardWorkCaps, HardCapExclusion, HardCapExclusionReason, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
 import { HardCapRepair, HardCapRepairSearch, RepairSlotAssignment, RepairSlotGroup, repairSlotPopulationGaps } from "./hard-cap-repair";
 import { CapPacedRestPlan, allocateProportionally, planAllowsDrawIn, planCapPacedRestDays } from "./cap-paced-rest";
-import { planDemandAwareOffWindows, windowIncludesDayZero } from "./off-window";
+import { planDemandAwareOffWindows, windowIncludesDayZero, GlobalOffDayCap, globalOffDayCapAllowsStart, recordPlacedOffWindow } from "./off-window";
 
 /**
  * HARD WORK CAPS input for Profiling/Mesure and foreign-company generation
@@ -91,6 +91,16 @@ export interface SpecializedOffDayRules {
    */
   requiresFirstDayOffEmployeeIds?: ReadonlySet<string>;
   windowsOut?: Map<string, ReadonlySet<string>>;
+  /**
+   * See off-window.ts's GlobalOffDayCap doc comment: a single shared,
+   * mutable cap object the caller builds ONCE per week and passes to
+   * every population's off-day window search (the flexible pool via
+   * planPreferredOffWindows, and every specialized/foreign-company team
+   * here), so one team's water-filling can see where OTHER teams already
+   * placed OFF people on the same calendar day. Omitted = exact prior
+   * behavior (this team's search stays fully independent).
+   */
+  globalOffDayCap?: GlobalOffDayCap;
 }
 
 /** One (sub-)team's OFF plan: the OFF-day count targeted and, per member, the planned consecutive window. */
@@ -182,6 +192,7 @@ function planSpecializedOffWindows(
         } else if (rules.priorDayOffEmployeeIds?.has(id)) {
           for (let k = 0; k < offTarget; k++) if ((start + k) % n === 0) return false;
         }
+        if (!globalOffDayCapAllowsStart(daysOrder, rules.globalOffDayCap, start, offTarget)) return false;
         if (cap === undefined) return true;
         const wraps = start + offTarget > n;
         const before = wraps ? 0 : (hardCaps!.incomingStreakByEmployee.get(id) ?? 0) + start;
@@ -828,7 +839,11 @@ export function generateProfilingMesureShifts(
       offPlan !== null &&
       requiredByDay.reduce((sum, r) => sum + Math.min(r, pool.length), 0) / Math.max(1, pool.length) > daysOrder.length - offPlan.offTarget - 1;
     const windowsActive = offPlan !== null && offDayRules!.consecutive && denseWeek;
-    if (windowsActive) for (const [id, w] of offPlan!.windows) offDayRules!.windowsOut?.set(id, w);
+    if (windowsActive)
+      for (const [id, w] of offPlan!.windows) {
+        offDayRules!.windowsOut?.set(id, w);
+        recordPlacedOffWindow(daysOrder, offDayRules!.globalOffDayCap, w);
+      }
     const workedDays = new Map<string, number>(pool.map((e) => [e.id, 0]));
     const workedOn = new Map<string, Set<number>>(pool.map((e) => [e.id, new Set<number>()]));
     const offProtectedOn = (e: Employee, day: string): boolean => {
@@ -1339,7 +1354,11 @@ export function generateForeignCompanyShifts(
         for (const [id, w] of sub.windows) foreignOffPlan.windows.set(id, w);
         for (const [id, st] of sub.starts) foreignOffPlan.starts.set(id, st);
       }
-      if (foreignOffPlan && foreignOffRules.consecutive) for (const [id, w] of foreignOffPlan.windows) foreignOffRules.windowsOut?.set(id, w);
+      if (foreignOffPlan && foreignOffRules.consecutive)
+        for (const [id, w] of foreignOffPlan.windows) {
+          foreignOffRules.windowsOut?.set(id, w);
+          recordPlacedOffWindow(daysOrder, foreignOffRules.globalOffDayCap, w);
+        }
     }
     const inOwnWindow = (id: string, day: string) => Boolean(foreignOffRules?.consecutive && foreignOffPlan?.windows.get(id)?.has(day));
 
