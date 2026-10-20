@@ -71,6 +71,7 @@ describe("admin-gated routes — guard runs before the underlying action", () =>
     vi.doUnmock("../lib/reset-database");
     vi.doUnmock("../lib/reset-small-demo");
     vi.doUnmock("../lib/reset-poc-demo");
+    vi.doUnmock("../lib/reset-empty");
     vi.doUnmock("../lib/supabase-server");
   });
 
@@ -123,6 +124,21 @@ describe("admin-gated routes — guard runs before the underlying action", () =>
     const ok = await POST(reqWithHeader("correct-horse-battery-staple"));
     expect(ok.status).toBe(200);
     expect(resetPocDemoDatabase).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST /api/reset-empty is gated the same way", async () => {
+    const resetToEmptyDatabase = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../lib/reset-empty", () => ({ resetToEmptyDatabase }));
+    vi.doMock("../lib/supabase-server", () => ({ getSupabaseServerClient: () => ({}) }));
+    const { POST } = await import("../app/api/reset-empty/route");
+
+    const badKey = await POST(reqWithHeader("wrong"));
+    expect(badKey.status).toBe(401);
+    expect(resetToEmptyDatabase).not.toHaveBeenCalled();
+
+    const ok = await POST(reqWithHeader("correct-horse-battery-staple"));
+    expect(ok.status).toBe(200);
+    expect(resetToEmptyDatabase).toHaveBeenCalledTimes(1);
   });
 
   it("DELETE /api/flights/[id] is gated the same way", async () => {
