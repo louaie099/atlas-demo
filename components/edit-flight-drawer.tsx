@@ -51,6 +51,7 @@ export function ConflictCard({
           oldEmployeeId: conflict.employee.id,
           newEmployeeId: selected.employee.id,
           reason: `Operational departure change on ${flight.flight_number} created a scheduling conflict for ${conflict.employee.name}.`,
+          overrideAcknowledged: selected.status === "flagged",
         }),
       });
       const data = await res.json().catch(() => ({}));

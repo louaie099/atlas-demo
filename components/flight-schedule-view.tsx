@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Flight } from "@/lib/types";
 import { TeamBadge } from "./team-badge";
 import { Badge, Button } from "./ui";
+import { adminFetch } from "@/lib/admin-key-client";
 
 const DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -194,7 +195,7 @@ function FlightDetailPanel({ flight, onClose, onChanged }: { flight: Flight; onC
   async function handleRemove() {
     setRemoving(true);
     try {
-      const res = await fetch(`/api/flights/${flight.id}`, { method: "DELETE" });
+      const res = await adminFetch(`/api/flights/${flight.id}`, { method: "DELETE" });
       if (res.ok) {
         onChanged();
         onClose();

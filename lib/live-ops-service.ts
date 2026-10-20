@@ -723,6 +723,16 @@ export interface ConfirmReassignmentInput {
   oldEmployeeId: string;
   newEmployeeId: string;
   reason: string;
+  /**
+   * Must be explicitly true when the client-side candidate list already
+   * showed this replacement as "flagged" (not "recommended") and a human
+   * knowingly confirmed it anyway (Find Agent's/Edit Flight's own
+   * override confirmation step). Revalidation below re-derives the
+   * candidate's status itself — this flag is never trusted as a
+   * replacement for that recheck, only as an acknowledgement gate on top
+   * of it.
+   */
+  overrideAcknowledged?: boolean;
 }
 
 export type ConfirmReassignmentResult =
@@ -750,9 +760,49 @@ export type ConfirmReassignmentResult =
  *
  * Never touches the original plan's roster or any OTHER assignment —
  * only the one requirement's row.
+ *
+ * 2026-10-20 CORRECTNESS FIX — revalidate the replacement immediately
+ * before committing. The candidate list a human is looking at when they
+ * click "Assign" was computed whenever Find Agent/Edit Flight last
+ * fetched it — seconds or minutes earlier. Nothing previously re-checked,
+ * at write time, that `newEmployeeId` was still a legitimate candidate
+ * for `staffingRequirementId`: a concurrent change (another reassignment
+ * placing them on an overlapping duty, a roster edit making them
+ * inactive, their shift changing) could make the client's stale
+ * candidate list wrong by the time this handler runs, and the original
+ * code would still silently commit the now-invalid pairing. The fix
+ * reuses the exact same eligibility pipeline every other candidate list
+ * in this app uses (getCandidatesForRequirement — the shared source of
+ * truth also used by Find Agent and Live Ops' own conflict view), run
+ * fresh here, right before the write:
+ *   - absent from the fresh candidate list entirely (hard-excluded, or
+ *     the roster/assignments changed since the stale list was loaded) ->
+ *     409, rejected.
+ *   - present but "flagged" (not "recommended") and the caller didn't
+ *     set overrideAcknowledged -> 409, rejected. A flagged candidate is
+ *     never silently accepted; the human must have explicitly confirmed
+ *     the override (see ConfirmReassignmentInput's own doc comment).
+ *   - present and "recommended", or "flagged" with the override
+ *     acknowledged -> proceeds, exactly as before.
+ * This reuses lib/planning/candidate-lookup.ts's existing eligibility
+ * logic wholesale — no separate/duplicate rule implementation here.
+ *
+ * REMAINING RACE CONDITION, left unresolved by design for this PoC-sized
+ * fix: the revalidation read above and the delete+insert write below are
+ * still two separate round-trips to the database, with no transaction or
+ * row lock between them. A second reassignment for the SAME requirement,
+ * racing in between this function's revalidation read and its write,
+ * could still both pass revalidation and both attempt to write — the
+ * last write would win, silently overwriting the first (the existing
+ * delete-by-id + insert pattern has no compare-and-swap guard). Closing
+ * this fully would need either a database-level unique constraint plus a
+ * retry-on-conflict path, or a serializable transaction wrapping
+ * revalidation+write — deliberately out of scope here; this fix closes
+ * the much more common and much more silent "stale UI candidate list"
+ * gap, not every concurrency gap.
  */
 export async function confirmReassignment(supabase: SupabaseClient, input: ConfirmReassignmentInput): Promise<ConfirmReassignmentResult> {
-  const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason } = input;
+  const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason, overrideAcknowledged } = input;
 
   const [{ data: requirement }, { data: oldEmployee }, { data: newEmployee }] = await Promise.all([
     supabase.from("staffing_requirements").select("*").eq("id", staffingRequirementId).single(),
@@ -762,6 +812,12 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
   if (!requirement) return { ok: false, status: 404, error: "Staffing requirement not found" };
   if (!oldEmployee) return { ok: false, status: 404, error: "Current employee not found" };
   if (!newEmployee) return { ok: false, status: 404, error: "Replacement employee not found" };
+  if (oldEmployeeId === newEmployeeId) {
+    return { ok: false, status: 400, error: "Replacement employee is the same as the current employee." };
+  }
+  if (!(newEmployee as Employee).active) {
+    return { ok: false, status: 409, error: `${(newEmployee as Employee).name} is not an active employee and cannot be assigned.` };
+  }
 
   const { data: flight } = await supabase.from("flights").select("*").eq("id", (requirement as StaffingRequirement).flight_id).single();
   if (!flight) return { ok: false, status: 404, error: "Flight not found" };
@@ -779,6 +835,35 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
   const existing = (existingRows as Assignment[] | null)?.[0];
   if (!existing) {
     return { ok: false, status: 409, error: `${(oldEmployee as Employee).name} does not currently hold this assignment.` };
+  }
+
+  // Revalidate the proposed replacement against the CURRENT operational
+  // state, immediately before writing — see this function's own doc
+  // comment above for why and for the remaining (documented, accepted)
+  // race condition this does not close. Reuses the exact same shared
+  // eligibility pipeline every other candidate list in this app uses;
+  // no separate/duplicate rule implementation here.
+  const lookup = await getCandidatesForRequirement(supabase, staffingRequirementId);
+  if (!lookup.ok) {
+    return { ok: false, status: lookup.status, error: `Could not revalidate replacement eligibility: ${lookup.error}` };
+  }
+  const match = lookup.candidates.find((c) => c.employee.id === newEmployeeId);
+  if (!match) {
+    const topReason = lookup.exclusionSummary?.[0]?.reason;
+    return {
+      ok: false,
+      status: 409,
+      error:
+        `${(newEmployee as Employee).name} is no longer an eligible candidate for this requirement` +
+        (topReason ? ` (${topReason}).` : " (hard constraint, or the roster/assignments changed since this candidate list was loaded)."),
+    };
+  }
+  if (match.status === "flagged" && !overrideAcknowledged) {
+    return {
+      ok: false,
+      status: 409,
+      error: `${(newEmployee as Employee).name} is flagged, not recommended — ${match.reasoning}. Confirm the override to proceed.`,
+    };
   }
 
   // Replace: delete the old row for this exact (requirement, employee)
@@ -821,10 +906,11 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
     .single();
   const nextStep = (lastStep?.step_number ?? 0) + 1;
 
+  const overrideNote = match.status === "flagged" ? ` (flagged candidate, override confirmed — ${match.reasoning})` : "";
   await supabase.from("audit_log_entries").insert({
     id: `audit-${nextStep}`,
     step_number: nextStep,
-    description: `Operational reassignment: ${(flight as Flight).flight_number} ${(requirement as StaffingRequirement).role} moved from ${(oldEmployee as Employee).name} to ${(newEmployee as Employee).name} — ${reason}. Confirmed by ${PLANNER_NAME}.`,
+    description: `Operational reassignment: ${(flight as Flight).flight_number} ${(requirement as StaffingRequirement).role} moved from ${(oldEmployee as Employee).name} to ${(newEmployee as Employee).name} — ${reason}.${overrideNote} Confirmed by ${PLANNER_NAME}.`,
   });
 
   return { ok: true, assignmentId };

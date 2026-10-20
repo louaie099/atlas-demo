@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 
 import { classifyDestinationOperationally } from "@/lib/destination-classification";
 import { dayOfWeekFor, weekStartFor } from "@/lib/flight-date";
+import { requireAdminKey } from "@/lib/admin-guard";
 
 /**
  * PUT /api/flights/[id] — Edit Flight. Same field set as Add Flight, same
@@ -73,7 +74,12 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
  * Make Planning click regenerates from the updated schedule (see the
  * Draft-staleness banner).
  */
-export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+export async function DELETE(req: Request, { params }: { params: { id: string } }) {
+  const guard = requireAdminKey(req);
+  if (!guard.ok) {
+    return NextResponse.json({ error: guard.error }, { status: guard.status });
+  }
+
   const supabase = getSupabaseServerClient();
   const { error } = await supabase.from("flights").delete().eq("id", params.id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

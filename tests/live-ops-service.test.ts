@@ -1151,3 +1151,194 @@ describe("live-ops-service — confirmReassignment", () => {
     expect(assignments).toHaveLength(2); // nothing changed
   });
 });
+
+describe("live-ops-service — confirmReassignment revalidates the replacement immediately before writing (2026-10-20 correctness fix)", () => {
+  it("rejects a replacement who is no longer an eligible candidate (stale client-side list — e.g. a concurrent change overlapped their shift)", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    // Simulate a concurrent change that happened AFTER the client last
+    // fetched emp-b's candidate list: emp-b now holds a real, overlapping
+    // assignment on a DIFFERENT requirement, at the exact same time as
+    // req-1's own window (08:00-09:00) -- a hard, non-negotiable
+    // exclusion (occupiedWindows), making emp-b no longer a legitimate
+    // candidate for req-1 even though the stale UI list may still show
+    // them.
+    const req3 = makeRequirement({ id: "req-3", flight_id: "flight-1", role: "Gate" });
+    await fake.from("staffing_requirements").insert(req3 as unknown as FakeRow);
+    await fake.from("assignments").insert({
+      id: "assign-conflict",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-3",
+      employee_id: "emp-b",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    } as unknown as FakeRow);
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-1",
+      oldEmployeeId: "emp-a",
+      newEmployeeId: "emp-b",
+      reason: "stale candidate list",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(409);
+    expect(result.error).toContain("no longer an eligible candidate");
+
+    // Nothing was written -- the original (req-1, emp-a) assignment is untouched.
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    expect(assignments.some((a) => a.staffing_requirement_id === "req-1" && a.employee_id === "emp-a")).toBe(true);
+    expect(assignments.some((a) => a.staffing_requirement_id === "req-1" && a.employee_id === "emp-b")).toBe(false);
+  });
+
+  it("rejects a replacement who is no longer an active employee", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+    const employees = fake.table("employees") as unknown as Employee[];
+    employees.find((e) => e.id === "emp-b")!.active = false;
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-1",
+      oldEmployeeId: "emp-a",
+      newEmployeeId: "emp-b",
+      reason: "test",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(409);
+    expect(result.error).toContain("not an active employee");
+  });
+
+  it("rejects a no-op reassignment where the replacement is the same employee already holding the assignment", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-1",
+      oldEmployeeId: "emp-a",
+      newEmployeeId: "emp-a",
+      reason: "test",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(400);
+  });
+
+  // ---- a genuinely "flagged" (not "recommended") candidate fixture ----
+  //
+  // Needs a real, honest partial-shift-overlap case: a date on or after
+  // the 2026-09-20 shift-regime change (so shift codes resolve through
+  // SHIFT_CODES_GMT_EFFECTIVE_2026_09_20, not the pre-regime table), with
+  // a requirement window that MT03 (05:45-14:45 post-regime) only
+  // partially covers.
+  const FLAGGED_WEEK_START = "2026-09-21"; // a Monday, post-regime
+  const FLAGGED_PLAN_ID = planIdForWeek(FLAGGED_WEEK_START);
+
+  function seedFlaggedCandidateFixture(fake: FakeSupabase) {
+    const empIncumbent = makeEmployee({ id: "emp-incumbent", name: "Incumbent Employee" });
+    const empFlagged = makeEmployee({ id: "emp-flagged", name: "Flagged Employee", shift_code: "MT03" });
+
+    // AT303/flight-3 departs 15:00 -> Boarding window 14:00-15:00. MT03
+    // post-regime (05:45-14:45) overlaps 14:00-14:45 of that window but
+    // doesn't fully contain it -- a genuine, honest partial match.
+    const flight3 = makeFlight({ id: "flight-3", flight_number: "AT303", scheduled_departure: "15:00", flight_date: FLAGGED_WEEK_START, week_start: FLAGGED_WEEK_START, day_of_week: "Monday" });
+    const req4 = makeRequirement({ id: "req-4", flight_id: "flight-3", role: "Boarding" });
+
+    const assignIncumbent: Assignment = {
+      id: "assign-incumbent",
+      plan_id: FLAGGED_PLAN_ID,
+      staffing_requirement_id: "req-4",
+      employee_id: "emp-incumbent",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    };
+
+    const plan: WeeklyPlan = {
+      id: FLAGGED_PLAN_ID,
+      week_start: FLAGGED_WEEK_START,
+      week_label: "Flagged Test Week",
+      status: "draft",
+      revision: 1,
+      generated_at: new Date().toISOString(),
+      published_at: null,
+      generated_from_hash: "test-hash",
+      config_snapshot: CONFIG,
+      issues: [],
+      configuration_issues: [],
+    };
+
+    const rosterIncumbent: WeeklyPlanRosterEntry = { id: "roster-incumbent", plan_id: FLAGGED_PLAN_ID, employee_id: "emp-incumbent", day_of_week: "Monday", status: "working", shift_code: "NR02" };
+    const rosterFlagged: WeeklyPlanRosterEntry = { id: "roster-flagged", plan_id: FLAGGED_PLAN_ID, employee_id: "emp-flagged", day_of_week: "Monday", status: "working", shift_code: "MT03" };
+
+    fake.from("employees").insert([empIncumbent, empFlagged] as unknown as FakeRow[]);
+    fake.from("flights").insert([flight3] as unknown as FakeRow[]);
+    fake.from("staffing_requirements").insert([req4] as unknown as FakeRow[]);
+    fake.from("assignments").insert([assignIncumbent] as unknown as FakeRow[]);
+    fake.from("weekly_plans").insert([plan] as unknown as FakeRow[]);
+    fake.from("weekly_plan_roster_entries").insert([rosterIncumbent, rosterFlagged] as unknown as FakeRow[]);
+
+    return { empIncumbent, empFlagged, flight3, req4 };
+  }
+
+  it("sanity check: the fixture's emp-flagged really is scored 'flagged' (partial shift overlap), not 'recommended' or hard-excluded", async () => {
+    const fake = new FakeSupabase();
+    seedFlaggedCandidateFixture(fake);
+
+    const result = await getCandidatesForRequirement(fake as unknown as SupabaseClient, "req-4", { excludeEmployeeIds: ["emp-incumbent"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    const flaggedCandidate = result.candidates.find((c) => c.employee.id === "emp-flagged");
+    expect(flaggedCandidate).toBeDefined();
+    expect(flaggedCandidate!.status).toBe("flagged");
+  });
+
+  it("rejects a flagged (not recommended) replacement when overrideAcknowledged is not set", async () => {
+    const fake = new FakeSupabase();
+    seedFlaggedCandidateFixture(fake);
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-4",
+      oldEmployeeId: "emp-incumbent",
+      newEmployeeId: "emp-flagged",
+      reason: "test, no override",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(409);
+    expect(result.error).toContain("flagged");
+
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    expect(assignments.some((a) => a.staffing_requirement_id === "req-4" && a.employee_id === "emp-incumbent")).toBe(true);
+  });
+
+  it("accepts a flagged replacement once overrideAcknowledged is explicitly true, and records the override in the audit log", async () => {
+    const fake = new FakeSupabase();
+    seedFlaggedCandidateFixture(fake);
+    await fake.from("audit_log_entries").insert({ id: "audit-0", step_number: 0, description: "seed" });
+
+    const result = await confirmReassignment(fake as unknown as SupabaseClient, {
+      staffingRequirementId: "req-4",
+      oldEmployeeId: "emp-incumbent",
+      newEmployeeId: "emp-flagged",
+      reason: "test, override confirmed",
+      overrideAcknowledged: true,
+    });
+
+    expect(result.ok).toBe(true);
+
+    const assignments = fake.table("assignments") as unknown as Assignment[];
+    expect(assignments.some((a) => a.staffing_requirement_id === "req-4" && a.employee_id === "emp-flagged")).toBe(true);
+    expect(assignments.some((a) => a.staffing_requirement_id === "req-4" && a.employee_id === "emp-incumbent")).toBe(false);
+
+    const auditEntries = fake.table("audit_log_entries") as { step_number: number; description: string }[];
+    const newest = [...auditEntries].sort((a, b) => b.step_number - a.step_number)[0];
+    expect(newest.description).toContain("flagged candidate, override confirmed");
+  });
+});

@@ -38,7 +38,7 @@ export async function POST(req: Request) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason } = body;
+  const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason, overrideAcknowledged } = body;
 
   if (!staffingRequirementId || !oldEmployeeId || !newEmployeeId) {
     return NextResponse.json(
@@ -53,6 +53,7 @@ export async function POST(req: Request) {
     oldEmployeeId,
     newEmployeeId,
     reason: reason ?? "",
+    overrideAcknowledged: overrideAcknowledged === true,
   });
 
   if (!result.ok) {

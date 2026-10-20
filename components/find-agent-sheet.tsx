@@ -72,6 +72,7 @@ export function FindAgentSheet({
     setAssigningId(employeeId);
     setError(null);
     try {
+      const isFlagged = candidates?.find((c) => c.employee.id === employeeId)?.status === "flagged";
       const res =
         mode === "reassign" && replacingEmployeeId
           ? await fetch("/api/confirm-reassignment", {
@@ -82,6 +83,7 @@ export function FindAgentSheet({
                 oldEmployeeId: replacingEmployeeId,
                 newEmployeeId: employeeId,
                 reason: "Manual operational reassignment from Live Operations.",
+                overrideAcknowledged: isFlagged,
               }),
             })
           : await fetch("/api/assign", {

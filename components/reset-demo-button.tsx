@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "./ui";
+import { adminFetch } from "@/lib/admin-key-client";
 
 export function ResetDemoButton() {
   const [confirming, setConfirming] = useState(false);
@@ -12,7 +13,7 @@ export function ResetDemoButton() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/reset", { method: "POST" });
+      const res = await adminFetch("/api/reset", { method: "POST" });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         // Surface the real failure instead of silently reloading into an
