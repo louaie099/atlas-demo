@@ -76,6 +76,7 @@ describe("Planning Rules API routes fail safe on a genuine Supabase error (2026-
     const { PUT } = await import("../app/api/planning/rules/route");
     const req = new Request("http://localhost/api/planning/rules", {
       method: "PUT",
+      headers: { "x-atlas-role": "administrator" },
       body: JSON.stringify({}),
     });
     const res = await PUT(req);

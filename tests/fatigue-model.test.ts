@@ -331,8 +331,23 @@ describe("transport burden — architecture only, inert by default, never availa
     // DEFAULT_FATIGUE_CONFIG — a designated default-terminus, not a
     // pipeline consumer that should always receive an explicit config from
     // its own caller.
+    //
+    // fatigue-repair.ts (2026-10-20, LABOR RULES v2's fatigue repair pass)
+    // is excluded for the analogous reason fatigue-model.ts itself is: it
+    // is a standalone, explicitly-INVOKED utility (never wired into Stage
+    // 6, the top-up, Profiling/Mesure or any foreign-company generation —
+    // see its own doc comment), not a pipeline decision point threaded
+    // through a caller's config the way every file actually listed below
+    // is. Its exported repairRosterFatigue's own `fatigueConfig` parameter
+    // defaults to DEFAULT_FATIGUE_CONFIG (disabled) for exactly the same
+    // reason every public function in fatigue-model.ts already does: that
+    // IS "keep fatigue optimization disabled by default" (Moses's explicit
+    // instruction), re-confirmed behaviourally by
+    // tests/fatigue-repair.test.ts's own "is a no-op when fatigueConfig is
+    // omitted" / "...explicitly disabled" / "...under DEFAULT_FATIGUE_CONFIG"
+    // cases, rather than by this structural import guard.
     const importers = readdirSync(planningDir)
-      .filter((f) => f.endsWith(".ts") && !["fatigue-model.ts", "fatigue-continuity.ts", "fatigue-planning.ts", "rules-service.ts"].includes(f))
+      .filter((f) => f.endsWith(".ts") && !["fatigue-model.ts", "fatigue-continuity.ts", "fatigue-planning.ts", "rules-service.ts", "fatigue-repair.ts"].includes(f))
       .filter((f) => /from\s+["'][^"']*fatigue-(model|continuity|config|planning)["']/.test(readFileSync(join(planningDir, f), "utf8")))
       .sort();
     expect(importers).toEqual([
@@ -340,6 +355,7 @@ describe("transport burden — architecture only, inert by default, never availa
       "duty-generation.ts", // forwards scoreCandidates' optional fatigue input only
       "fatigue-live-lookup.ts", // 2026-10-06: the on-demand "state entering date X" orchestrator candidate-lookup.ts uses — itself gated on config.enabled (an early return, no computation otherwise)
       "generate-draft-plan.ts", // planningOptions.fatigue (omitted by every real caller)
+      "hard-work-caps.ts", // LABOR RULES v2 (2026-10-20): imports ONLY lib/fatigue-config.ts's static DEFAULT_FATIGUE_THRESHOLDS to classify a "night shift" (reusing nightWindowStart/nightWindowEnd, never redefining it — see lib/labor-rules.ts's maxConsecutiveNightShifts doc comment); never the fatigue model, its enabled switch, or DEFAULT_FATIGUE_CONFIG (checked below) — this hard cap runs independently of whether the scoring fatigue subsystem is on or off
       "roster-generation.ts", // Stage-6.5 top-up: optional TopUpFatigueOptions
       "shift-generation.ts", // Stage 6: optional fatigueContext (tier 4)
       "specialized-team-generation.ts", // foreign roster: optional ForeignFatigueOptions

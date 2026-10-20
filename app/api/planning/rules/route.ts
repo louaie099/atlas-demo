@@ -6,6 +6,10 @@ export const dynamic = "force-dynamic";
 import { loadLaborRules, saveLaborRuleEdit, loadFatigueConfig, saveFatigueConfig, EditableRuleValues } from "@/lib/planning/rules-service";
 import { resolveDefaultLaborRules, LABOR_RULE_SEVERITY } from "@/lib/labor-rules";
 import { FatigueConfig } from "@/lib/fatigue-config";
+import { BreakPolicy } from "@/lib/break-policy";
+import { ROLE_HEADER, getRoleFromHeader, canManageLaborRules } from "@/lib/roles";
+import { buildConfigFromResolvedRules } from "@/lib/seed-data";
+import { auditLaborRuleConfigurationFeasibility } from "@/lib/planning/labor-rule-feasibility";
 
 /**
  * Planning Rules -- the single endpoint behind the Weekly Planning page's
@@ -41,7 +45,12 @@ export async function GET() {
   try {
     const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
     const resolved = resolveDefaultLaborRules(undefined, rules);
-    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+    // LABOR RULES v2 (2026-10-20): a non-blocking configuration-feasibility
+    // audit (lib/planning/labor-rule-feasibility.ts) — never fails the
+    // request, just surfaces an arithmetically-impossible combination of
+    // configured values for the UI to show alongside the resolved rules.
+    const configurationIssues = auditLaborRuleConfigurationFeasibility(buildConfigFromResolvedRules(resolved));
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -68,8 +77,27 @@ export async function GET() {
  * to police.
  */
 export async function PUT(req: Request) {
+  // LABOR RULES v2 (2026-10-20) — Administrator-only edit boundary (see
+  // lib/roles.ts's canManageLaborRules doc comment). GET above stays
+  // unguarded: Planners must still be able to SEE the resolved rules per
+  // Moses's explicit "appear to the planner... configured by the admins"
+  // direction. Checked before parsing the body so an unauthorized request
+  // never reaches saveLaborRuleEdit/saveFatigueConfig at all.
+  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  if (!canManageLaborRules(role)) {
+    return NextResponse.json(
+      { error: "Only an administrator may edit Planning Rules." },
+      { status: 403, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
   const supabase = getSupabaseServerClient();
-  let body: { laborRules?: Partial<EditableRuleValues>; effectiveFrom?: string; fatigue?: FatigueConfig };
+  let body: {
+    laborRules?: Partial<EditableRuleValues>;
+    effectiveFrom?: string;
+    fatigue?: FatigueConfig;
+    breakPolicy?: Partial<BreakPolicy>;
+  };
   try {
     body = await req.json();
   } catch {
@@ -77,7 +105,9 @@ export async function PUT(req: Request) {
   }
 
   try {
-    if (body.laborRules) await saveLaborRuleEdit(supabase, body.laborRules, body.effectiveFrom);
+    if (body.laborRules || body.breakPolicy) {
+      await saveLaborRuleEdit(supabase, body.laborRules ?? {}, body.effectiveFrom, body.effectiveFrom, body.breakPolicy);
+    }
     if (body.fatigue) await saveFatigueConfig(supabase, body.fatigue);
   } catch (err) {
     return NextResponse.json(
@@ -92,7 +122,12 @@ export async function PUT(req: Request) {
   try {
     const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
     const resolved = resolveDefaultLaborRules(undefined, rules);
-    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue }, { headers: { "Cache-Control": "no-store" } });
+    // LABOR RULES v2 (2026-10-20): a non-blocking configuration-feasibility
+    // audit (lib/planning/labor-rule-feasibility.ts) — never fails the
+    // request, just surfaces an arithmetically-impossible combination of
+    // configured values for the UI to show alongside the resolved rules.
+    const configurationIssues = auditLaborRuleConfigurationFeasibility(buildConfigFromResolvedRules(resolved));
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

@@ -175,11 +175,12 @@ describe("config — the hard consecutive-work-day cap (2026-09-29: no separate 
   });
 
   it("resolveHardWorkCaps reads the config, and falls back to the default for a pre-phase config_snapshot lacking the field (never silently disabling a hard rule)", () => {
-    expect(resolveHardWorkCaps(CONFIG)).toEqual({ maxConsecutiveWorkDays: 5 });
-    expect(resolveHardWorkCaps({ max_consecutive_work_days: 4 })).toEqual({ maxConsecutiveWorkDays: 4 });
+    const unconfiguredV2 = { maxContinuousShiftHours: null, maxConsecutiveNightShifts: null };
+    expect(resolveHardWorkCaps(CONFIG)).toEqual({ maxConsecutiveWorkDays: 5, ...unconfiguredV2 });
+    expect(resolveHardWorkCaps({ max_consecutive_work_days: 4 })).toEqual({ maxConsecutiveWorkDays: 4, ...unconfiguredV2 });
     const legacy = { ...CONFIG } as Partial<Config>;
     delete legacy.max_consecutive_work_days;
-    expect(resolveHardWorkCaps(legacy)).toEqual({ maxConsecutiveWorkDays: 5 });
+    expect(resolveHardWorkCaps(legacy)).toEqual({ maxConsecutiveWorkDays: 5, ...unconfiguredV2 });
   });
 });
 
@@ -1244,7 +1245,7 @@ describe("repairFlexiblePoolWeek — OFF/OFF regression (2026-10-06): a hard-cap
     daysOrder: DAYS,
     weekStart: WEEK,
     minimumRestHours: 15,
-    caps: { maxConsecutiveWorkDays: 6 }, // loose — isolates the OFF-day-rule check from the work-day-streak cap
+    caps: { maxConsecutiveWorkDays: 6, maxContinuousShiftHours: null, maxConsecutiveNightShifts: null }, // loose — isolates the OFF-day-rule check from the work-day-streak cap
     incomingStreakByEmployee: new Map<string, number>(),
     priorWeekBoundaryContext: new Map(),
   };

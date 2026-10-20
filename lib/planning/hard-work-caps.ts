@@ -1,5 +1,8 @@
 import type { Config } from "../types";
 import { resolveDefaultLaborRules } from "../labor-rules";
+import { DEFAULT_FATIGUE_THRESHOLDS } from "../fatigue-config";
+import { scheduledSpanHours } from "./paid-hours";
+import { getShiftTimesAs } from "../shift-templates";
 
 /**
  * HARD WORK CAPS (2026-09-25, hard-constraints milestone PHASE 1 of 3).
@@ -82,6 +85,23 @@ import { resolveDefaultLaborRules } from "../labor-rules";
  * (normal flexible ACEs being configured for 5 WORK + 2 OFF does not, by
  * itself, prove a separate confirmed rule that nobody may EVER work more
  * than 5 consecutive calendar days across week boundaries).
+ *
+ * LABOR RULES v2 (2026-10-20): two new pure predicates below —
+ * wouldExceedShiftDurationCap (max continuous SCHEDULED SPAN for one
+ * shift) and wouldExceedConsecutiveNightShiftCap (a streak cap, same
+ * shape as the consecutive-work-day cap, classifying "night" via
+ * isNightShift — reusing lib/fatigue-config.ts's nightWindowStart/End,
+ * never redefining it). Both default to `null` (not configured, never
+ * excludes anything) and are wired ONLY into Stage 6
+ * (shift-generation.ts's flexible General T1 pool) as a pre-scoring
+ * filter, the same gate the existing consecutive-work-day cap sits at —
+ * NOT YET into the Stage-6.5 top-up (roster-generation.ts), Profiling/
+ * Mesure or foreign-company generation (specialized-team-generation.ts,
+ * foreign-shift-planning.ts). lib/planning/validation.ts's
+ * checkMaxContinuousShiftDuration/checkMaxConsecutiveNightShifts still
+ * catch a violation from ANY population as a plan-level backstop — they
+ * just cannot yet PREVENT one from being generated outside Stage 6. See
+ * docs/known-limitations/labor-rules-v2.md.
  */
 
 /**
@@ -97,6 +117,13 @@ export const DEFAULT_MAX_CONSECUTIVE_WORK_DAYS = resolveDefaultLaborRules().maxC
 
 export interface HardWorkCaps {
   maxConsecutiveWorkDays: number;
+  // LABOR RULES v2 (2026-10-20) — null = not configured, no hard filter
+  // applied for that cap (exactly like every other "unconfirmed, null"
+  // field elsewhere in this codebase — never defaulted to a guessed
+  // number). See lib/labor-rules.ts's maxContinuousShiftHours/
+  // maxConsecutiveNightShifts doc comments.
+  maxContinuousShiftHours: number | null;
+  maxConsecutiveNightShifts: number | null;
 }
 
 /**
@@ -104,10 +131,82 @@ export interface HardWorkCaps {
  * phase (an old plan's config_snapshot) lacks the field — it falls back to
  * the default rather than silently disabling a hard rule.
  */
-export function resolveHardWorkCaps(config: Partial<Pick<Config, "max_consecutive_work_days">>): HardWorkCaps {
+export function resolveHardWorkCaps(
+  config: Partial<Pick<Config, "max_consecutive_work_days" | "max_continuous_shift_hours" | "max_consecutive_night_shifts">>
+): HardWorkCaps {
   return {
     maxConsecutiveWorkDays: typeof config.max_consecutive_work_days === "number" ? config.max_consecutive_work_days : DEFAULT_MAX_CONSECUTIVE_WORK_DAYS,
+    // Pre-migration config_snapshots simply lack these keys -- `undefined`
+    // falls back to null (not configured), never a crash and never a
+    // guessed ceiling, exactly like the LaborRules default itself.
+    maxContinuousShiftHours: typeof config.max_continuous_shift_hours === "number" ? config.max_continuous_shift_hours : null,
+    maxConsecutiveNightShifts: typeof config.max_consecutive_night_shifts === "number" ? config.max_consecutive_night_shifts : null,
   };
+}
+
+/**
+ * Hard eligibility: would working `code` on `date` exceed the configured
+ * max continuous SCHEDULED SPAN (never paid hours — see
+ * lib/break-policy.ts)? `cap === null` means not configured — nothing is
+ * ever excluded by an unconfigured cap.
+ */
+export function wouldExceedShiftDurationCap(code: string, date: string, cap: number | null): boolean {
+  if (cap === null) return false;
+  return scheduledSpanHours(code, date) > cap;
+}
+
+/**
+ * Whether a shift counts as a NIGHT shift — its scheduled span overlaps
+ * lib/fatigue-config.ts's nightWindowStart/nightWindowEnd at all (reused,
+ * never redefined — see lib/labor-rules.ts's maxConsecutiveNightShifts doc
+ * comment). Minute-level clock math, overnight-safe: the window is checked
+ * against the shift's own start-day, previous-day, and next-day instances,
+ * since an overnight shift's span can run past 24:00.
+ */
+export function isNightShift(code: string, date: string): boolean {
+  const { shift_start, shift_end } = getShiftTimesAs(code, date);
+  const toMin = (t: string): number => {
+    const [h, m] = t.split(":").map(Number);
+    return h * 60 + m;
+  };
+  const startMin = toMin(shift_start);
+  let endMin = toMin(shift_end);
+  if (endMin <= startMin) endMin += 24 * 60; // overnight: real end is the following calendar day
+
+  const t = DEFAULT_FATIGUE_THRESHOLDS;
+  const wStart = toMin(t.nightWindowStart);
+  let wEnd = toMin(t.nightWindowEnd);
+  if (wEnd <= wStart) wEnd += 24 * 60; // the night window itself wraps midnight (23:00 -> 05:00)
+
+  // Check the window anchored the day before, the same day, and the day
+  // after the shift's own start — matches fatigue-model.ts's own
+  // overlapWithDailyWindow approach for a span that can exceed 24h.
+  for (const offset of [-1440, 0, 1440]) {
+    const s = wStart + offset;
+    const e = wEnd + offset;
+    if (startMin < e && endMin > s) return true;
+  }
+  return false;
+}
+
+/**
+ * The streak entering the NEXT calendar day for the NIGHT-shift cap —
+ * same increment/reset shape as nextConsecutiveWorkDayStreak above, just
+ * keyed on "was today classified a night shift" instead of "was today
+ * worked at all."
+ */
+export function nextConsecutiveNightShiftStreak(streakEnteringDay: number, workedNightShiftToday: boolean): number {
+  return workedNightShiftToday ? streakEnteringDay + 1 : 0;
+}
+
+/**
+ * Hard eligibility: would assigning this NIGHT shift make it the
+ * (cap + 1)th consecutive calendar night shift? `cap === null` means not
+ * configured — nothing is ever excluded by an unconfigured cap.
+ */
+export function wouldExceedConsecutiveNightShiftCap(streakEnteringToday: number, isNightShiftToday: boolean, cap: number | null): boolean {
+  if (cap === null) return false;
+  return isNightShiftToday && streakEnteringToday + 1 > cap;
 }
 
 /**
@@ -155,7 +254,7 @@ export function consecutiveRunLengthIfWorked(isWorked: (k: number) => boolean, i
   return back + 1 + forward;
 }
 
-export type HardCapExclusionReason = "consecutive_work_days";
+export type HardCapExclusionReason = "consecutive_work_days" | "max_continuous_shift_hours" | "max_consecutive_night_shifts";
 
 /**
  * Transparency record: an employee who had at least one REST-LEGAL

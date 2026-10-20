@@ -10,6 +10,11 @@ export interface RulesResponse {
   resolved: ResolvedLaborRules;
   severity: Record<string, RuleSeverity>;
   fatigue: FatigueConfig;
+  // LABOR RULES v2 (2026-10-20) — a non-blocking configuration-feasibility
+  // audit (lib/planning/labor-rule-feasibility.ts). Optional: an older
+  // cached response (or a route that hasn't redeployed yet) simply has
+  // none, which the UI treats the same as an empty array.
+  configurationIssues?: { requirementId: string; description: string }[];
 }
 
 /**

@@ -13,6 +13,9 @@ import { checkConsecutiveOffCyclic, checkOffDaysSeparated, checkOffDaysBelowMini
 // invented speculatively now.
 import { JR_NT_OFF_OFF_CYCLE, maxConsecutiveOffInCycle } from "../fixed-cycle-rotation";
 import { isGenerationDrivenPopulation } from "./workforce-pools";
+import { computePaidHours } from "./paid-hours";
+import { isNightShift } from "./hard-work-caps";
+import { DEFAULT_BREAK_POLICY } from "../break-policy";
 
 // "needs_configuration" was REMOVED from this type entirely — it isn't an
 // operational planning problem, it's an internal administrative gap (no
@@ -86,7 +89,30 @@ export type PlanIssueType =
   // their real shift codes. A week the cap itself limits (e.g. 4 x 9h, a 5th
   // day would exceed 42h) meets its target and is NOT flagged: it is that
   // employee's normal week.
-  | "roster_target_shortfall";
+  | "roster_target_shortfall"
+  // LABOR RULES v2 (2026-10-20). HARD findings, emitted for EVERY
+  // population (not just the flexible General T1 pool) — a plan-level
+  // backstop, since the matching hard pre-scoring filters
+  // (lib/planning/hard-work-caps.ts's wouldExceedShiftDurationCap /
+  // wouldExceedConsecutiveNightShiftCap) are currently wired only into
+  // Stage 6 (shift-generation.ts). These three checks catch a violation
+  // from ANY population (Profiling/Mesure, foreign-company, fixed-cycle)
+  // even though they cannot yet PREVENT one from being generated outside
+  // Stage 6 — see docs/known-limitations/labor-rules-v2.md.
+  //   - "weekly_paid_hours_violation": this displayed week's own PAID
+  //     hours (lib/planning/paid-hours.ts) fall outside the configured
+  //     minimum/maximum weekly paid-hours rule. Evaluated against ONE
+  //     real week's own data — no reference period needed, unlike the
+  //     AVERAGE-hours rule above.
+  //   - "max_continuous_shift_duration_violation": a single shift's own
+  //     SCHEDULED SPAN (never paid hours) exceeds the configured ceiling.
+  //   - "max_consecutive_night_shifts_violation": more than the
+  //     configured number of consecutive calendar NIGHT shifts.
+  // All three emit nothing when their rule is unconfigured (null) — never
+  // a guessed ceiling.
+  | "weekly_paid_hours_violation"
+  | "max_continuous_shift_duration_violation"
+  | "max_consecutive_night_shifts_violation";
 
 export interface PlanIssue {
   type: PlanIssueType;
@@ -277,6 +303,118 @@ export function checkAverageWeeklyHours(employee: Employee, config: Config, week
     employeeId: employee.id,
     description: `${employee.name}: averages ${result.averageWeeklyHours}h/week over the confirmed ${result.referencePeriodDays}-day reference period, above the confirmed ${config.maximum_average_weekly_working_hours}h average ceiling.`,
   };
+}
+
+/**
+ * LABOR RULES v2 (2026-10-20) — this displayed week's own PAID hours
+ * (lib/planning/paid-hours.ts's computePaidHours, which is scheduled span
+ * minus any configured unpaid break) against the configured minimum/
+ * maximum weekly paid-hours ceiling/floor. Evaluated directly against ONE
+ * real week's own data — no reference period needed, a genuinely
+ * different mechanism from checkAverageWeeklyHours above (which stays
+ * not_evaluable until a reference period is confirmed). `config.
+ * minimum_weekly_paid_hours`/`maximum_weekly_paid_hours` are null until a
+ * planner configures them — this never emits anything while unconfigured.
+ */
+export function checkWeeklyPaidHours(employee: Employee, config: Config, weekStart: string): PlanIssue[] {
+  const min = config.minimum_weekly_paid_hours ?? null;
+  const max = config.maximum_weekly_paid_hours ?? null;
+  if (min === null && max === null) return [];
+
+  const breakPolicy = config.break_policy ?? DEFAULT_BREAK_POLICY;
+  let paidHoursTotal = 0;
+  for (const entry of employee.weekly_shifts) {
+    if (entry.status !== "working" || !entry.shift_code) continue;
+    paidHoursTotal += computePaidHours(entry.shift_code, flightDateFor(weekStart, entry.day_of_week), breakPolicy).paidHours;
+  }
+  paidHoursTotal = Math.round(paidHoursTotal * 100) / 100;
+  const provisionalNote = breakPolicy.source === "unconfirmed_prototype" ? " (break policy not yet confirmed — this total is provisional)" : "";
+
+  const issues: PlanIssue[] = [];
+  if (max !== null && paidHoursTotal > max) {
+    issues.push({
+      type: "weekly_paid_hours_violation",
+      employeeId: employee.id,
+      description: `${employee.name}: ${paidHoursTotal}h paid this planning week, above the configured maximum of ${max}h${provisionalNote}.`,
+    });
+  }
+  if (min !== null && paidHoursTotal < min) {
+    issues.push({
+      type: "weekly_paid_hours_violation",
+      employeeId: employee.id,
+      description: `${employee.name}: only ${paidHoursTotal}h paid this planning week, below the configured minimum of ${min}h${provisionalNote}.`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * LABOR RULES v2 (2026-10-20) — a plan-level backstop for
+ * config.max_continuous_shift_hours (lib/labor-rules.ts): flags any single
+ * working day whose shift's own SCHEDULED SPAN (never paid hours — a
+ * break does not shorten how long someone is actually on shift) exceeds
+ * the configured ceiling. Runs for EVERY employee/population, not just
+ * the flexible General T1 pool Stage 6 itself pre-filters — see this
+ * file's PlanIssueType doc comment on the current enforcement-scope gap.
+ */
+export function checkMaxContinuousShiftDuration(employee: Employee, config: Config, weekStart: string): PlanIssue[] {
+  const cap = config.max_continuous_shift_hours ?? null;
+  if (cap === null) return [];
+  const issues: PlanIssue[] = [];
+  for (const entry of employee.weekly_shifts) {
+    if (entry.status !== "working" || !entry.shift_code) continue;
+    const span = getShiftDurationHours(entry.shift_code, flightDateFor(weekStart, entry.day_of_week));
+    if (span > cap) {
+      issues.push({
+        type: "max_continuous_shift_duration_violation",
+        employeeId: employee.id,
+        dayOfWeek: entry.day_of_week,
+        description: `${employee.name}: ${entry.day_of_week}'s shift (${entry.shift_code}) spans ${span}h, above the configured maximum continuous shift duration of ${cap}h.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * LABOR RULES v2 (2026-10-20) — a plan-level backstop for
+ * config.max_consecutive_night_shifts (lib/labor-rules.ts): counts
+ * consecutive calendar NIGHT shifts (lib/planning/hard-work-caps.ts's
+ * isNightShift, reusing lib/fatigue-config.ts's night window — never
+ * redefined) across daysOrder, IN ORDER, and flags a run that exceeds the
+ * configured cap. Deliberately a single-week snapshot (no cross-week
+ * continuity thread yet, unlike max_consecutive_work_days'
+ * consecutive-days-continuity.ts) — a run split across the week boundary
+ * is not detected here; see this milestone's known-limitations note.
+ */
+export function checkMaxConsecutiveNightShifts(employee: Employee, daysOrder: string[], config: Config, weekStart: string): PlanIssue[] {
+  const cap = config.max_consecutive_night_shifts ?? null;
+  if (cap === null) return [];
+
+  const issues: PlanIssue[] = [];
+  let streak = 0;
+  let runStartDay: string | null = null;
+  for (const day of daysOrder) {
+    const entry = employee.weekly_shifts.find((s) => s.day_of_week === day);
+    const worked = entry?.status === "working" && Boolean(entry.shift_code);
+    const nightToday = worked && isNightShift(entry!.shift_code!, flightDateFor(weekStart, day));
+    if (nightToday) {
+      if (streak === 0) runStartDay = day;
+      streak += 1;
+      if (streak > cap) {
+        issues.push({
+          type: "max_consecutive_night_shifts_violation",
+          employeeId: employee.id,
+          dayOfWeek: day,
+          description: `${employee.name}: ${streak} consecutive night shifts ending ${day} (starting ${runStartDay}), above the configured maximum of ${cap}.`,
+        });
+      }
+    } else {
+      streak = 0;
+      runStartDay = null;
+    }
+  }
+  return issues;
 }
 
 /**
@@ -569,6 +707,12 @@ export function validateWeeklyPlan(
     if (separatedOffIssue) issues.push(separatedOffIssue);
     const targetIssue = checkRosterTargetShortfall(employee, daysOrder, config, capClosedFreeDaysByEmployee?.get(employee.id));
     if (targetIssue) issues.push(targetIssue);
+    // LABOR RULES v2 (2026-10-20) — plan-level backstop for EVERY
+    // population, see these functions' own doc comments and this file's
+    // PlanIssueType doc comment on current Stage-6-only prevention scope.
+    issues.push(...checkWeeklyPaidHours(employee, config, weekStart));
+    issues.push(...checkMaxContinuousShiftDuration(employee, config, weekStart));
+    issues.push(...checkMaxConsecutiveNightShifts(employee, daysOrder, config, weekStart));
   }
 
   return issues;

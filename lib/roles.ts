@@ -52,6 +52,20 @@ export function canManageOperations(role: UserRole): boolean {
   return role !== "viewer";
 }
 
+/**
+ * Labor Rules v2 (2026-10-20) — Moses's explicit direction: "THE RULES
+ * SHOULDNT BE IN THE BACKGROUND THEY SHOULD BE ABLE TO APPEAR TO THE
+ * PLANNER AND CAN BE CONFIGURED BY THE ADMINS ALL THE LABOR WORK." So
+ * Planner (and Administrator) may VIEW the resolved rules (GET is
+ * unguarded — every non-viewer already reaches the Weekly Planning page
+ * that surfaces them), but only an Administrator may EDIT them — the same
+ * administrator-only boundary as canManageEmployees above, applied to
+ * app/api/planning/rules/route.ts's PUT handler.
+ */
+export function canManageLaborRules(role: UserRole): boolean {
+  return role === "administrator";
+}
+
 export const ROLE_HEADER = "x-atlas-role";
 
 /**

@@ -3,8 +3,11 @@
 import { useState } from "react";
 import { ResolvedLaborRules, RuleSeverity } from "@/lib/labor-rules";
 import { FatigueConfig, FatigueWeights } from "@/lib/fatigue-config";
+import { BreakPolicy } from "@/lib/break-policy";
 import { Badge, Button } from "./ui";
 import { RulesResponse } from "./planning-rules-bar";
+import { useRole } from "./role-context";
+import { ROLE_HEADER, canManageLaborRules } from "@/lib/roles";
 
 const inputClass = "border border-border rounded-lg px-3 py-2 w-28 text-sm";
 
@@ -46,10 +49,12 @@ function NumberField({
   value,
   onChange,
   placeholder,
+  disabled,
 }: {
   value: number | null;
   onChange: (v: number | null) => void;
   placeholder?: string;
+  disabled?: boolean;
 }) {
   return (
     <input
@@ -57,6 +62,7 @@ function NumberField({
       className={inputClass}
       value={value ?? ""}
       placeholder={placeholder ?? "not confirmed"}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
     />
   );
@@ -102,9 +108,19 @@ export function PlanningRulesSheet({
 }) {
   const [rules, setRules] = useState<ResolvedLaborRules>(data.resolved);
   const [fatigue, setFatigue] = useState<FatigueConfig>(data.fatigue);
+  const [breakPolicy, setBreakPolicy] = useState<BreakPolicy>(data.resolved.breakPolicy);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // LABOR RULES v2 (2026-10-20) -- Administrator-only edit boundary (see
+  // lib/roles.ts's canManageLaborRules doc comment and Moses's explicit
+  // "appear to the planner... configured by the admins" direction).
+  // Planners still see every value above (the drawer itself stays open to
+  // them) -- only the controls are disabled, exactly like
+  // employee-drawer.tsx's existing canManageEmployees pattern.
+  const { role } = useRole();
+  const allowed = canManageLaborRules(role);
 
   const set = <K extends keyof ResolvedLaborRules>(key: K, value: ResolvedLaborRules[K]) => setRules((r) => ({ ...r, [key]: value }));
 
@@ -114,7 +130,7 @@ export function PlanningRulesSheet({
     try {
       const res = await fetch("/api/planning/rules", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", [ROLE_HEADER]: role },
         body: JSON.stringify({
           laborRules: {
             minimumRestHours: rules.minimumRestHours,
@@ -129,7 +145,16 @@ export function PlanningRulesSheet({
             workingHoursObligationHours: rules.workingHoursObligationHours,
             maxConsecutiveWorkDays: rules.maxConsecutiveWorkDays,
             operationalBufferMinutes: rules.operationalBufferMinutes,
+            // LABOR RULES v2 fields.
+            minimumWeeklyPaidHours: rules.minimumWeeklyPaidHours,
+            maximumWeeklyPaidHours: rules.maximumWeeklyPaidHours,
+            minimumMonthlyPaidHours: rules.minimumMonthlyPaidHours,
+            maximumMonthlyPaidHours: rules.maximumMonthlyPaidHours,
+            maxContinuousShiftHours: rules.maxContinuousShiftHours,
+            maxConsecutiveNightShifts: rules.maxConsecutiveNightShifts,
+            maxRestIntervalHours: rules.maxRestIntervalHours,
           },
+          breakPolicy,
           fatigue,
         }),
       });
@@ -165,10 +190,29 @@ export function PlanningRulesSheet({
 
         {error && <p className="text-sm text-bad-700 bg-bad-50 border border-bad-500/30 rounded-lg px-3 py-2">{error}</p>}
 
+        {!allowed && (
+          <p className="text-xs text-muted bg-surface-muted border border-border rounded-lg px-3 py-2">
+            You can view every rule below, but only an Administrator can change them.
+          </p>
+        )}
+
+        {(data.configurationIssues?.length ?? 0) > 0 && (
+          <div className="text-xs text-bad-700 bg-bad-50 border border-bad-500/30 rounded-lg px-3 py-2 flex flex-col gap-1">
+            <p className="font-semibold">Configuration conflict{(data.configurationIssues?.length ?? 0) > 1 ? "s" : ""} — these values cannot all be satisfied:</p>
+            {data.configurationIssues!.map((issue) => (
+              <p key={issue.requirementId}>{issue.description}</p>
+            ))}
+          </div>
+        )}
+
         <section className="flex flex-col gap-1">
           <h3 className="text-xs font-semibold text-muted uppercase tracking-wide">Weekly roster</h3>
           <RuleRow label="Normal work days per week" severity={sev.normalWeeklyWorkDays}>
-            <NumberField value={rules.normalWeeklyWorkDays} onChange={(v) => set("normalWeeklyWorkDays", v ?? rules.normalWeeklyWorkDays)} />
+            <NumberField
+              value={rules.normalWeeklyWorkDays}
+              onChange={(v) => set("normalWeeklyWorkDays", v ?? rules.normalWeeklyWorkDays)}
+              disabled={!allowed}
+            />
           </RuleRow>
           <RuleRow
             label="Minimum OFF days per planning week"
@@ -178,6 +222,7 @@ export function PlanningRulesSheet({
             <NumberField
               value={rules.minimumOffDaysPerPlanningWeek}
               onChange={(v) => set("minimumOffDaysPerPlanningWeek", v ?? rules.minimumOffDaysPerPlanningWeek)}
+              disabled={!allowed}
             />
           </RuleRow>
           <RuleRow
@@ -185,7 +230,11 @@ export function PlanningRulesSheet({
             severity={sev.normalWeeklyOffDays}
             hint="The normal TARGET when there is no shortage — usually equal to or above the minimum above, never the floor itself."
           >
-            <NumberField value={rules.normalWeeklyOffDays} onChange={(v) => set("normalWeeklyOffDays", v ?? rules.normalWeeklyOffDays)} />
+            <NumberField
+              value={rules.normalWeeklyOffDays}
+              onChange={(v) => set("normalWeeklyOffDays", v ?? rules.normalWeeklyOffDays)}
+              disabled={!allowed}
+            />
           </RuleRow>
           <RuleRow
             label="OFF days scheduled consecutively"
@@ -197,6 +246,7 @@ export function PlanningRulesSheet({
                 type="checkbox"
                 checked={rules.normalOffDaysConsecutive}
                 onChange={(e) => set("normalOffDaysConsecutive", e.target.checked)}
+                disabled={!allowed}
               />
               {rules.normalOffDaysConsecutive ? "Together" : "May be separated"}
             </label>
@@ -206,21 +256,32 @@ export function PlanningRulesSheet({
             severity={sev.maxConsecutiveOffDays}
             hint="A CEILING on how long an OFF run may ever get — a different concept from the recovery-block policy above (that says the normal pair must be together; this says a run must never exceed this many days)."
           >
-            <NumberField value={rules.maxConsecutiveOffDays} onChange={(v) => set("maxConsecutiveOffDays", v ?? rules.maxConsecutiveOffDays)} />
+            <NumberField
+              value={rules.maxConsecutiveOffDays}
+              onChange={(v) => set("maxConsecutiveOffDays", v ?? rules.maxConsecutiveOffDays)}
+              disabled={!allowed}
+            />
           </RuleRow>
           <RuleRow
             label="Weekly planned hours obligation"
             severity={sev.workingHoursObligationHours}
             hint="A different concept from the 42h average ceiling below: how much an employee should be scheduled to work, not a maximum."
           >
-            <NumberField value={rules.workingHoursObligationHours} onChange={(v) => set("workingHoursObligationHours", v)} />
+            <NumberField value={rules.workingHoursObligationHours} onChange={(v) => set("workingHoursObligationHours", v)} disabled={!allowed} />
           </RuleRow>
         </section>
 
         <section className="flex flex-col gap-1">
           <h3 className="text-xs font-semibold text-muted uppercase tracking-wide">Rest</h3>
           <RuleRow label="Minimum rest between shifts (hours)" severity={sev.minimumRestHours}>
-            <NumberField value={rules.minimumRestHours} onChange={(v) => set("minimumRestHours", v ?? rules.minimumRestHours)} />
+            <NumberField value={rules.minimumRestHours} onChange={(v) => set("minimumRestHours", v ?? rules.minimumRestHours)} disabled={!allowed} />
+          </RuleRow>
+          <RuleRow
+            label="Maximum rest interval (hours)"
+            severity={sev.maxRestIntervalHours}
+            hint="A soft TARGET only — no confirmed policy says an employee can be rested 'too much'. Leaving this unset (not confirmed) keeps it fully disabled; it has no engine enforcement point today even when set."
+          >
+            <NumberField value={rules.maxRestIntervalHours} onChange={(v) => set("maxRestIntervalHours", v)} disabled={!allowed} />
           </RuleRow>
         </section>
 
@@ -234,6 +295,7 @@ export function PlanningRulesSheet({
             <NumberField
               value={rules.maximumAverageWeeklyWorkingHours}
               onChange={(v) => set("maximumAverageWeeklyWorkingHours", v ?? rules.maximumAverageWeeklyWorkingHours)}
+              disabled={!allowed}
             />
           </RuleRow>
           <RuleRow
@@ -241,7 +303,36 @@ export function PlanningRulesSheet({
             severity={sev.workingHoursReferencePeriodDays}
             hint="Not yet confirmed. Leaving this unset keeps average-hours compliance explicitly not_evaluable, rather than assuming 7/14/28 days."
           >
-            <NumberField value={rules.workingHoursReferencePeriodDays} onChange={(v) => set("workingHoursReferencePeriodDays", v)} />
+            <NumberField
+              value={rules.workingHoursReferencePeriodDays}
+              onChange={(v) => set("workingHoursReferencePeriodDays", v)}
+              disabled={!allowed}
+            />
+          </RuleRow>
+        </section>
+
+        <section className="flex flex-col gap-1">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wide">Paid-hour limits (weekly &amp; monthly)</h3>
+          <p className="text-xs text-muted -mt-0.5 max-w-sm">
+            Direct ceilings/floors on PAID hours (scheduled span minus any configured unpaid break — see Break policy
+            below), evaluated against one real week's or calendar month's own data — no reference period needed, a
+            genuinely different mechanism from the average-hours rule above. Unset = not configured, never evaluated.
+          </p>
+          <RuleRow label="Minimum weekly paid hours" severity={sev.minimumWeeklyPaidHours}>
+            <NumberField value={rules.minimumWeeklyPaidHours} onChange={(v) => set("minimumWeeklyPaidHours", v)} disabled={!allowed} />
+          </RuleRow>
+          <RuleRow label="Maximum weekly paid hours" severity={sev.maximumWeeklyPaidHours}>
+            <NumberField value={rules.maximumWeeklyPaidHours} onChange={(v) => set("maximumWeeklyPaidHours", v)} disabled={!allowed} />
+          </RuleRow>
+          <RuleRow
+            label="Minimum monthly paid hours"
+            severity={sev.minimumMonthlyPaidHours}
+            hint="Only ever evaluated once the calendar month has full weekly-plan coverage — never emitted against an incomplete month."
+          >
+            <NumberField value={rules.minimumMonthlyPaidHours} onChange={(v) => set("minimumMonthlyPaidHours", v)} disabled={!allowed} />
+          </RuleRow>
+          <RuleRow label="Maximum monthly paid hours" severity={sev.maximumMonthlyPaidHours}>
+            <NumberField value={rules.maximumMonthlyPaidHours} onChange={(v) => set("maximumMonthlyPaidHours", v)} disabled={!allowed} />
           </RuleRow>
         </section>
 
@@ -252,7 +343,62 @@ export function PlanningRulesSheet({
             severity={sev.maxConsecutiveWorkDays}
             hint="Enforced as a hard engine safety default — but not itself independently confirmed as a separate company-wide rule beyond the normal 5-work/2-off structure above."
           >
-            <NumberField value={rules.maxConsecutiveWorkDays} onChange={(v) => set("maxConsecutiveWorkDays", v ?? rules.maxConsecutiveWorkDays)} />
+            <NumberField
+              value={rules.maxConsecutiveWorkDays}
+              onChange={(v) => set("maxConsecutiveWorkDays", v ?? rules.maxConsecutiveWorkDays)}
+              disabled={!allowed}
+            />
+          </RuleRow>
+          <RuleRow
+            label="Max continuous shift duration (hours)"
+            severity={sev.maxContinuousShiftHours}
+            hint="A ceiling on ONE shift's own scheduled span (never paid hours — a break does not shorten how long someone is actually on shift). Enforced today only as a Stage 6 (flexible General T1 pool) pre-scoring filter, plus a plan-level validation backstop for every population."
+          >
+            <NumberField value={rules.maxContinuousShiftHours} onChange={(v) => set("maxContinuousShiftHours", v)} disabled={!allowed} />
+          </RuleRow>
+          <RuleRow
+            label="Max consecutive night shifts"
+            severity={sev.maxConsecutiveNightShifts}
+            hint="A ceiling on consecutive calendar NIGHT shifts (reusing the existing fatigue-model night window), counted continuously across week boundaries. Same enforcement scope as the shift-duration ceiling above."
+          >
+            <NumberField value={rules.maxConsecutiveNightShifts} onChange={(v) => set("maxConsecutiveNightShifts", v)} disabled={!allowed} />
+          </RuleRow>
+        </section>
+
+        <section className="flex flex-col gap-1">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wide">Break policy</h3>
+          <p className="text-xs text-muted -mt-0.5 max-w-sm">
+            Scheduled span (raw shift duration) and PAID hours are tracked separately (see docs/known-limitations/labor-
+            rules-v2.md). Disabled (the default) makes paid hours exactly equal scheduled span — a genuine no-op, never
+            a guessed deduction.
+          </p>
+          <RuleRow label="Deduct an unpaid break from paid hours" severity={breakPolicy.enabled ? "hard" : "not_evaluable"}>
+            <label className="flex items-center gap-1.5 text-sm">
+              <input
+                type="checkbox"
+                checked={breakPolicy.enabled}
+                onChange={(e) => setBreakPolicy((p) => ({ ...p, enabled: e.target.checked }))}
+                disabled={!allowed}
+              />
+              {breakPolicy.enabled ? "On" : "Off"}
+            </label>
+          </RuleRow>
+          <RuleRow label="Unpaid break per qualifying shift (minutes)" hint="null = not configured.">
+            <NumberField
+              value={breakPolicy.unpaidBreakMinutesPerShift}
+              onChange={(v) => setBreakPolicy((p) => ({ ...p, unpaidBreakMinutesPerShift: v }))}
+              disabled={!allowed}
+            />
+          </RuleRow>
+          <RuleRow
+            label="Minimum shift length to qualify (hours)"
+            hint="null = applies to every shift (when the deduction above is on)."
+          >
+            <NumberField
+              value={breakPolicy.minimumShiftHoursForBreak}
+              onChange={(v) => setBreakPolicy((p) => ({ ...p, minimumShiftHoursForBreak: v }))}
+              disabled={!allowed}
+            />
           </RuleRow>
         </section>
 
@@ -263,7 +409,7 @@ export function PlanningRulesSheet({
             severity={sev.operationalBufferMinutes}
             hint="Not yet enforced by generation or validation — representable only, until a real value is confirmed."
           >
-            <NumberField value={rules.operationalBufferMinutes} onChange={(v) => set("operationalBufferMinutes", v)} />
+            <NumberField value={rules.operationalBufferMinutes} onChange={(v) => set("operationalBufferMinutes", v)} disabled={!allowed} />
           </RuleRow>
         </section>
 
@@ -293,7 +439,12 @@ export function PlanningRulesSheet({
               </p>
               <RuleRow label="Fatigue optimization" severity="soft">
                 <label className="flex items-center gap-1.5 text-sm">
-                  <input type="checkbox" checked={fatigue.enabled} onChange={(e) => setFatigue((f) => ({ ...f, enabled: e.target.checked }))} />
+                  <input
+                    type="checkbox"
+                    checked={fatigue.enabled}
+                    onChange={(e) => setFatigue((f) => ({ ...f, enabled: e.target.checked }))}
+                    disabled={!allowed}
+                  />
                   {fatigue.enabled ? "On" : "Off"}
                 </label>
               </RuleRow>
@@ -305,6 +456,7 @@ export function PlanningRulesSheet({
                     className={inputClass}
                     value={fatigue.weights[key]}
                     onChange={(e) => setFatigue((f) => ({ ...f, weights: { ...f.weights, [key]: Number(e.target.value) } }))}
+                    disabled={!allowed}
                   />
                 </RuleRow>
               ))}
@@ -316,7 +468,7 @@ export function PlanningRulesSheet({
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={saving}>
+          <Button onClick={handleSave} disabled={saving || !allowed}>
             {saving ? "Saving…" : "Save rules"}
           </Button>
         </div>

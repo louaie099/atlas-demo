@@ -3,6 +3,7 @@ import { Config } from "../types";
 import { LaborRules, DEFAULT_LABOR_RULES, resolveDefaultLaborRules, ResolvedLaborRules, RuleValue, LaborRuleKey } from "../labor-rules";
 import { buildConfigFromResolvedRules } from "../seed-data";
 import { FatigueConfig, DEFAULT_FATIGUE_CONFIG } from "../fatigue-config";
+import { BreakPolicy } from "../break-policy";
 
 /**
  * PLANNING RULES PERSISTENCE (2026-09-29 milestone). Until now
@@ -154,11 +155,21 @@ export async function saveLaborRuleEdit(
   // natural "what does the rule set look like right before this edit
   // begins" baseline for merging partial edits over the current values).
   effectiveFrom: string = new Date().toISOString().slice(0, 10),
-  resolutionDate: string = effectiveFrom
+  resolutionDate: string = effectiveFrom,
+  // LABOR RULES v2 (2026-10-20) — BreakPolicy is NOT RuleValue-wrapped (it
+  // carries its own `source`, see lib/break-policy.ts), so it is a
+  // separate optional partial edit rather than going through `wrap()`
+  // below. Undefined/omitted fields fall back to the current policy's own
+  // values — an edit that only flips `enabled` must not silently null out
+  // an already-configured unpaidBreakMinutesPerShift.
+  breakPolicyEdit?: Partial<BreakPolicy>
 ): Promise<LaborRules> {
   const existingRules = await loadLaborRules(supabase);
   const current = resolveDefaultLaborRules(resolutionDate, existingRules);
   const merged: EditableRuleValues = { ...current, ...edits };
+  const mergedBreakPolicy: BreakPolicy = breakPolicyEdit
+    ? { ...current.breakPolicy, ...breakPolicyEdit, source: "confirmed_management_policy" }
+    : current.breakPolicy;
 
   const wrap = <T>(value: T): RuleValue<T> => ({ value, source: "confirmed_management_policy" });
   const newRule: LaborRules = {
@@ -183,6 +194,22 @@ export async function saveLaborRuleEdit(
     // field, uniformly.
     maxConsecutiveWorkDays: wrap(merged.maxConsecutiveWorkDays),
     operationalBufferMinutes: wrap(merged.operationalBufferMinutes),
+    // LABOR RULES v2 (2026-10-20) — same uniform treatment as every field
+    // above: this service always re-wraps the FULL merged rule set as
+    // confirmed_management_policy on any save (pre-existing behavior, not
+    // new here — see the module doc comment: this UI is for a planner
+    // making a real operational decision). A field the planner leaves
+    // untouched still keeps its previous VALUE (via `merged` falling back
+    // to `current`), it is simply also marked confirmed going forward,
+    // exactly like every pre-existing field already was.
+    minimumWeeklyPaidHours: wrap(merged.minimumWeeklyPaidHours),
+    maximumWeeklyPaidHours: wrap(merged.maximumWeeklyPaidHours),
+    minimumMonthlyPaidHours: wrap(merged.minimumMonthlyPaidHours),
+    maximumMonthlyPaidHours: wrap(merged.maximumMonthlyPaidHours),
+    maxContinuousShiftHours: wrap(merged.maxContinuousShiftHours),
+    maxConsecutiveNightShifts: wrap(merged.maxConsecutiveNightShifts),
+    maxRestIntervalHours: wrap(merged.maxRestIntervalHours),
+    breakPolicy: mergedBreakPolicy,
   };
 
   // Find the row that would otherwise still be open-ended at the moment

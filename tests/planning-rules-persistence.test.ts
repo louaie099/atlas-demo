@@ -201,4 +201,103 @@ describe("Planning Rules persistence (lib/planning/rules-service.ts)", () => {
     expect(await loadFatigueConfig(supabase)).toEqual(enabled);
     expect((await resolveEffectiveConfig(supabase)).fatigue?.enabled).toBe(true);
   });
+
+  describe("LABOR RULES v2 (2026-10-20)", () => {
+    it("every new scalar field defaults to null/unconfirmed_prototype and round-trips through an edit, becoming confirmed_management_policy, without disturbing an untouched sibling field", async () => {
+      const defaults = resolveDefaultLaborRules();
+      expect(defaults.minimumWeeklyPaidHours).toBeNull();
+      expect(defaults.maximumWeeklyPaidHours).toBeNull();
+      expect(defaults.minimumMonthlyPaidHours).toBeNull();
+      expect(defaults.maximumMonthlyPaidHours).toBeNull();
+      expect(defaults.maxContinuousShiftHours).toBeNull();
+      expect(defaults.maxConsecutiveNightShifts).toBeNull();
+      expect(defaults.maxRestIntervalHours).toBeNull();
+      expect(defaults.minimumWeeklyPaidHoursSource).toBe("unconfirmed_prototype");
+
+      const supabase = new FakeSupabase() as any;
+      await saveLaborRuleEdit(supabase, { maximumWeeklyPaidHours: 48, maxContinuousShiftHours: 12 }, "2026-06-01");
+      const resolved = resolveDefaultLaborRules("2026-06-01", await loadLaborRules(supabase));
+      expect(resolved.maximumWeeklyPaidHours).toBe(48);
+      expect(resolved.maximumWeeklyPaidHoursSource).toBe("confirmed_management_policy");
+      expect(resolved.maxContinuousShiftHours).toBe(12);
+      // A sibling v2 field left out of this edit keeps its prior value untouched.
+      expect(resolved.minimumWeeklyPaidHours).toBeNull();
+      expect(resolved.maxConsecutiveNightShifts).toBeNull();
+      // Pre-existing fields are also unaffected by an edit that never mentions them.
+      expect(resolved.minimumRestHours).toBe(15);
+
+      const config = buildConfigFromResolvedRules(resolved);
+      expect(config.maximum_weekly_paid_hours).toBe(48);
+      expect(config.max_continuous_shift_hours).toBe(12);
+      expect(config.minimum_weekly_paid_hours).toBeNull();
+    });
+
+    it("break policy defaults to disabled/unconfirmed_prototype and is saved/merged independently of the RuleValue edits", async () => {
+      const defaults = resolveDefaultLaborRules();
+      expect(defaults.breakPolicy).toEqual({
+        enabled: false,
+        source: "unconfirmed_prototype",
+        unpaidBreakMinutesPerShift: null,
+        minimumShiftHoursForBreak: null,
+      });
+
+      const supabase = new FakeSupabase() as any;
+      await saveLaborRuleEdit(supabase, {}, "2026-06-01", "2026-06-01", { enabled: true, unpaidBreakMinutesPerShift: 30 });
+      const afterFirst = resolveDefaultLaborRules("2026-06-01", await loadLaborRules(supabase));
+      expect(afterFirst.breakPolicy).toEqual({
+        enabled: true,
+        source: "confirmed_management_policy",
+        unpaidBreakMinutesPerShift: 30,
+        minimumShiftHoursForBreak: null,
+      });
+
+      // A later edit that only touches minimumShiftHoursForBreak must not
+      // silently drop the already-confirmed unpaidBreakMinutesPerShift/enabled.
+      await saveLaborRuleEdit(supabase, {}, "2026-07-01", "2026-07-01", { minimumShiftHoursForBreak: 8 });
+      const afterSecond = resolveDefaultLaborRules("2026-07-01", await loadLaborRules(supabase));
+      expect(afterSecond.breakPolicy).toEqual({
+        enabled: true,
+        source: "confirmed_management_policy",
+        unpaidBreakMinutesPerShift: 30,
+        minimumShiftHoursForBreak: 8,
+      });
+
+      // A plain labor-rule edit with no breakPolicyEdit at all leaves the
+      // break policy exactly as it was (never reset to the default).
+      await saveLaborRuleEdit(supabase, { minimumRestHours: 16 }, "2026-08-01");
+      const afterThird = resolveDefaultLaborRules("2026-08-01", await loadLaborRules(supabase));
+      expect(afterThird.breakPolicy).toEqual(afterSecond.breakPolicy);
+      expect(afterThird.minimumRestHours).toBe(16);
+    });
+
+    it("a row persisted BEFORE the v2 fields existed resolves every new field to the static default (never a crash)", async () => {
+      const supabase = new FakeSupabase() as any;
+      const {
+        id: _id,
+        scope: _scope,
+        effectiveFrom: _from,
+        effectiveTo: _to,
+        minimumWeeklyPaidHours: _mwph,
+        maximumWeeklyPaidHours: _xwph,
+        minimumMonthlyPaidHours: _mmph,
+        maximumMonthlyPaidHours: _xmph,
+        maxContinuousShiftHours: _mcsh,
+        maxConsecutiveNightShifts: _mcns,
+        maxRestIntervalHours: _mrih,
+        breakPolicy: _bp,
+        ...legacyRules
+      } = DEFAULT_LABOR_RULES[0];
+      void _id; void _scope; void _from; void _to; void _mwph; void _xwph; void _mmph; void _xmph; void _mcsh; void _mcns; void _mrih; void _bp;
+      await supabase.from("planning_labor_rules").insert({
+        id: "pre-v2-row",
+        scope: {},
+        effective_from: "2026-05-01",
+        effective_to: null,
+        rules: legacyRules,
+      });
+      const resolved = resolveDefaultLaborRules("2026-05-15", await loadLaborRules(supabase));
+      expect(resolved.maximumWeeklyPaidHours).toBeNull();
+      expect(resolved.breakPolicy).toEqual(DEFAULT_LABOR_RULES[0].breakPolicy);
+    });
+  });
 });

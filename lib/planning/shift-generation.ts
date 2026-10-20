@@ -9,7 +9,14 @@ import { stage6CandidateScore, fatigueScoreSteps } from "./stage6-score-tiers";
 import { Stage6OffWindowContext, startForcesPreviousDayOff, endForcesNextDayOff, countOffWindowStructureConflicts } from "./off-window";
 import { Stage6FatigueContext, FatigueCandidateProjection, projectFatigueForShift, explainFatigueChoice } from "./fatigue-planning";
 import { unknownFatigueState } from "./fatigue-model";
-import { HardWorkCaps, HardCapExclusion, wouldExceedConsecutiveDayCap } from "./hard-work-caps";
+import {
+  HardWorkCaps,
+  HardCapExclusion,
+  wouldExceedConsecutiveDayCap,
+  wouldExceedShiftDurationCap,
+  isNightShift,
+  wouldExceedConsecutiveNightShiftCap,
+} from "./hard-work-caps";
 import { reachOfDayMinutes, shiftDurationMinutes } from "../shift-interval";
 
 /**
@@ -27,6 +34,13 @@ import { reachOfDayMinutes, shiftDurationMinutes } from "../shift-interval";
 export interface FlexiblePoolHardCaps {
   caps: HardWorkCaps;
   streakEnteringDay: ReadonlyMap<string, number>;
+  // LABOR RULES v2 (2026-10-20) — the always-on consecutive-NIGHT-shift
+  // streak entering this day, same shape/seeding convention as
+  // streakEnteringDay above (a missing employee reads as 0). Optional:
+  // omitted (or caps.maxConsecutiveNightShifts === null) means the night-
+  // shift cap is simply never evaluated for this call — existing callers
+  // (tests, any caller not yet updated) keep working unchanged.
+  nightStreakEnteringDay?: ReadonlyMap<string, number>;
   exclusionsOut?: HardCapExclusion[];
 }
 
@@ -531,7 +545,7 @@ export function generateFlexiblePoolShifts(
   for (const employee of availableToday) {
     const priorShift = priorDayShift.get(employee.id);
     const nextShift = nextDayBaselineShift.get(employee.id);
-    const legal = allCodes.filter((c) => {
+    const restLegal = allCodes.filter((c) => {
       if (priorShift) {
         const entreeTime = `${String(Math.floor(c.entreeMin / 60)).padStart(2, "0")}:${String(c.entreeMin % 60).padStart(2, "0")}`;
         if (restHoursBetween(priorShift.shift_start, priorShift.shift_end, entreeTime) < minimumRestHours) return false;
@@ -543,6 +557,37 @@ export function generateFlexiblePoolShifts(
       }
       return true;
     });
+    // LABOR RULES v2 (2026-10-20) — two more PER-CODE hard filters at this
+    // same gate, both from hard-work-caps.ts: a candidate code whose own
+    // scheduled span exceeds maxContinuousShiftHours is removed outright
+    // (an employee may still have a SHORTER legal code available, unlike
+    // the whole-day consecutive-work-day cap below); a candidate NIGHT
+    // code is removed only when taking it would make it the (cap+1)th
+    // consecutive night shift — a non-night candidate is never affected by
+    // this streak. Both are no-ops (never exclude anything) when their cap
+    // is unconfigured (null) — see resolveHardWorkCaps.
+    const legal = hardCaps
+      ? restLegal.filter((c) => {
+          if (wouldExceedShiftDurationCap(c.code, date, hardCaps.caps.maxContinuousShiftHours)) return false;
+          if (
+            isNightShift(c.code, date) &&
+            wouldExceedConsecutiveNightShiftCap(
+              hardCaps.nightStreakEnteringDay?.get(employee.id) ?? 0,
+              true,
+              hardCaps.caps.maxConsecutiveNightShifts
+            )
+          ) {
+            return false;
+          }
+          return true;
+        })
+      : restLegal;
+    if (hardCaps && restLegal.length > 0 && legal.length === 0) {
+      const reason = restLegal.some((c) => wouldExceedShiftDurationCap(c.code, date, hardCaps.caps.maxContinuousShiftHours))
+        ? "max_continuous_shift_hours"
+        : "max_consecutive_night_shifts";
+      hardCaps.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek, population: "flexible_pool", reason });
+    }
     // HARD WORK CAPS — additional exclusion condition at this SAME gate
     // (see FlexiblePoolHardCaps): a 6th consecutive work day removes the
     // employee outright. Never scored. (2026-09-29: an hours-based

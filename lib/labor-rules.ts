@@ -1,4 +1,5 @@
 import { Employee } from "./types";
+import { BreakPolicy, DEFAULT_BREAK_POLICY } from "./break-policy";
 
 /**
  * Labor Rules = human-protection feasibility constraints only. They answer
@@ -212,6 +213,55 @@ export interface LaborRules {
   // representable in the Planning Rules UI, exactly like
   // renfortWeeklyOffDays/workingHoursObligationHours above.
   operationalBufferMinutes: RuleValue<number | null>;
+  // LABOR RULES v2 (2026-10-20). Hard PAID-hours ceilings/floors for one
+  // displayed Monday-Sunday planning week — a genuinely different concept
+  // from maximumAverageWeeklyWorkingHours above (that is a confirmed
+  // AVERAGE over an open reference period; these are direct per-week
+  // limits, evaluated against ONE real week's own data, no reference
+  // period needed). null = not configured, never evaluated. Measured in
+  // PAID hours (lib/planning/paid-hours.ts), not scheduled span — see
+  // this file's module doc comment and lib/break-policy.ts.
+  minimumWeeklyPaidHours: RuleValue<number | null>;
+  maximumWeeklyPaidHours: RuleValue<number | null>;
+  // Hard PAID-hours ceilings/floors over a real CALENDAR MONTH, aggregated
+  // across however many weekly_plans rows actually overlap that month —
+  // see lib/planning/monthly-hours.ts. null = not configured. Only ever
+  // evaluated when the month has full plan coverage (see
+  // MonthlyHoursResult's partial_coverage state) — never emitted against
+  // an incomplete month.
+  minimumMonthlyPaidHours: RuleValue<number | null>;
+  maximumMonthlyPaidHours: RuleValue<number | null>;
+  // Hard ceiling on ONE shift's own SCHEDULED SPAN (never paid hours — a
+  // break does not shorten how long someone is actually on shift). null =
+  // not configured. Enforced as a pre-scoring eligibility filter in Stage 6
+  // (the flexible General T1 pool) — see lib/planning/hard-work-caps.ts's
+  // wouldExceedShiftDurationCap. NOT YET wired into Profiling/Mesure,
+  // foreign-company generation, or the Stage-6.5 top-up — see this
+  // milestone's known-limitations note; a plan-level validation check
+  // (lib/planning/validation.ts's checkMaxContinuousShiftDuration) still
+  // catches a violation from any population, it just cannot yet prevent
+  // one from being generated outside Stage 6.
+  maxContinuousShiftHours: RuleValue<number | null>;
+  // Hard ceiling on CONSECUTIVE calendar NIGHT shifts, counted continuously
+  // across week boundaries like maxConsecutiveWorkDays. "Night" reuses the
+  // existing lib/fatigue-config.ts nightWindowStart/nightWindowEnd
+  // definition (never redefined here) — a shift counts as a night shift
+  // when its scheduled span overlaps that window at all. Same enforcement
+  // scope/limitation as maxContinuousShiftHours above: Stage 6 pre-scoring
+  // filter only, plan-level validation backstop for every population.
+  maxConsecutiveNightShifts: RuleValue<number | null>;
+  // Soft TARGET, never a hard rule (see this milestone's design doc) — no
+  // confirmed policy says an employee can be rested "too much". null =
+  // disabled (the default and only state until a real operational reason
+  // is identified). Deliberately has no engine enforcement point at all
+  // today — representable only, exactly like operationalBufferMinutes.
+  maxRestIntervalHours: RuleValue<number | null>;
+  // Break policy — see lib/break-policy.ts's own doc comment for the full
+  // rationale (Option C: scheduled span vs. paid hours). BreakPolicy
+  // already carries its own `source`, so this is NOT RuleValue-wrapped —
+  // wrapping it again would create two disagreeing provenance fields for
+  // one concept.
+  breakPolicy: import("./break-policy").BreakPolicy;
 }
 
 /**
@@ -257,6 +307,16 @@ export const DEFAULT_LABOR_RULES: LaborRules[] = [
     workingHoursObligationHours: { value: null, source: "unconfirmed_prototype" },
     maxConsecutiveWorkDays: { value: 5, source: "unconfirmed_prototype" },
     operationalBufferMinutes: { value: null, source: "unconfirmed_prototype" },
+    // LABOR RULES v2 — every new field starts null/disabled. None of
+    // these numbers has been confirmed by RAM Handling; do not invent one.
+    minimumWeeklyPaidHours: { value: null, source: "unconfirmed_prototype" },
+    maximumWeeklyPaidHours: { value: null, source: "unconfirmed_prototype" },
+    minimumMonthlyPaidHours: { value: null, source: "unconfirmed_prototype" },
+    maximumMonthlyPaidHours: { value: null, source: "unconfirmed_prototype" },
+    maxContinuousShiftHours: { value: null, source: "unconfirmed_prototype" },
+    maxConsecutiveNightShifts: { value: null, source: "unconfirmed_prototype" },
+    maxRestIntervalHours: { value: null, source: "unconfirmed_prototype" },
+    breakPolicy: DEFAULT_BREAK_POLICY,
   },
 ];
 
@@ -288,6 +348,22 @@ export interface ResolvedLaborRules {
   // null = not yet confirmed. See operationalBufferMinutes above.
   operationalBufferMinutes: number | null;
   operationalBufferMinutesSource: LaborRuleSource;
+  // LABOR RULES v2 fields — see LaborRules' own doc comments above.
+  minimumWeeklyPaidHours: number | null;
+  minimumWeeklyPaidHoursSource: LaborRuleSource;
+  maximumWeeklyPaidHours: number | null;
+  maximumWeeklyPaidHoursSource: LaborRuleSource;
+  minimumMonthlyPaidHours: number | null;
+  minimumMonthlyPaidHoursSource: LaborRuleSource;
+  maximumMonthlyPaidHours: number | null;
+  maximumMonthlyPaidHoursSource: LaborRuleSource;
+  maxContinuousShiftHours: number | null;
+  maxContinuousShiftHoursSource: LaborRuleSource;
+  maxConsecutiveNightShifts: number | null;
+  maxConsecutiveNightShiftsSource: LaborRuleSource;
+  maxRestIntervalHours: number | null;
+  maxRestIntervalHoursSource: LaborRuleSource;
+  breakPolicy: BreakPolicy;
 }
 
 /**
@@ -372,6 +448,21 @@ function unwrap(rule: LaborRules): ResolvedLaborRules {
     maxConsecutiveWorkDaysSource: rule.maxConsecutiveWorkDays.source,
     operationalBufferMinutes: rule.operationalBufferMinutes.value,
     operationalBufferMinutesSource: rule.operationalBufferMinutes.source,
+    minimumWeeklyPaidHours: rule.minimumWeeklyPaidHours.value,
+    minimumWeeklyPaidHoursSource: rule.minimumWeeklyPaidHours.source,
+    maximumWeeklyPaidHours: rule.maximumWeeklyPaidHours.value,
+    maximumWeeklyPaidHoursSource: rule.maximumWeeklyPaidHours.source,
+    minimumMonthlyPaidHours: rule.minimumMonthlyPaidHours.value,
+    minimumMonthlyPaidHoursSource: rule.minimumMonthlyPaidHours.source,
+    maximumMonthlyPaidHours: rule.maximumMonthlyPaidHours.value,
+    maximumMonthlyPaidHoursSource: rule.maximumMonthlyPaidHours.source,
+    maxContinuousShiftHours: rule.maxContinuousShiftHours.value,
+    maxContinuousShiftHoursSource: rule.maxContinuousShiftHours.source,
+    maxConsecutiveNightShifts: rule.maxConsecutiveNightShifts.value,
+    maxConsecutiveNightShiftsSource: rule.maxConsecutiveNightShifts.source,
+    maxRestIntervalHours: rule.maxRestIntervalHours.value,
+    maxRestIntervalHoursSource: rule.maxRestIntervalHours.source,
+    breakPolicy: rule.breakPolicy,
   };
 }
 
@@ -427,7 +518,14 @@ export type LaborRuleKey =
   | "workingHoursReferencePeriodDays"
   | "workingHoursObligationHours"
   | "maxConsecutiveWorkDays"
-  | "operationalBufferMinutes";
+  | "operationalBufferMinutes"
+  | "minimumWeeklyPaidHours"
+  | "maximumWeeklyPaidHours"
+  | "minimumMonthlyPaidHours"
+  | "maximumMonthlyPaidHours"
+  | "maxContinuousShiftHours"
+  | "maxConsecutiveNightShifts"
+  | "maxRestIntervalHours";
 
 export const LABOR_RULE_SEVERITY: Record<LaborRuleKey, RuleSeverity> = {
   minimumRestHours: "hard",
@@ -453,4 +551,26 @@ export const LABOR_RULE_SEVERITY: Record<LaborRuleKey, RuleSeverity> = {
   // are shown separately in the UI.
   maxConsecutiveWorkDays: "hard",
   operationalBufferMinutes: "not_evaluable",
+  // LABOR RULES v2 — "hard" while configured (null = not_evaluable is a
+  // runtime, not static, fact for these, so the UI shows "hard" here and
+  // the actual not-evaluable state is visible from the value being null;
+  // see planning-rules-sheet.tsx). Weekly paid-hours checks run against
+  // one week's own real data (no reference period needed), so they are
+  // evaluable the moment a value is configured — genuinely different from
+  // maximumAverageWeeklyWorkingHours' permanent not_evaluable state above.
+  minimumWeeklyPaidHours: "hard",
+  maximumWeeklyPaidHours: "hard",
+  minimumMonthlyPaidHours: "hard",
+  maximumMonthlyPaidHours: "hard",
+  // HARD, but only as a Stage 6 (flexible General T1 pool) pre-scoring
+  // filter today — see these fields' own doc comments on the generation
+  // populations NOT yet wired. A plan-level validation check still catches
+  // a violation anywhere, so "hard" here describes the strongest
+  // enforcement currently in place, not yet universal coverage.
+  maxContinuousShiftHours: "hard",
+  maxConsecutiveNightShifts: "hard",
+  // Soft TARGET by explicit design decision (2026-10-20) — never promoted
+  // to hard without a real confirmed policy. See this field's own doc
+  // comment in the LaborRules interface above.
+  maxRestIntervalHours: "soft",
 };

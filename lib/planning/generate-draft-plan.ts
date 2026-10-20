@@ -19,7 +19,7 @@ import { FatigueConfig } from "../fatigue-config";
 import { FatigueStateOrUnknown } from "./fatigue-model";
 import { IncomingFatigueSeed } from "./fatigue-continuity";
 import { createFatigueLedger, advanceFatigueLedger, stage6FatigueContextFromLedger, CandidateFatigueInput } from "./fatigue-planning";
-import { HardWorkCaps, HardCapExclusion, resolveHardWorkCaps, nextConsecutiveWorkDayStreak } from "./hard-work-caps";
+import { HardWorkCaps, HardCapExclusion, resolveHardWorkCaps, nextConsecutiveWorkDayStreak, nextConsecutiveNightShiftStreak, isNightShift } from "./hard-work-caps";
 import { IncomingConsecutiveWorkDaysSeed, incomingStreakForHardCap } from "./consecutive-days-continuity";
 import { IncomingOffBlockState } from "./off-block-continuity";
 import { HardCapRepair, repairFlexiblePoolWeek } from "./hard-cap-repair";
@@ -182,8 +182,20 @@ function runShiftGenerationPass(
   // caps.ts) — seeded from the incoming streak, advanced once per day right
   // alongside hoursSoFarThisWeek/priorDayShift. Each pass starts fresh.
   const streakEnteringDay = new Map<string, number>();
+  // LABOR RULES v2 (2026-10-20) — the parallel consecutive-NIGHT-shift
+  // streak, same seeding/advancing shape as streakEnteringDay above.
+  // Always starts at 0 (no incoming cross-week night-streak context is
+  // threaded in yet — see this milestone's known-limitations note); a
+  // fresh-each-pass streak is still correct WITHIN a week, it just cannot
+  // detect a night-shift run that started in the prior week.
+  const nightStreakEnteringDay = new Map<string, number>();
   const hardCapExclusions: HardCapExclusion[] = [];
-  if (hardCaps) for (const e of employees.filter(isFlexibleGeneralPool)) streakEnteringDay.set(e.id, hardCaps.incomingStreakByEmployee.get(e.id) ?? 0);
+  if (hardCaps) {
+    for (const e of employees.filter(isFlexibleGeneralPool)) {
+      streakEnteringDay.set(e.id, hardCaps.incomingStreakByEmployee.get(e.id) ?? 0);
+      nightStreakEnteringDay.set(e.id, 0);
+    }
+  }
 
   // Running fatigue state for the flexible pool (fatigue-planning.ts's
   // FatigueLedger): seeded from the incoming states, read as today's
@@ -257,13 +269,18 @@ function runShiftGenerationPass(
       t1DemandByBucketByDay?.[day],
       offWindowContextFor(dayIndex),
       fatigueLedger ? stage6FatigueContextFromLedger(fatigueLedger) : undefined,
-      hardCaps ? { caps: hardCaps.caps, streakEnteringDay, exclusionsOut: hardCapExclusions } : undefined,
+      hardCaps ? { caps: hardCaps.caps, streakEnteringDay, nightStreakEnteringDay, exclusionsOut: hardCapExclusions } : undefined,
       nextDayDemand
     );
     generatedShiftsByDay[day] = generatedShifts;
     if (hardCaps) {
       const workedToday = new Set(generatedShifts.map((g) => g.employeeId));
       for (const [id, streak] of streakEnteringDay) streakEnteringDay.set(id, nextConsecutiveWorkDayStreak(streak, workedToday.has(id)));
+      const nightCodeByEmployee = new Map(generatedShifts.map((g) => [g.employeeId, g.shiftCode]));
+      for (const [id, streak] of nightStreakEnteringDay) {
+        const code = nightCodeByEmployee.get(id);
+        nightStreakEnteringDay.set(id, nextConsecutiveNightShiftStreak(streak, code !== undefined && isNightShift(code, date)));
+      }
     }
     if (fatigueLedger) advanceFatigueLedger(fatigueLedger, date, new Map(generatedShifts.map((g) => [g.employeeId, g.shiftCode])));
 

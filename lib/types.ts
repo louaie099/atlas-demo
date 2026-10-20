@@ -517,6 +517,19 @@ export interface Config {
   // generateDraftWeeklyPlan, as before) means a plan's config_snapshot now
   // actually captures the fatigue settings it was generated under.
   fatigue?: import("./fatigue-config").FatigueConfig;
+  // LABOR RULES v2 (2026-10-20) — see lib/labor-rules.ts's own field
+  // doc comments for the full rationale on each. All optional: every
+  // existing hand-built Config object literal (tests included) predates
+  // these fields and stays valid, exactly like `fatigue` above — every
+  // real read site falls back to null/disabled when absent.
+  minimum_weekly_paid_hours?: number | null;
+  maximum_weekly_paid_hours?: number | null;
+  minimum_monthly_paid_hours?: number | null;
+  maximum_monthly_paid_hours?: number | null;
+  max_continuous_shift_hours?: number | null;
+  max_consecutive_night_shifts?: number | null;
+  max_rest_interval_hours?: number | null;
+  break_policy?: import("./break-policy").BreakPolicy;
 }
 
 /**

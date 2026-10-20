@@ -60,6 +60,18 @@ export function buildConfigFromResolvedRules(resolved: ResolvedLaborRules): Conf
     // DB-persisted fatigue toggle/weights would override this once a user
     // has actually edited it via the Planning Rules UI.
     fatigue: DEFAULT_FATIGUE_CONFIG,
+    // LABOR RULES v2 (2026-10-20) — sourced from labor-rules.ts exactly
+    // like every other field above; all null/disabled until a planner
+    // actually edits them via the Planning Rules UI (see
+    // lib/labor-rules.ts's DEFAULT_LABOR_RULES doc comment).
+    minimum_weekly_paid_hours: resolved.minimumWeeklyPaidHours,
+    maximum_weekly_paid_hours: resolved.maximumWeeklyPaidHours,
+    minimum_monthly_paid_hours: resolved.minimumMonthlyPaidHours,
+    maximum_monthly_paid_hours: resolved.maximumMonthlyPaidHours,
+    max_continuous_shift_hours: resolved.maxContinuousShiftHours,
+    max_consecutive_night_shifts: resolved.maxConsecutiveNightShifts,
+    max_rest_interval_hours: resolved.maxRestIntervalHours,
+    break_policy: resolved.breakPolicy,
   };
 }
 
