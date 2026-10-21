@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { ResolvedLaborRules, RuleSeverity } from "@/lib/labor-rules";
 import { FatigueConfig } from "@/lib/fatigue-config";
+import { ZoneBaseSetting } from "@/lib/planning/zone-demand-settings";
 import { Button } from "./ui";
 import { PlanningRulesSheet } from "./planning-rules-sheet";
 
@@ -10,6 +11,7 @@ export interface RulesResponse {
   resolved: ResolvedLaborRules;
   severity: Record<string, RuleSeverity>;
   fatigue: FatigueConfig;
+  zoneBase?: ZoneBaseSetting;
   // LABOR RULES v2 (2026-10-20) — a non-blocking configuration-feasibility
   // audit (lib/planning/labor-rule-feasibility.ts). Optional: an older
   // cached response (or a route that hasn't redeployed yet) simply has

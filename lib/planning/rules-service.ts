@@ -1,3 +1,4 @@
+import { ZoneBaseSetting, DEFAULT_ZONE_BASE_SETTING, sanitizeZoneBase, applyZoneBase } from "./zone-demand-settings";
 import { SupabaseClient } from "@supabase/supabase-js";
 import { Config } from "../types";
 import { LaborRules, DEFAULT_LABOR_RULES, resolveDefaultLaborRules, ResolvedLaborRules, RuleValue, LaborRuleKey } from "../labor-rules";
@@ -95,6 +96,26 @@ export async function loadFatigueConfig(supabase: SupabaseClient): Promise<Fatig
   return row?.config ?? DEFAULT_FATIGUE_CONFIG;
 }
 
+/**
+ * Loads the T1 zone baseline setting. Unlike the labor/fatigue loaders, a
+ * missing planning_zone_demand_config TABLE (migration 0019 not applied yet)
+ * falls back to the defaults instead of throwing, so an un-migrated
+ * deployment keeps generating plans exactly as before this setting existed.
+ */
+export async function loadZoneBaseSetting(supabase: SupabaseClient): Promise<ZoneBaseSetting> {
+  const { data, error } = await supabase.from("planning_zone_demand_config").select("*").eq("id", "current");
+  if (error) return DEFAULT_ZONE_BASE_SETTING;
+  const row = (data ?? [])[0] as { config: unknown } | undefined;
+  return row ? sanitizeZoneBase(row.config) : DEFAULT_ZONE_BASE_SETTING;
+}
+
+export async function saveZoneBaseSetting(supabase: SupabaseClient, input: unknown): Promise<ZoneBaseSetting> {
+  const config = sanitizeZoneBase(input);
+  const { error } = await supabase.from("planning_zone_demand_config").upsert({ id: "current", config, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+  return config;
+}
+
 /** Overwrites the current fatigue configuration (upsert by the fixed id "current"). */
 export async function saveFatigueConfig(supabase: SupabaseClient, config: FatigueConfig): Promise<FatigueConfig> {
   const { error } = await supabase.from("planning_fatigue_config").upsert({ id: "current", config, updated_at: new Date().toISOString() }, { onConflict: "id" });
@@ -110,11 +131,12 @@ export async function saveFatigueConfig(supabase: SupabaseClient, config: Fatigu
  * singleton from lib/seed-data.ts.
  */
 export async function resolveEffectiveConfig(supabase: SupabaseClient, date?: string): Promise<Config> {
-  const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
+  const [rules, fatigue, zoneBase] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase), loadZoneBaseSetting(supabase)]);
   const resolved = resolveDefaultLaborRules(date, rules);
   const base = buildConfigFromResolvedRules(resolved);
   return {
     ...base,
+    zone_checkin_demand_policy: applyZoneBase(zoneBase, base.zone_checkin_demand_policy),
     fatigue,
     // ACTIVATION (2026-10-06): fairness_weights.fatigueWeight has no UI/
     // persistence of its own (see lib/fairness-config.ts's own doc

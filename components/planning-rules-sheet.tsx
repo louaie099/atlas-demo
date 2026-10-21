@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ResolvedLaborRules, RuleSeverity } from "@/lib/labor-rules";
 import { FatigueConfig, FatigueWeights } from "@/lib/fatigue-config";
+import { ZoneBaseSetting, DEFAULT_ZONE_BASE_SETTING, ZONE_BASE_LIMITS } from "@/lib/planning/zone-demand-settings";
 import { BreakPolicy } from "@/lib/break-policy";
 import { Badge, Button } from "./ui";
 import { RulesResponse } from "./planning-rules-bar";
@@ -108,6 +109,7 @@ export function PlanningRulesSheet({
 }) {
   const [rules, setRules] = useState<ResolvedLaborRules>(data.resolved);
   const [fatigue, setFatigue] = useState<FatigueConfig>(data.fatigue);
+  const [zoneBase, setZoneBase] = useState<ZoneBaseSetting>(data.zoneBase ?? DEFAULT_ZONE_BASE_SETTING);
   const [breakPolicy, setBreakPolicy] = useState<BreakPolicy>(data.resolved.breakPolicy);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -156,6 +158,7 @@ export function PlanningRulesSheet({
           },
           breakPolicy,
           fatigue,
+          zoneBase,
         }),
       });
       const json = await res.json();
@@ -163,7 +166,7 @@ export function PlanningRulesSheet({
         setError(json.error ?? "Could not save — please try again.");
         return;
       }
-      onSaved({ resolved: json.resolved, severity: json.severity, fatigue: json.fatigue });
+      onSaved({ resolved: json.resolved, severity: json.severity, fatigue: json.fatigue, zoneBase: json.zoneBase });
     } catch {
       setError("Could not reach the server — nothing was saved.");
     } finally {
@@ -363,6 +366,28 @@ export function PlanningRulesSheet({
           >
             <NumberField value={rules.maxConsecutiveNightShifts} onChange={(v) => set("maxConsecutiveNightShifts", v)} disabled={!allowed} />
           </RuleRow>
+        </section>
+
+        <section className="flex flex-col gap-1">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wide">T1 check-in baseline</h3>
+          <p className="text-xs text-muted -mt-0.5 max-w-sm">
+            Agents a zone needs whenever any flight is check-in-open there (applied once per zone, then flight extras are added on top). Applies to the next Make Planning.
+          </p>
+          {(
+            [
+              ["t1_main_checkin", "Main (counters 30–76)"],
+              ["t1_italy_spain", "Italy/Spain (counters 1–19)"],
+              ["t1_domestic", "Domestic (counters 20–26)"],
+            ] as const
+          ).map(([zone, label]) => (
+            <RuleRow key={zone} label={label}>
+              <NumberField
+                value={zoneBase[zone]}
+                onChange={(v) => setZoneBase((z) => ({ ...z, [zone]: Math.min(ZONE_BASE_LIMITS.max, Math.max(ZONE_BASE_LIMITS.min, v ?? z[zone])) }))}
+                disabled={!allowed}
+              />
+            </RuleRow>
+          ))}
         </section>
 
         <section className="flex flex-col gap-1">

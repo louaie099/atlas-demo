@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 export const dynamic = "force-dynamic";
 
-import { loadLaborRules, saveLaborRuleEdit, loadFatigueConfig, saveFatigueConfig, EditableRuleValues } from "@/lib/planning/rules-service";
+import { loadLaborRules, saveLaborRuleEdit, loadFatigueConfig, saveFatigueConfig, loadZoneBaseSetting, saveZoneBaseSetting, EditableRuleValues } from "@/lib/planning/rules-service";
 import { resolveDefaultLaborRules, LABOR_RULE_SEVERITY } from "@/lib/labor-rules";
 import { FatigueConfig } from "@/lib/fatigue-config";
 import { BreakPolicy } from "@/lib/break-policy";
@@ -43,14 +43,14 @@ export async function GET() {
   // now turned into a proper JSON error response, exactly like PUT below
   // already does for its own write path.
   try {
-    const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
+    const [rules, fatigue, zoneBase] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase), loadZoneBaseSetting(supabase)]);
     const resolved = resolveDefaultLaborRules(undefined, rules);
     // LABOR RULES v2 (2026-10-20): a non-blocking configuration-feasibility
     // audit (lib/planning/labor-rule-feasibility.ts) — never fails the
     // request, just surfaces an arithmetically-impossible combination of
     // configured values for the UI to show alongside the resolved rules.
     const configurationIssues = auditLaborRuleConfigurationFeasibility(buildConfigFromResolvedRules(resolved));
-    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, zoneBase, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -96,6 +96,7 @@ export async function PUT(req: Request) {
     laborRules?: Partial<EditableRuleValues>;
     effectiveFrom?: string;
     fatigue?: FatigueConfig;
+    zoneBase?: unknown;
     breakPolicy?: Partial<BreakPolicy>;
   };
   try {
@@ -109,6 +110,7 @@ export async function PUT(req: Request) {
       await saveLaborRuleEdit(supabase, body.laborRules ?? {}, body.effectiveFrom, body.effectiveFrom, body.breakPolicy);
     }
     if (body.fatigue) await saveFatigueConfig(supabase, body.fatigue);
+    if (body.zoneBase) await saveZoneBaseSetting(supabase, body.zoneBase);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -120,14 +122,14 @@ export async function PUT(req: Request) {
   // above) can still throw its own genuine Supabase error, and that must
   // not escape as an uncaught, non-JSON 500 either.
   try {
-    const [rules, fatigue] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase)]);
+    const [rules, fatigue, zoneBase] = await Promise.all([loadLaborRules(supabase), loadFatigueConfig(supabase), loadZoneBaseSetting(supabase)]);
     const resolved = resolveDefaultLaborRules(undefined, rules);
     // LABOR RULES v2 (2026-10-20): a non-blocking configuration-feasibility
     // audit (lib/planning/labor-rule-feasibility.ts) — never fails the
     // request, just surfaces an arithmetically-impossible combination of
     // configured values for the UI to show alongside the resolved rules.
     const configurationIssues = auditLaborRuleConfigurationFeasibility(buildConfigFromResolvedRules(resolved));
-    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ resolved, severity: LABOR_RULE_SEVERITY, fatigue, zoneBase, configurationIssues }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
