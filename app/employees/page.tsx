@@ -8,6 +8,7 @@ import { EmployeeFilters, EmployeeFilterState } from "@/components/employees/emp
 import { EmployeeTable } from "@/components/employees/employee-table";
 import { EmployeeDrawer } from "@/components/employees/employee-drawer";
 import { QualificationMatrix } from "@/components/employees/qualification-matrix";
+import { WellbeingView } from "@/components/employees/wellbeing-view";
 
 interface EnrichedEmployee extends Employee {
   today: {
@@ -17,7 +18,7 @@ interface EnrichedEmployee extends Employee {
   };
 }
 
-type ViewTab = "workforce" | "matrix";
+type ViewTab = "workforce" | "matrix" | "wellbeing";
 
 export default function EmployeesPage() {
   const [view, setView] = useState<ViewTab>("workforce");
@@ -101,6 +102,14 @@ export default function EmployeesPage() {
         >
           Qualification Matrix
         </button>
+        <button
+          onClick={() => setView("wellbeing")}
+          className={`px-4 py-1.5 rounded-lg text-sm font-medium ${
+            view === "wellbeing" ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+          }`}
+        >
+          Workload &amp; wellbeing
+        </button>
       </div>
 
       {view === "workforce" && (
@@ -121,6 +130,8 @@ export default function EmployeesPage() {
       )}
 
       {view === "matrix" && employees && <QualificationMatrix employees={employees} />}
+
+      {view === "wellbeing" && <WellbeingView />}
 
       {selectedId && <EmployeeDrawer employeeId={selectedId} onClose={() => setSelectedId(null)} />}
     </div>
