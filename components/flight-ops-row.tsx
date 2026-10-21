@@ -1,5 +1,6 @@
 "use client";
 
+import { AgentLink } from "@/components/entity-panel";
 import { useState } from "react";
 import { LiveOpsFlightView, LiveOpsRequirementView } from "@/lib/live-ops-service";
 import { FLIGHT_STATE_LABEL, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
@@ -223,6 +224,7 @@ export function FlightOpsRow({
                       {r.assignedEmployees.map((e) => (
                         <EmployeeChip
                           key={e.id}
+                          id={e.id}
                           name={e.name}
                           tone="assigned"
                           invalid={invalidatedEmployeeIds.has(e.id)}
@@ -252,6 +254,7 @@ export function FlightOpsRow({
                       {r.proposedEmployees.map((e) => (
                         <EmployeeChip
                           key={e.id}
+                          id={e.id}
                           name={e.name}
                           tone="proposed"
                           invalid={invalidatedEmployeeIds.has(e.id)}
@@ -340,7 +343,7 @@ function GapTriageDetail({ requirementView: r }: { requirementView: LiveOpsRequi
         <div className="text-xs text-muted flex flex-col gap-1 pb-1">
           {r.invalidatedAssignments.map((inv) => (
             <p key={inv.employee.id}>
-              <span className="font-medium text-ink">{inv.employee.name}</span>: planned window {inv.oldWindow.start}–
+              <span className="font-medium text-ink"><AgentLink id={inv.employee.id} name={inv.employee.name} /></span>: planned window {inv.oldWindow.start}–
               {inv.oldWindow.end} is now {inv.newWindow.start}–{inv.newWindow.end}
               {inv.collidesWith && <> — collides with their {inv.collidesWith.flight.flight_number} duty</>}
               {inv.shiftBoundaryViolation && (
@@ -380,12 +383,14 @@ function GapTriageDetail({ requirementView: r }: { requirementView: LiveOpsRequi
  * Agent's own treatment of the same boundary.
  */
 export function EmployeeChip({
+  id,
   name,
   tone,
   canAct,
   onReassign,
   invalid = false,
 }: {
+  id?: string;
   name: string;
   tone: "assigned" | "proposed";
   canAct: boolean;
@@ -402,7 +407,7 @@ export function EmployeeChip({
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${toneClass}`}>
       {invalid && <span aria-hidden="true">⚠</span>}
-      {name}
+      <AgentLink id={id} name={name} />
       {onReassign && (
         <button
           type="button"

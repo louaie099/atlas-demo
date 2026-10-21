@@ -41,6 +41,22 @@ export function sectionFor(
   return "normal";
 }
 
+/**
+ * The ONE definition of "does this flight need attention right now", shared
+ * by Live Operations' header counters/filters and the Command Center's
+ * "Needs attention" KPI so the two screens can never disagree. It is the
+ * flight's own state, except that a delay on a flight that has ALREADY
+ * departed is history, not risk -- it reads as covered.
+ */
+export function attentionStateFor(
+  view: LiveOpsFlightView,
+  state: LiveOpsFlightState,
+  nowMinutesSinceMidnight: number | null
+): LiveOpsFlightState {
+  if (state === "delayed" && sectionFor(view, state, nowMinutesSinceMidnight) === "completed") return "covered";
+  return state;
+}
+
 export function groupFlights(
   flights: LiveOpsFlightView[],
   stateFor: (view: LiveOpsFlightView) => LiveOpsFlightState,

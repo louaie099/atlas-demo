@@ -162,18 +162,18 @@ export function MakePlanningButton({ weekStart, onDone }: { weekStart: string; o
   }
 
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    <div className="flex flex-col items-start gap-1.5">
       <Button onClick={handleClick} disabled={state === "loading"}>
         {state === "loading" ? "Generating planning…" : "Make Planning"}
       </Button>
       {state === "done" && summary && (
-        <p className={`text-xs max-w-sm text-right ${summary.blockingConflicts > 0 ? "text-bad-700" : "text-muted"}`}>
+        <p className={`text-xs max-w-sm ${summary.blockingConflicts > 0 ? "text-bad-700" : "text-muted"}`}>
           {summary.blockingConflicts > 0 ? "Planning generated with conflicts" : "Planning generated"} —{" "}
           {summary.managedFlights} managed flights · {summary.dutiesAssigned} duties assigned · {summary.staffingGaps} staffing gaps ·{" "}
           {summary.warnings} warnings · {summary.blockingConflicts} blocking conflicts · {summary.hardRestViolations} persisted hard violations
         </p>
       )}
-      {message && <p className="text-xs text-bad-700 max-w-sm text-right">{message}</p>}
+      {message && <p className="text-xs text-bad-700 max-w-sm">{message}</p>}
     </div>
   );
 }

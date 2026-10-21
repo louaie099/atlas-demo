@@ -84,9 +84,9 @@ export function PlanningRulesBar() {
       : <span>Weekly obligation {resolved.workingHoursObligationHours}h</span>;
 
   return (
-    <div className="flex flex-col items-end gap-1.5">
-      <div className="flex items-center gap-2 flex-wrap justify-end">
-        <p className="text-xs text-muted text-right">
+    <div className="flex flex-col items-start gap-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="text-xs text-muted">
           {resolved.normalWeeklyWorkDays} WORK / {resolved.normalWeeklyOffDays} OFF{resolved.normalOffDaysConsecutive ? " together" : ""} · Min{" "}
           {resolved.minimumOffDaysPerPlanningWeek} OFF/week · Min rest{" "}
           {resolved.minimumRestHours}h · {obligation} · Fatigue {data.fatigue.enabled ? "On" : "Off"}

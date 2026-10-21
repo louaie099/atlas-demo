@@ -20,7 +20,7 @@ import { MakePlanningButton } from "@/components/make-planning-button";
 import { MakePlanningForMonthDialog } from "@/components/make-planning-month-dialog";
 import { PlanningRulesBar } from "@/components/planning-rules-bar";
 import { Button } from "@/components/ui";
-import { monthStartFor, monthLabelFor, shiftMonth, weeksOverlappingMonth, weekDates } from "@/lib/flight-date";
+import { monthStartFor, monthLabelFor, shiftMonth, weeksOverlappingMonth, weekDates, weekStartFor, todayISO } from "@/lib/flight-date";
 
 // Workflow order: see the imported schedule (Flight Schedule) -> see what
 // ATLAS generated for it (Flight Coverage) -> see the resulting employee
@@ -203,7 +203,10 @@ export default function PlanningPage() {
     // already reflected in loadError/the UI below; this .catch just stops
     // an unhandled-rejection warning for the one caller (this effect) that
     // never awaits the promise.
-    loadWeeklyPlan().catch(() => {});
+    // Open on the week containing TODAY, not the API default (the fixed
+    // seed week, lib/seed-data.ts CURRENT_WEEK_START) -- otherwise the page
+    // opens on an empty past week with every counter at zero.
+    loadWeeklyPlan(weekStartFor(todayISO())).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -236,10 +239,11 @@ export default function PlanningPage() {
               ? "No plan has been generated for this week yet. Click Make Planning to generate one from the current flight schedule."
               : "Built from the flight program and your rules. Every requirement traces back to a flight and a rule. Edit assignments here and they flow straight to Live operations; only exceptions come back to you as decisions."}
           </p>
+          <div className="mt-3">
+            <PlanningRulesBar />
+          </div>
         </div>
-        <div className="flex flex-col items-end gap-2">
-          <PlanningRulesBar />
-          {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
+        <div className="flex items-start gap-2 flex-wrap">
           {monthStart && weeksInMonth.length > 0 && (
             <MakePlanningForMonthDialog
               monthLabel={monthLabelFor(monthStart)}
@@ -247,6 +251,7 @@ export default function PlanningPage() {
               onGenerated={() => loadWeeklyPlan(weekStart ?? undefined).catch(() => {})}
             />
           )}
+          {weekStart && <MakePlanningButton weekStart={weekStart} onDone={() => loadWeeklyPlan(weekStart ?? undefined)} />}
         </div>
       </div>
 

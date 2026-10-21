@@ -1,5 +1,6 @@
 "use client";
 
+import { AgentLink } from "@/components/entity-panel";
 import { useEffect, useRef, useState } from "react";
 import { ZoneCoverageView } from "@/lib/planning/persisted-plan-view";
 import { CHECKIN_ZONES } from "@/lib/checkin-zones";
@@ -61,12 +62,12 @@ export function ZoneCoverageRow({
           <div className="flex flex-wrap gap-1.5">
             {manuallyAssignedEmployees.map((e) => (
               <span key={e.id} className="text-xs bg-gray-100 text-ink px-2.5 py-1 rounded-full">
-                {e.name} (manually assigned)
+                <AgentLink id={e.id} name={e.name} /> (manually assigned)
               </span>
             ))}
             {availableEmployees.map((e) => (
               <span key={e.id} className="text-xs bg-brand-50 text-brand-700 px-2.5 py-1 rounded-full">
-                {e.name}
+                <AgentLink id={e.id} name={e.name} />
               </span>
             ))}
             {available + manuallyAssigned === 0 && <span className="text-xs text-muted">No one positioned here yet</span>}

@@ -1,3 +1,4 @@
+import { AgentLink } from "@/components/entity-panel";
 import { RosterRequirementView } from "@/lib/types";
 import { Badge, Button, Card } from "./ui";
 
@@ -45,7 +46,7 @@ export function RosterCard({
       <div className="flex flex-wrap gap-2">
         {assignedEmployees.map((e) => (
           <span key={e.id} className="text-xs bg-gray-100 text-ink px-2.5 py-1 rounded-full">
-            {e.name}
+            <AgentLink id={e.id} name={e.name} />
           </span>
         ))}
         {assignedEmployees.length === 0 && <span className="text-xs text-muted">No one assigned yet</span>}

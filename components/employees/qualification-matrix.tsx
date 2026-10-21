@@ -1,3 +1,4 @@
+import { AgentLink } from "@/components/entity-panel";
 import { Employee } from "@/lib/types";
 
 export function QualificationMatrix({ employees }: { employees: Employee[] }) {
@@ -31,7 +32,7 @@ export function QualificationMatrix({ employees }: { employees: Employee[] }) {
           {employees.map((e) => (
             <tr key={e.id} className="border-b border-border last:border-0">
               <td className="sticky left-0 bg-white z-10 px-4 py-2 font-medium text-ink whitespace-nowrap border-r border-border">
-                {e.name}
+                <AgentLink id={e.id} name={e.name} />
               </td>
               {skillColumns.map((s) => (
                 <td key={s} className="px-3 py-2 text-center">

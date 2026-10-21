@@ -34,6 +34,10 @@ export function EmployeeTable({
   employees: EnrichedEmployee[];
   onSelect: (id: string) => void;
 }) {
+  // The seed data gives every agent the same weekly_hours, which reads as a
+  // placeholder rather than information -- show the column only when the
+  // values actually differ between agents.
+  const showHours = new Set(employees.map((e) => e.weekly_hours)).size > 1;
   return (
     <div className="bg-card border border-border rounded-xl2 shadow-soft overflow-x-auto">
       <table className="w-full text-sm">
@@ -44,7 +48,7 @@ export function EmployeeTable({
             <th className="px-4 py-3">Shift Today</th>
             <th className="px-4 py-3">Qualifications</th>
             <th className="px-4 py-3">Status</th>
-            <th className="px-4 py-3">Weekly Hours</th>
+            {showHours && <th className="px-4 py-3">Weekly Hours</th>}
           </tr>
         </thead>
         <tbody>
@@ -91,18 +95,18 @@ export function EmployeeTable({
                   )}
                 </Badge>
               </td>
-              <td className="px-4 py-3 whitespace-nowrap">
+              {showHours && <td className="px-4 py-3 whitespace-nowrap">
                 {e.weekly_hours === null ? (
                   <span className="text-muted">—</span>
                 ) : (
                   <Badge tone={e.weekly_hours >= 35 ? "warn" : "neutral"}>{e.weekly_hours}h</Badge>
                 )}
-              </td>
+              </td>}
             </tr>
           ))}
           {employees.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-4 py-8 text-center text-muted">
+              <td colSpan={showHours ? 6 : 5} className="px-4 py-8 text-center text-muted">
                 No employees match these filters.
               </td>
             </tr>

@@ -366,6 +366,7 @@ function RequirementSection({
             [...validAssigned, ...validProposed].map((e) => (
               <EmployeeChip
                 key={e.id}
+                id={e.id}
                 name={e.name}
                 tone={validAssigned.some((a) => a.id === e.id) ? "assigned" : "proposed"}
                 canAct={canAct}

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { todayISO } from "@/lib/flight-date";
 import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
-import { BOARD_SECTION_LABEL, BoardSection, groupFlights } from "@/lib/live-ops-board";
+import { BOARD_SECTION_LABEL, BoardSection, attentionStateFor, groupFlights } from "@/lib/live-ops-board";
 import { acknowledgeAlert, OperationalAlert, reconcileAlerts } from "@/lib/live-ops-alerts";
 import { FlightOpsRow, DayRelation, LiveOpsAssignRequest } from "@/components/flight-ops-row";
 import { FlightDrawer } from "@/components/flight-drawer";
@@ -32,6 +32,9 @@ export default function OperationsPage() {
   // engine Monthly Planning already uses (components/find-agent-sheet.tsx).
   const [assignRequest, setAssignRequest] = useState<LiveOpsAssignRequest | null>(null);
   const [filter, setFilter] = useState<FlightFilter>("all");
+  // Completed flights are history -- collapsed by default so the board
+  // leads with what is still happening.
+  const [showCompleted, setShowCompleted] = useState(false);
 
   // Attention Center (Live Operations phase 2) — reconciled from the live
   // view on every refresh (see lib/live-ops-alerts.ts's own doc comment
@@ -54,6 +57,23 @@ export default function OperationsPage() {
       .catch(() => setError("Could not load Live Operations for this date."))
       .finally(() => setLoading(false));
   }
+
+  // Deep link: /operations?flight=<flight number or id> opens that flight's
+  // drawer once the board has loaded (see components/entity-panel.tsx).
+  // Read from window.location in an effect -- useSearchParams would force a
+  // Suspense boundary around this whole statically rendered page.
+  const [pendingFlight, setPendingFlight] = useState<string | null>(null);
+  useEffect(() => {
+    const f = new URLSearchParams(window.location.search).get("flight");
+    if (f) setPendingFlight(f);
+  }, []);
+  useEffect(() => {
+    if (!pendingFlight || !view) return;
+    const match = view.flights.find((f) => f.flight.id === pendingFlight || f.flight.flight_number === pendingFlight);
+    if (match) setOpenFlightId(match.flight.id);
+    setPendingFlight(null);
+    window.history.replaceState(null, "", "/operations");
+  }, [pendingFlight, view]);
 
   useEffect(() => {
     loadLiveOps(date);
@@ -127,7 +147,7 @@ export default function OperationsPage() {
 
   const filtered = allFlights.filter((f) => {
     if (filter === "all") return true;
-    const s = stateFor(f);
+    const s = attentionStateFor(f, stateFor(f), nowMinutesSinceMidnight);
     if (filter === "covered") return s === "covered";
     if (filter === "atRisk") return s === "delayed";
     if (filter === "needsAction") return s === "gap" || s === "conflict";
@@ -144,7 +164,7 @@ export default function OperationsPage() {
         <LiveOpsHeader
           date={date}
           view={view}
-          states={allFlights.map(stateFor)}
+          states={allFlights.map((f) => attentionStateFor(f, stateFor(f), nowMinutesSinceMidnight))}
           activeFilter={filter}
           onFilterChange={setFilter}
           rightSlot={
@@ -187,10 +207,22 @@ export default function OperationsPage() {
             if (sectionFlights.length === 0) return null;
             return (
               <div key={section} className="flex flex-col gap-3">
-                <h2 className="text-xs font-semibold tracking-wide text-muted uppercase">
-                  {BOARD_SECTION_LABEL[section]} <span className="text-muted">({sectionFlights.length})</span>
-                </h2>
-                {sectionFlights.map((f) => (
+                {section === "completed" ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowCompleted((v) => !v)}
+                    aria-expanded={showCompleted}
+                    className="self-start min-h-[44px] flex items-center gap-2 text-xs font-semibold tracking-wide text-muted uppercase hover:text-ink"
+                  >
+                    <span aria-hidden="true">{showCompleted ? "▾" : "▸"}</span>
+                    {BOARD_SECTION_LABEL[section]} ({sectionFlights.length}) · {showCompleted ? "Hide" : "Show"}
+                  </button>
+                ) : (
+                  <h2 className="text-xs font-semibold tracking-wide text-muted uppercase">
+                    {BOARD_SECTION_LABEL[section]} <span className="text-muted">({sectionFlights.length})</span>
+                  </h2>
+                )}
+                {(section !== "completed" || showCompleted) && sectionFlights.map((f) => (
                   <FlightOpsRow
                     key={f.flight.id}
                     view={f}

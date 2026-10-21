@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/nav-bar";
 import { RoleProvider } from "@/components/role-context";
+import { EntityPanelProvider } from "@/components/entity-panel";
 
 export const metadata: Metadata = {
   title: "Atlas — CMN Operations",
@@ -21,12 +22,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen bg-surface font-sans antialiased text-ink">
         <RoleProvider>
-          <div className="lg:flex min-h-screen">
-            <Sidebar />
-            <main className="flex-1 min-w-0 px-4 sm:px-8 lg:px-10 py-6 lg:py-9">
-              <div className="max-w-[1180px] mx-auto">{children}</div>
-            </main>
-          </div>
+          <EntityPanelProvider>
+            <div className="lg:flex min-h-screen">
+              <Sidebar />
+              <main className="flex-1 min-w-0 px-4 sm:px-8 lg:px-10 py-6 lg:py-9">
+                <div className="max-w-[1180px] mx-auto">{children}</div>
+              </main>
+            </div>
+          </EntityPanelProvider>
         </RoleProvider>
       </body>
     </html>

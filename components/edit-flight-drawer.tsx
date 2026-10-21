@@ -1,5 +1,6 @@
 "use client";
 
+import { AgentLink } from "@/components/entity-panel";
 import { useState } from "react";
 import { CandidateResult, Flight, FlightStatus } from "@/lib/types";
 import { LiveOpsImpact, LiveOpsImpactConflict } from "@/lib/live-ops-service";
@@ -88,13 +89,13 @@ export function ConflictCard({
               squeezed into collision wording, or vice versa. */}
           {conflict.shiftBoundaryViolation && (
             <p>
-              {conflict.employee.name} unavailable — shift ends at {conflict.shiftBoundaryViolation.shiftEnd} (shift{" "}
+              <AgentLink id={conflict.employee.id} name={conflict.employee.name} /> unavailable — shift ends at {conflict.shiftBoundaryViolation.shiftEnd} (shift{" "}
               {conflict.shiftBoundaryViolation.shiftStart}–{conflict.shiftBoundaryViolation.shiftEnd}).
             </p>
           )}
           {conflict.collidesWith && (
             <p>
-              {conflict.employee.name} is also committed to {conflict.collidesWith.flight.flight_number}{" "}
+              <AgentLink id={conflict.employee.id} name={conflict.employee.name} /> is also committed to {conflict.collidesWith.flight.flight_number}{" "}
               {conflict.collidesWith.requirement.role} ({conflict.collidesWith.window.start}–
               {conflict.collidesWith.window.end}).
             </p>
@@ -120,7 +121,7 @@ export function ConflictCard({
       ) : (
         <>
           <p className="text-sm text-ink">
-            Recommended: <span className="font-medium">{top?.employee.name}</span>
+            Recommended: <span className="font-medium">{top ? <AgentLink id={top.employee.id} name={top.employee.name} /> : null}</span>
             {top?.reasoning ? ` — ${top.reasoning}` : ""}
           </p>
 

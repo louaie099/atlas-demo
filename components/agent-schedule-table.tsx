@@ -1,5 +1,6 @@
 "use client";
 
+import { AgentLink } from "@/components/entity-panel";
 import { useEffect, useMemo, useState } from "react";
 import { AgentScheduleEntry, AgentDayEntry } from "@/lib/types";
 import { Badge } from "./ui";
@@ -96,7 +97,7 @@ function AgentRow({
     <tr className="border-b border-border last:border-0">
       <td className="sticky left-0 z-10 bg-card px-3 py-1.5 align-top border-r border-border">
         <div className="flex flex-col gap-0.5 min-w-[168px] max-w-[200px]">
-          <span className="text-sm font-medium text-ink truncate">{entry.employee.name}</span>
+          <span className="text-sm font-medium text-ink truncate"><AgentLink id={entry.employee.id} name={entry.employee.name} /></span>
           <TeamBadge name={entry.employee.assignment} />
           {entry.weeklyIssues.length > 0 && (
             <span title={entry.weeklyIssues.map((i) => i.description).join(" ")} className={`text-[10.5px] ${ROSTER_COLORS.warning}`}>

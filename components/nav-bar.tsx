@@ -95,6 +95,16 @@ function RoleSwitcher() {
   );
 }
 
+function RoleChip() {
+  const { role } = useRole();
+  return (
+    <div className="mx-2 rounded-lg border border-navy-700 px-3 py-2 text-xs text-navy-dim">
+      Viewing as <span className="font-semibold text-white">{ROLE_LABELS[role]}</span>
+      {role === "viewer" && <span className="block mt-0.5">Read-only. Switch role in Demo tools to make changes.</span>}
+    </div>
+  );
+}
+
 function Logo() {
   return (
     <Link href="/" className="flex items-center gap-3 px-2 shrink-0">
@@ -117,6 +127,9 @@ export function Sidebar() {
   return (
     <aside className="bg-navy-900 lg:w-60 lg:shrink-0 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto flex flex-col gap-3 lg:gap-7 px-3 py-3 lg:px-4 lg:py-6">
       <Logo />
+      <div className="hidden lg:block -mt-3">
+        <RoleChip />
+      </div>
 
       <nav aria-label="Primary" className="flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible">
         {links.map((link) => {

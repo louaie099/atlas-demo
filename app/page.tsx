@@ -8,9 +8,12 @@ import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
 import { FLIGHT_PHASE_LABEL, resolveFlightPhase } from "@/lib/flight-phase";
 import { OperationalAlert, reconcileAlerts } from "@/lib/live-ops-alerts";
+import { attentionStateFor } from "@/lib/live-ops-board";
+import { auditTag, tidyAuditText } from "@/lib/audit-format";
 import { KpiCard } from "@/components/kpi-card";
 import { Card, Badge, Button, PageHeader } from "@/components/ui";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
+import { AgentLink, FlightLink, LinkedText, flightHref } from "@/components/entity-panel";
 
 /**
  * COMMAND CENTER (2026-10-21 redesign) — replaces the old Dashboard.
@@ -58,26 +61,18 @@ function staffingOf(view: LiveOpsFlightView) {
   return { total, covered: Math.max(0, total - open) };
 }
 
-function namesOf(view: LiveOpsFlightView): string {
+function agentsOf(view: LiveOpsFlightView): { id: string; name: string }[] {
   const seen = new Set<string>();
-  const names: string[] = [];
+  const out: { id: string; name: string }[] = [];
   for (const r of view.requirements) {
     const invalid = new Set(r.invalidatedAssignments.map((i) => i.employee.id));
     for (const e of [...r.assignedEmployees, ...r.proposedEmployees]) {
       if (invalid.has(e.id) || seen.has(e.id)) continue;
       seen.add(e.id);
-      names.push(e.name);
+      out.push({ id: e.id, name: e.name });
     }
   }
-  if (names.length === 0) return view.requirements.length === 0 ? "No staffing requirement configured" : "No one assigned yet";
-  return names.length > 3 ? `${names.slice(0, 3).join(" · ")} +${names.length - 3}` : names.join(" · ");
-}
-
-function auditTag(description: string): { label: string; tone: "brand" | "warn" | "neutral" } {
-  if (/override|flagged/i.test(description)) return { label: "Override", tone: "warn" };
-  if (/reassign|moved/i.test(description)) return { label: "Reassignment", tone: "brand" };
-  if (/plan/i.test(description)) return { label: "Plan", tone: "neutral" };
-  return { label: "Event", tone: "neutral" };
+  return out;
 }
 
 export default function CommandCenterPage() {
@@ -114,6 +109,15 @@ export default function CommandCenterPage() {
     load();
   }, [load]);
 
+  // Keep "Now" and the departed/upcoming split live without a reload.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const n = new Date();
+      setNowMinutes(n.getHours() * 60 + n.getMinutes());
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const flights = useMemo(
     () => [...(view?.flights ?? [])].sort((a, b) => a.effectiveDeparture.localeCompare(b.effectiveDeparture)),
     [view]
@@ -125,6 +129,19 @@ export default function CommandCenterPage() {
       .filter((a) => a.state !== "resolved")
       .sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);
   }, [flights, nowMinutes]);
+
+  // Same definition Live Operations uses for its counters (lib/live-ops-board.ts).
+  const watchFlights = flights.filter(
+    (f) =>
+      f.requirements.length > 0 &&
+      attentionStateFor(f, deriveFlightState(f, false), nowMinutes) === "delayed" &&
+      !alerts.some((a) => a.flightId === f.flight.id)
+  );
+  const needsAction = flights.filter((f) => {
+    const st = attentionStateFor(f, deriveFlightState(f, false), nowMinutes);
+    return st === "gap" || st === "conflict";
+  }).length;
+  const attentionCount = needsAction + watchFlights.length;
 
   const noRequirementFlights = flights.filter((f) => f.requirements.length === 0);
 
@@ -210,10 +227,10 @@ export default function CommandCenterPage() {
               sub={`of ${workforce?.workingToday ?? 0} working · ${workforce?.assignedToday ?? 0} assigned`}
             />
             <KpiCard
-              label="Decisions waiting"
-              value={alerts.length}
-              sub={alerts.length > 0 ? "Needs your attention" : "Nothing needs you"}
-              tone={alerts.length > 0 ? "warn" : "good"}
+              label="Needs attention"
+              value={attentionCount}
+              sub={attentionCount > 0 ? `${needsAction} need action · ${watchFlights.length} at risk` : "Nothing needs you"}
+              tone={attentionCount > 0 ? "warn" : "good"}
             />
           </div>
 
@@ -259,19 +276,29 @@ export default function CommandCenterPage() {
                       return (
                         <div
                           key={f.flight.id}
-                          className="grid grid-cols-[1fr_auto] sm:grid-cols-[minmax(180px,240px)_minmax(140px,1fr)_120px] gap-4 items-center py-3 border-t border-border"
+                          className={`grid grid-cols-[1fr_auto] sm:grid-cols-[minmax(180px,240px)_minmax(140px,1fr)_120px] gap-4 items-center py-3 border-t border-border ${
+                            departedNow && state === "covered" ? "opacity-60" : ""
+                          }`}
                         >
                           <div className="min-w-0">
                             <div className="flex items-baseline gap-2 flex-wrap">
-                              <Link href="/operations" className="font-mono font-semibold text-[15px] hover:underline">
-                                {f.flight.flight_number}
-                              </Link>
+                              <FlightLink flight={f.flight.flight_number} className="font-mono font-semibold text-[15px]" />
                               <span className="font-medium">{f.flight.destination ?? f.flight.route}</span>
                               <span className="text-xs text-muted">{f.flight.airline}</span>
                             </div>
                             <div className="text-xs text-muted mt-0.5">
                               <span className="sm:hidden font-mono font-semibold text-ink">{f.effectiveDeparture} · </span>
-                              {namesOf(f)}
+                              {(() => {
+                                const agents = agentsOf(f);
+                                if (agents.length === 0)
+                                  return f.requirements.length === 0 ? "No staffing requirement configured" : "No one assigned yet";
+                                return agents.slice(0, 3).map((a, i) => (
+                                  <span key={a.id}>
+                                    {i > 0 && " · "}
+                                    <AgentLink id={a.id} name={a.name} />
+                                  </span>
+                                )).concat(agents.length > 3 ? [<span key="more"> +{agents.length - 3}</span>] : []);
+                              })()}
                             </div>
                           </div>
 
@@ -326,7 +353,7 @@ export default function CommandCenterPage() {
 
             {/* ---- Decisions + activity ---- */}
             <div className="flex-[1_1_340px] min-w-0 flex flex-col gap-6">
-              {alerts.length === 0 ? (
+              {alerts.length + watchFlights.length === 0 ? (
                 <Card className="flex flex-col gap-3">
                   <div className="flex items-center gap-2.5">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0F7B53" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -368,7 +395,7 @@ export default function CommandCenterPage() {
                       return (
                         <div key={a.id} className="border border-border rounded-xl p-3.5 flex flex-col gap-2">
                           <div className="flex items-start justify-between gap-2">
-                            <div className="font-semibold">{a.title}</div>
+                            <div className="font-semibold"><LinkedText text={a.title} /></div>
                             <Badge tone={a.severity === "critical" ? "bad" : "warn"}>
                               {a.severity === "critical" ? "Critical" : "Warning"}
                             </Badge>
@@ -376,7 +403,7 @@ export default function CommandCenterPage() {
                           <p className="text-[13px] text-muted">{a.detail}</p>
                           {best && (
                             <p className="text-[13px] bg-brand-50 text-brand-700 rounded-lg px-2.5 py-1.5">
-                              <span className="font-semibold">Best fit: {best.employee.name}.</span> {best.reasoning}
+                              <span className="font-semibold">Best fit: <AgentLink id={best.employee.id} name={best.employee.name} />.</span> {best.reasoning}
                             </p>
                           )}
                           <div className="flex gap-2 flex-wrap">
@@ -390,7 +417,7 @@ export default function CommandCenterPage() {
                               </Button>
                             )}
                             <Link
-                              href="/operations"
+                              href={flightHref(a.flightNumber)}
                               className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium border border-border bg-white hover:bg-gray-50 shadow-soft"
                             >
                               Review flight
@@ -399,6 +426,23 @@ export default function CommandCenterPage() {
                         </div>
                       );
                     })}
+                    {watchFlights.map((f) => (
+                      <div key={`watch-${f.flight.id}`} className="border border-border rounded-xl p-3.5 flex flex-col gap-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="font-semibold">{f.flight.flight_number} — departure moved to {f.effectiveDeparture}</div>
+                          <Badge tone="warn">At risk</Badge>
+                        </div>
+                        <p className="text-[13px] text-muted">
+                          Scheduled {f.flight.scheduled_departure}. Check that the assigned agents still fit the new time.
+                        </p>
+                        <Link
+                          href={flightHref(f.flight.flight_number)}
+                          className="inline-flex items-center self-start px-4 py-2 rounded-lg text-sm font-medium border border-border bg-white hover:bg-gray-50 shadow-soft"
+                        >
+                          Review flight
+                        </Link>
+                      </div>
+                    ))}
                     {alerts.length > 3 && (
                       <Link href="/operations" className="text-sm font-semibold text-brand-600 hover:underline">
                         +{alerts.length - 3} more in Live operations →
@@ -433,7 +477,7 @@ export default function CommandCenterPage() {
                           </div>
                           <div className="min-w-0">
                             <Badge tone={tag.tone}>{tag.label}</Badge>
-                            <p className="mt-1 text-[13px]">{e.description}</p>
+                            <p className="mt-1 text-[13px]"><LinkedText text={tidyAuditText(e.description)} /></p>
                           </div>
                         </div>
                       );

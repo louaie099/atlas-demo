@@ -1,5 +1,6 @@
 "use client";
 
+import { AgentLink } from "@/components/entity-panel";
 import { useState } from "react";
 import { CandidateResult } from "@/lib/types";
 import { Badge, Button } from "./ui";
@@ -48,7 +49,7 @@ export function CandidateRow({
       }`}
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="font-medium text-ink">{candidate.employee.name}</span>
+        <span className="font-medium text-ink"><AgentLink id={candidate.employee.id} name={candidate.employee.name} /></span>
         <Badge tone={recommended ? "good" : "warn"}>
           {recommended ? "Recommended" : "Flagged"}
         </Badge>
