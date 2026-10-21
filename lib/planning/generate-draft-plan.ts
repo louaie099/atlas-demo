@@ -8,6 +8,7 @@ import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
 import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
+import { enforceHardRulesOnGeneratedRoster } from "./hard-rule-gate";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
 import { isFlexibleGeneralPool, isGenerationDrivenPopulation } from "./workforce-pools";
 import { getShiftDurationHours } from "../shift-templates";
@@ -877,6 +878,22 @@ export function generateDraftWeeklyPlan(
       ...(foreignShiftsByDay[day] ?? []),
     ];
   }
+
+  // HARD-RULE GATE (2026-10-21): hard labor rules (OFF block / minimum OFF
+  // days / shift-length and night caps) are enforced on EVERY generation-
+  // driven population's roster here, before rest enforcement, duty
+  // generation and persistence — see hard-rule-gate.ts. Coverage lost to a
+  // hard rule surfaces as an honest unfilled_duty gap, never a silent break.
+  const hardRuleGate = enforceHardRulesOnGeneratedRoster({
+    daysOrder,
+    weekStart,
+    employees,
+    shiftsByDay: allGeneratedShiftsByDay,
+    config,
+    priorBoundary: priorWeekBoundaryContext,
+    incomingWorkStreak: incomingStreakByEmployee,
+  });
+  for (const day of daysOrder) allGeneratedShiftsByDay[day] = hardRuleGate.shiftsByDay[day];
 
   // UNIVERSAL hard rest gate — everything above (flexible pool, Profiling/
   // Mesure, foreign companies) is already individually rest-aware, but

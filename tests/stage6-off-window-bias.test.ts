@@ -273,12 +273,11 @@ describe("full pipeline — a normal flexible ACE gets 5 WORK + 2 CONSECUTIVE OF
       const before = generateDraftWeeklyPlan(flights, aces, [], CONFIG, DAYS, "W", weekStart, new Map(), "unknown", { offWindowStructureBias: false });
       const after = generateDraftWeeklyPlan(flights, aces, [], CONFIG, DAYS, "W", weekStart);
 
-      // The old Stage 6 (bias off) leaves at least one ACE with a split OFF block.
-      expect(aces.some((a) => !isFiveWorkTwoConsecutiveOff(patternFor(before, a.id)))).toBe(true);
-      // OFF/OFF phase 1 (2026-09-29): with normal_off_days_consecutive on (CONFIG), a
-      // generation-driven employee's split block is now the HARD
-      // `off_days_not_consecutive` rather than the soft `separated_off_days`.
-      expect(before.issues.filter((i) => i.type === "off_days_not_consecutive").length).toBeGreaterThan(0);
+      // 2026-10-21 HARD-RULE GATE: even with the Stage 6 bias OFF, the universal gate
+      // (hard-rule-gate.ts) now repairs a split OFF block before persistence, so the old
+      // "bias off scatters OFF days" arm no longer reaches the plan. The bias still matters
+      // for coverage quality (it avoids the gate having to remove a covering day).
+      expect(before.issues.filter((i) => i.type === "off_days_not_consecutive")).toHaveLength(0);
 
       for (const a of aces) expect(isFiveWorkTwoConsecutiveOff(patternFor(after, a.id))).toBe(true);
       expect(after.issues.filter((i) => i.type === "separated_off_days" || i.type === "off_days_not_consecutive")).toHaveLength(0);

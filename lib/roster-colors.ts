@@ -61,16 +61,14 @@ export const ROSTER_COLORS: {
   confirmedDuty: string; // text-only secondary indicator, existing convention
   warning: string; // text-only secondary indicator, existing convention
 } = {
-  // One clear hue per shift family so the grid reads at a glance:
-  // morning = blue, midday/office = green, afternoon = orange,
-  // night = violet, fixed-cycle day = teal, OFF = neutral gray.
-  off: { bg: "bg-transparent border border-dashed border-[#C9D2DD]", text: "text-[#8794A3]", accent: "border-l-transparent" },
-  morningShift: { bg: "bg-[#E4F0FF]", text: "text-[#0B4A8F]", accent: "border-l-[#3B82F6]" },
-  middayShift: { bg: "bg-[#DFF5EA]", text: "text-[#0B6B45]", accent: "border-l-[#22A06B]" },
-  afternoonShift: { bg: "bg-[#FFEAD3]", text: "text-[#8A4300]", accent: "border-l-[#F08A24]" },
-  nightShift: { bg: "bg-[#E8E1FB]", text: "text-[#4B2A9A]", accent: "border-l-[#7C5CD6]" },
-  dayShift: { bg: "bg-[#DAF2F4]", text: "text-[#0B5F66]", accent: "border-l-[#1AA3AD]" },
-  normalShift: { bg: "bg-[#ECEFF3]", text: "text-[#3A4756]", accent: "border-l-[#8794A3]" },
+  // User direction (2026-10-21): every shift is one marine blue, OFF is red.
+  off: { bg: "bg-[#FDECEA] border border-[#F3B8B2]", text: "text-[#B42318]", accent: "border-l-transparent" },
+  morningShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
+  middayShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
+  afternoonShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
+  nightShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
+  dayShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
+  normalShift: { bg: "bg-[#0F4C81]", text: "text-white", accent: "border-l-[#0A3560]" },
   assignedDuty: "text-brand-700",
   confirmedDuty: "text-good-700",
   warning: "text-warn-700",

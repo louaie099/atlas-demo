@@ -742,8 +742,10 @@ describe("whole demo plan (real seed data) — E4 / E6 / E7 and the default-conf
     // at 00:00). With all three fixed, the Dreamliner's 2+2 need is fully
     // covered again — same total duty count as the pre-phase fixture, zero
     // new unfilled_duty issues.
-    expect(dutiesOf(atDefault).length).toBe(fixture.duties.length);
-    expect(atDefault.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
+    // 2026-10-21 HARD-RULE GATE: a hard OFF-block rule now outranks coverage, so on the demo
+    // one Tuesday Gate seat can surface as an honest unfilled_duty (never a silent rule break).
+    expect(dutiesOf(atDefault).length).toBeGreaterThanOrEqual(fixture.duties.length - 1);
+    expect(atDefault.issues.filter((i) => i.type === "unfilled_duty").length).toBeLessThanOrEqual(1);
     expect(atDefault.configurationIssues.some((c) => c.requirementId === "hard-cap-roster-top-up-shortfall")).toBe(false);
     expect(atDefault.issues.filter((i) => i.type === "roster_target_shortfall")).toEqual([]);
     for (const e of EMPLOYEES.filter(isGenerationDrivenPopulation)) {
@@ -939,7 +941,8 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     // the Sunday AT870 Dreamliner reshuffle this activation causes
     // elsewhere in the roster, which (after fixing the real overlap/rest/
     // window bugs the audit found) remains fully covered, zero unfilled.
-    expect(p.issues.filter((i) => i.type === "unfilled_duty")).toEqual([]);
+    // 2026-10-21 HARD-RULE GATE: at most one honest gap (a hard OFF block outranks coverage).
+    expect(p.issues.filter((i) => i.type === "unfilled_duty").length).toBeLessThanOrEqual(1);
     expect(p.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
     expect(p.hardCapRepairs.filter((r) => r.fromEmployeeId === "youssef-el-amrani")).toEqual([]);
   });
@@ -963,8 +966,10 @@ describe("PHASE 2, part B — the three pinned phase-1 scenarios are now resolve
     expect(unfilledDays(before, "Gate")).toEqual(["Tuesday"]);
     expect(unfilledDays(before, "Boarding")).toEqual(["Tuesday"]);
     const p = gen(true);
-    expect(unfilledDays(p, "Gate")).toEqual([]);
-    expect(unfilledDays(p, "Boarding")).toEqual([]);
+    // 2026-10-21 HARD-RULE GATE: the repaired roster used a split OFF pattern to cover Tuesday; the
+    // hard OFF-block rule now outranks that, so Tuesday stays an honest gap. No cap is broken either way.
+    expect(unfilledDays(p, "Gate")).toEqual(["Tuesday"]);
+    expect(unfilledDays(p, "Boarding")).toEqual(["Tuesday"]);
     // Weekly hours are no longer a rejection ceiling (2026-09-29 removal):
     // only the consecutive-work-day cap is a real hard constraint here.
     for (const e of team) expect(maxRun(workPattern(p, e.id), e.id.startsWith("a-") ? 4 : 0), e.id).toBeLessThanOrEqual(5);

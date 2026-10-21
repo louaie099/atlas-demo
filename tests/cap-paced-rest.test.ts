@@ -406,7 +406,11 @@ describe("TEST 6 — foreign-company teams had the same defect and get the same 
     const gen = (specializedCapPacing: boolean) => generateDraftWeeklyPlan(heavyFlights, EMPLOYEES, [], CONFIG, DAYS, "W", HEAVY_WEEK, new Map(), "unknown", { specializedCapPacing });
     const flightDaysOf = (p: DraftWeeklyPlan) => DAYS.map((d) => p.generatedShiftsByDay[d].filter((g) => gulfIds.has(g.employeeId) && g.coversRoles.includes("Gulf Air")).length);
     const before = flightDaysOf(gen(false));
-    expect(before).toEqual([8, 0, 8, 0, 8, 8, 8]);
+    // 2026-10-21 HARD-RULE GATE: MT02 can never be worked two days running (15h rest), so Gulf Air's
+    // Mon/Wed/Fri/Sun pattern cannot hold one consecutive OFF block; the hard OFF rule now outranks
+    // coverage and Wednesday's Gulf Air coverage is removed (surfacing as a gap) instead of the old
+    // flagged-but-rostered split.
+    expect(before).toEqual([8, 0, 0, 0, 8, 8, 8]);
     const on = gen(true);
     const after = flightDaysOf(on);
     expect(after).toEqual(before);

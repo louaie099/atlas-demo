@@ -154,12 +154,12 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
         </span>
       )}
       {day.foreignCommitments.length > 0 && (
-        <span className="text-[10.5px] leading-tight">
+        <span className="text-[10.5px] leading-tight self-start rounded-md bg-white px-1.5 py-0.5">
           <TeamBadge name={day.foreignCommitments[0].airline} />
         </span>
       )}
       {(confirmedCount > 0 || assignedCount > 0) && (
-        <span className={`text-[10.5px] leading-tight ${assignedCount > 0 ? ROSTER_COLORS.assignedDuty : ROSTER_COLORS.confirmedDuty}`}>
+        <span className="text-[10.5px] leading-tight text-white/90">
           {confirmedCount + assignedCount} {confirmedCount + assignedCount === 1 ? "duty" : "duties"}
           {/* Both counts are real, current duties -- "confirmed" (backed by
               a real Assignment row) is the notable exception worth calling

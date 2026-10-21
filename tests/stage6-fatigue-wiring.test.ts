@@ -729,12 +729,14 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // downstream duty-to-employee matching. (Values after the first re-pin,
 // before this one: plan:2026-08-31 79eff183b7203c28, plan:2026-09-21
 // 1899064ffedfe68b.)
+// 2026-10-21: the two "plan:" whole-pipeline fingerprints were re-pinned after the hard-rule gate
+// (hard-rule-gate.ts) started repairing OFF blocks; every stage-level fingerprint is unchanged.
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
-  "plan:2026-08-31": "78c0148e3d41dad2",
+  "plan:2026-08-31": "dad915ea57ce540f",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "33a99739b4381b62",
+  "plan:2026-09-21": "0dfbc9f44e8fa675",
   "stage6:2026-09-21": "94b99a613619e9d7",
   "topup:2026-09-21": "14206ef5e76dbc39",
   "foreign:2026-09-21": "cb7c11e486d15733",

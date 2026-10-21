@@ -472,12 +472,16 @@ describe("E — Profiling/Mesure low-demand days are topped up with real, non-de
   });
 });
 
-describe("F — honest fallback: when no legal top-up exists the day stays idle and is still flagged (never fabricated)", () => {
+const OFF_DAY_FINDINGS = ["insufficient_off_days", "off_days_not_consecutive", "separated_off_days"];
+
+describe("F — hard OFF rule outranks coverage: when no legal top-up exists the OFF block is re-formed and the lost flight is an honest gap", () => {
   // One Profiling agent. Monday's late RAM flight (21:30) puts them on an
   // evening code; Wednesday's 07:00 flight on an early one. With the 15h
-  // minimum on both sides, NO catalog code fits Tuesday: the top-up has no
-  // real work to give, so Tuesday must stay idle and the split OFF days
-  // (Tuesday + the protected Saturday/Sunday block) must still be flagged.
+  // minimum on both sides NO catalog code fits Tuesday, so Tuesday cannot be
+  // worked. Before the 2026-10-21 hard-rule gate that left a split OFF block
+  // (Tuesday + Saturday/Sunday) that was merely flagged. The gate now obeys the
+  // hard rule: the OFF days become one consecutive block and the Monday flight
+  // it costs shows up as an unfilled duty.
   const WEEK = "2026-09-21";
   const agent = makeEmployee({ id: "prof-1", name: "Prof One" });
   const fl = [
@@ -488,24 +492,14 @@ describe("F — honest fallback: when no legal top-up exists the day stays idle 
   ];
   const plan = generateDraftWeeklyPlan(fl, [agent], [], CONFIG, DAYS, "W", WEEK, new Map(), "unknown");
 
-  it("Tuesday has no rest-legal code at all between Monday's and Wednesday's real shifts", () => {
-    const mon = plan.generatedShiftsByDay["Monday"].find((g) => g.employeeId === "prof-1")!;
-    const wed = plan.generatedShiftsByDay["Wednesday"].find((g) => g.employeeId === "prof-1")!;
-    const tue = flightDateFor(WEEK, "Tuesday");
-    const m = getShiftTimesAs(mon.shiftCode, flightDateFor(WEEK, "Monday"));
-    const w = getShiftTimesAs(wed.shiftCode, flightDateFor(WEEK, "Wednesday"));
-    const legal = Object.entries(shiftCatalogForDate(tue)).filter(
-      ([, t]) => restHoursBetween(m.shift_start, m.shift_end, t.entree) >= 15 && restHoursBetween(t.entree, t.sortie, w.shift_start) >= 15
-    );
-    expect(legal).toEqual([]);
-  });
-
-  it("the agent works 4 days (no fabricated Tuesday row, and the reserved Saturday/Sunday block is NOT used to make up the count) and the split is flagged off_days_not_consecutive", () => {
+  it("the OFF days form ONE consecutive block, with no OFF-day finding and no rest violation", () => {
     const p = pattern(plan.generatedShiftsByDay, "prof-1");
-    expect(p).toBe("WOWWWOO");
-    expect(plan.generatedShiftsByDay["Tuesday"].some((g) => g.employeeId === "prof-1")).toBe(false);
-    expect(plan.issues.filter((i) => i.employeeId === "prof-1" && OFF_DAY_FINDINGS.includes(i.type)).map((i) => i.type)).toEqual(["off_days_not_consecutive"]);
+    expect(p.split("").filter((c) => c === "O")).toHaveLength(2);
+    expect(plan.issues.filter((i) => i.employeeId === "prof-1" && OFF_DAY_FINDINGS.includes(i.type))).toEqual([]);
     expect(plan.issues.filter((i) => i.type === "rest_violation")).toEqual([]);
   });
+
+  it("the coverage lost to the hard rule is reported as an honest unfilled_duty, never hidden", () => {
+    expect(plan.issues.filter((i) => i.type === "unfilled_duty").length).toBeGreaterThan(0);
+  });
 });
-const OFF_DAY_FINDINGS = ["insufficient_off_days", "off_days_not_consecutive", "consecutive_off_violation"];
