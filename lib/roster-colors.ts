@@ -4,6 +4,8 @@
  * chosen inline per cell — so "what does this color mean" stays
  * consistent across the whole grid instead of drifting cell by cell.
  *
+ * (2026-10-21: working days are all tinted and OFF is a quiet neutral gray, so a shift never reads as an absence and rest never reads as an alert.)
+ *
  * Deliberately kept separate from lib/team-colors.ts: team/company
  * identity (the airline dot in a foreign-commitment indicator) is its own
  * secondary signal, orthogonal to what KIND of day this is (rest, day
@@ -54,10 +56,10 @@ export const ROSTER_COLORS: {
   confirmedDuty: string; // text-only secondary indicator, existing convention
   warning: string; // text-only secondary indicator, existing convention
 } = {
-  off: { bg: "bg-rose-50", text: "text-rose-700" },
-  dayShift: { bg: "bg-sky-50", text: "text-sky-800" },
-  nightShift: { bg: "bg-violet-50", text: "text-violet-800" },
-  normalShift: { bg: "bg-transparent", text: "text-ink" },
+  off: { bg: "bg-gray-100", text: "text-gray-500" },
+  dayShift: { bg: "bg-sky-100", text: "text-sky-800" },
+  nightShift: { bg: "bg-violet-100", text: "text-violet-800" },
+  normalShift: { bg: "bg-brand-50", text: "text-brand-700" },
   assignedDuty: "text-brand-700",
   confirmedDuty: "text-good-700",
   warning: "text-warn-700",

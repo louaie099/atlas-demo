@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AuditLogEntry } from "@/lib/types";
-import { todayISO } from "@/lib/flight-date";
+import { todayISO, weekStartFor, dayOfWeekFor } from "@/lib/flight-date";
+import { ZoneCoverageView } from "@/lib/planning/persisted-plan-view";
+import { T1CapacityMap } from "@/components/t1-capacity-map";
 import { LiveOpsFlightView, LiveOpsView } from "@/lib/live-ops-service";
 import { deriveFlightState, LiveOpsFlightState } from "@/lib/live-ops-flight-state";
 import { FLIGHT_PHASE_LABEL, resolveFlightPhase } from "@/lib/flight-phase";
@@ -83,6 +85,7 @@ export default function CommandCenterPage() {
   useEffect(() => setDate(todayISO()), []);
   const [view, setView] = useState<LiveOpsView | null>(null);
   const [audit, setAudit] = useState<AuditLogEntry[] | null>(null);
+  const [zones, setZones] = useState<ZoneCoverageView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [assignRequest, setAssignRequest] = useState<{ requirementId: string; roleLabel: string } | null>(null);
   const [nowMinutes, setNowMinutes] = useState<number>(() => {
@@ -99,6 +102,10 @@ export default function CommandCenterPage() {
       .then((r) => r.json())
       .then((data: LiveOpsView) => setView(data))
       .catch(() => setError("Could not load today's operations."));
+    fetch(`/api/planning/weekly-view?week_start=${weekStartFor(date)}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setZones(((d.zoneCoverage as ZoneCoverageView[]) ?? []).filter((v) => v.dayOfWeek === dayOfWeekFor(date))))
+      .catch(() => setZones([]));
     fetch("/api/audit-log", { cache: "no-store" })
       .then((r) => r.json())
       .then((data) => setAudit(data.entries ?? []))
@@ -454,6 +461,8 @@ export default function CommandCenterPage() {
                   </p>
                 </Card>
               )}
+
+              {zones.length > 0 && <T1CapacityMap views={zones} day="Today" initialMinutes={nowMinutes - (nowMinutes % 30)} compact />}
 
               <Card>
                 <div className="flex items-baseline justify-between mb-3">

@@ -6,6 +6,7 @@ import { ZoneCoverageView } from "@/lib/planning/persisted-plan-view";
 import { PlanIssue } from "@/lib/planning/validation";
 import { FlightCoverageRow } from "@/components/flight-coverage-card";
 import { ZoneCoverageSection } from "@/components/zone-coverage-card";
+import { T1CapacityMap } from "@/components/t1-capacity-map";
 import { FindAgentSheet } from "@/components/find-agent-sheet";
 import { ZoneFindAgentSheet } from "@/components/zone-find-agent-sheet";
 import { SummaryDrilldownSheet, SummaryMetric } from "@/components/summary-drilldown-sheet";
@@ -84,6 +85,7 @@ export default function PlanningPage() {
   const [isStale, setIsStale] = useState(false);
   const [openRequirementId, setOpenRequirementId] = useState<string | null>(null);
   const [openZoneRequirementId, setOpenZoneRequirementId] = useState<string | null>(null);
+  const [capacityDay, setCapacityDay] = useState<string | null>(null);
   // Part 3: which PlanningSummaryBar drill-down (if any) is open, and the
   // real navigation targets it can hand off to -- same useState-driven
   // slide-over pattern as openRequirementId/FindAgentSheet above, never a
@@ -212,6 +214,8 @@ export default function PlanningPage() {
 
   const flightGroups = useMemo(() => groupByFlight(roster ?? []), [roster]);
   const daysWithData = Array.from(new Set(flightGroups.map((g) => g.flight.day_of_week)));
+  const WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const capacityDays = WEEKDAY_ORDER.filter((d) => (zoneCoverage ?? []).some((v) => v.dayOfWeek === d && v.required > 0));
   const weeksInMonth = useMemo(() => (monthStart ? weeksOverlappingMonth(monthStart) : []), [monthStart]);
 
   return (
@@ -379,6 +383,32 @@ export default function PlanningPage() {
           {tab === "coverage" && (
             <div className="flex flex-col gap-6">
               {roster === null && <p className="text-sm text-muted">Loading flights...</p>}
+
+              {capacityDays.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-1 flex-wrap" role="tablist" aria-label="Capacity day">
+                    {capacityDays.map((d) => {
+                      const sel = (capacityDay && capacityDays.includes(capacityDay) ? capacityDay : capacityDays[0]) === d;
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          role="tab"
+                          aria-selected={sel}
+                          onClick={() => setCapacityDay(d)}
+                          className={`px-3 min-h-[44px] rounded-lg text-sm font-medium border ${sel ? "bg-brand-100 border-brand-200 text-brand-700" : "bg-white border-border text-muted hover:text-ink"}`}
+                        >
+                          {d.slice(0, 3)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const d = capacityDay && capacityDays.includes(capacityDay) ? capacityDay : capacityDays[0];
+                    return <T1CapacityMap key={d} day={d} views={(zoneCoverage ?? []).filter((v) => v.dayOfWeek === d)} onFindAgent={setOpenZoneRequirementId} />;
+                  })()}
+                </div>
+              )}
 
               {daysWithData.map((day) => (
                 <div key={day} className="flex flex-col gap-2">
