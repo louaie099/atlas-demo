@@ -64,7 +64,17 @@ export function LiveT1Panel({ date }: { date: string }) {
     }
   }
 
-  if (!views || views.length === 0) return null;
+  if (!views) return null;
+  if (views.length === 0) {
+    return (
+      <section className="mb-4 rounded-xl border border-border bg-white p-4">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">T1 Check-in</p>
+        <p className="mt-1 text-sm text-muted">
+          No T1 check-in demand for {date}: no published plan covers this week, or no flight with check-in open. Generate the weekly plan in Planning to see the counter map.
+        </p>
+      </section>
+    );
+  }
   const isToday = date === todayISO();
   const now = new Date();
   const nowSlot = now.getHours() * 60 + now.getMinutes();
