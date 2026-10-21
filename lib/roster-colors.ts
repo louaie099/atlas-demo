@@ -51,21 +51,30 @@ export const ROSTER_COLORS: {
   off: RosterCellTone;
   dayShift: RosterCellTone;
   nightShift: RosterCellTone;
+  morningShift: RosterCellTone;
+  middayShift: RosterCellTone;
+  afternoonShift: RosterCellTone;
   normalShift: RosterCellTone;
   assignedDuty: string; // text-only secondary indicator, existing convention
   confirmedDuty: string; // text-only secondary indicator, existing convention
   warning: string; // text-only secondary indicator, existing convention
 } = {
+  // One clear hue per shift family so the grid reads at a glance:
+  // morning = blue, midday/office = green, afternoon = orange,
+  // night = violet, fixed-cycle day = teal, OFF = neutral gray.
   off: { bg: "bg-gray-100", text: "text-gray-500" },
-  dayShift: { bg: "bg-sky-100", text: "text-sky-800" },
-  nightShift: { bg: "bg-violet-100", text: "text-violet-800" },
-  normalShift: { bg: "bg-brand-50", text: "text-brand-700" },
+  morningShift: { bg: "bg-sky-100", text: "text-sky-900" },
+  middayShift: { bg: "bg-emerald-100", text: "text-emerald-900" },
+  afternoonShift: { bg: "bg-orange-100", text: "text-orange-900" },
+  nightShift: { bg: "bg-violet-200", text: "text-violet-900" },
+  dayShift: { bg: "bg-teal-100", text: "text-teal-900" },
+  normalShift: { bg: "bg-slate-100", text: "text-slate-800" },
   assignedDuty: "text-brand-700",
   confirmedDuty: "text-good-700",
   warning: "text-warn-700",
 };
 
-export type ShiftFamily = "off" | "dayShift" | "nightShift" | "normalShift";
+export type ShiftFamily = "off" | "dayShift" | "nightShift" | "morningShift" | "middayShift" | "afternoonShift" | "normalShift";
 
 /**
  * Classifies a shift code into its color family — purely by the
@@ -79,7 +88,10 @@ export type ShiftFamily = "off" | "dayShift" | "nightShift" | "normalShift";
 export function shiftFamilyFor(shiftCode: string | null): ShiftFamily {
   if (!shiftCode) return "off";
   if (shiftCode.startsWith("JR")) return "dayShift";
-  if (shiftCode.startsWith("NT")) return "nightShift";
+  if (shiftCode.startsWith("NT") || shiftCode.startsWith("N8")) return "nightShift";
+  if (shiftCode.startsWith("MT")) return "morningShift";
+  if (shiftCode.startsWith("NR")) return "middayShift";
+  if (shiftCode.startsWith("AP")) return "afternoonShift";
   return "normalShift";
 }
 

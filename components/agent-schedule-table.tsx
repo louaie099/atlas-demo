@@ -30,6 +30,33 @@ const DAY_SHORT: Record<string, string> = {
  * assignment, not a pending recommendation); a real plan warning gets its
  * own separate, honestly-colored indicator.
  */
+const ISSUE_LABELS: Record<string, string> = {
+  weekly_hours_violation: "Weekly hours over limit",
+  weekly_paid_hours_violation: "Paid hours over limit",
+  consecutive_off_violation: "OFF days rule broken",
+  insufficient_off_days: "Not enough OFF days",
+  off_days_not_consecutive: "OFF days not consecutive",
+  separated_off_days: "OFF days split",
+  rest_violation: "Short rest",
+  max_consecutive_night_shifts_violation: "Too many nights in a row",
+  max_continuous_shift_duration_violation: "Shift too long",
+  roster_target_shortfall: "Below roster target",
+};
+// Informational only (missing history from before this week) -- not a plan problem.
+const INFO_ISSUES = new Set(["cross_week_continuity_uncertain", "consecutive_work_history_unknown"]);
+
+function WeeklyIssueTag({ issues }: { issues: AgentScheduleEntry["weeklyIssues"] }) {
+  const real = issues.filter((i) => !INFO_ISSUES.has(i.type));
+  if (real.length === 0) return null; // history-unknown notes stay in the drawer, not on the row
+  const first = ISSUE_LABELS[real[0].type] ?? "Plan issue";
+  return (
+    <span title={real.map((i) => i.description).join("\n")} className={`text-[10.5px] font-medium ${ROSTER_COLORS.warning}`}>
+      ⚠ {first}
+      {real.length > 1 ? ` +${real.length - 1}` : ""}
+    </span>
+  );
+}
+
 function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) {
   if (day.status === "off") {
     const tone = ROSTER_COLORS.off;
@@ -99,14 +126,7 @@ function AgentRow({
         <div className="flex flex-col gap-0.5 min-w-[168px] max-w-[200px]">
           <span className="text-sm font-medium text-ink truncate"><AgentLink id={entry.employee.id} name={entry.employee.name} /></span>
           <TeamBadge name={entry.employee.assignment} />
-          {entry.weeklyIssues.length > 0 && (
-            <span title={entry.weeklyIssues.map((i) => i.description).join(" ")} className={`text-[10.5px] ${ROSTER_COLORS.warning}`}>
-              {/* Covers weekly_hours_violation AND consecutive_off_violation
-                  — both are week-level (no single dayOfWeek), so the label
-                  stays generic rather than naming only one of them. */}
-              ⚠ Weekly issue
-            </span>
-          )}
+          <WeeklyIssueTag issues={entry.weeklyIssues} />
         </div>
       </td>
       {entry.days.map((day) => (
@@ -166,7 +186,7 @@ export function AgentScheduleTable({
         if (!matchesShift) return false;
       }
       if (filters.status === "plan_warning") {
-        const hasWarning = entry.weeklyIssues.length > 0 || entry.days.some((d) => d.issues.length > 0);
+        const hasWarning = entry.weeklyIssues.some((i) => !INFO_ISSUES.has(i.type)) || entry.days.some((d) => d.issues.length > 0);
         if (!hasWarning) return false;
       }
       if (filters.status === "foreign_commitment") {
