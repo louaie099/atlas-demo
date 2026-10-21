@@ -36,6 +36,5 @@ export async function resetToEmptyDatabase(supabase: SupabaseClient): Promise<vo
   await supabase.from("staffing_requirements").delete().neq("id", "");
   await supabase.from("flights").delete().neq("id", "");
   await supabase.from("employees").delete().neq("id", "");
-  await supabase.from("planning_labor_rules").delete().neq("id", "");
-  await supabase.from("planning_fatigue_config").delete().neq("id", "");
+  // planning_labor_rules / planning_fatigue_config are deliberately NOT wiped: labor rules are configuration, not demo data.
 }

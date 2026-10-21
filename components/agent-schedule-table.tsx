@@ -189,7 +189,7 @@ export function AgentScheduleTable({
       </div>
 
       <div className="bg-card border border-border rounded-xl2 shadow-soft overflow-hidden">
-        <div className="overflow-auto" style={{ maxHeight: "70vh" }}>
+        <div className="overflow-x-auto">
           <table className="border-collapse text-sm w-full">
             <thead>
               <tr>

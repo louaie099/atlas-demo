@@ -159,7 +159,7 @@ export function FlightOpsRow({
           <button
             type="button"
             onClick={onOpen}
-            className="font-semibold text-ink hover:underline underline-offset-2 decoration-dotted"
+            className="font-mono font-semibold text-ink hover:underline underline-offset-2 decoration-dotted"
           >
             {flight.flight_number}
           </button>
@@ -170,9 +170,9 @@ export function FlightOpsRow({
           <span className="text-xs text-muted">{flight.aircraft}</span>
 
           <span className="text-xs text-muted">
-            Scheduled {flight.scheduled_departure}
+            Scheduled <span className="font-mono">{flight.scheduled_departure}</span>
             {departureChanged && (
-              <span className="ml-1.5 font-medium text-warn-700">· Current {effectiveDeparture}</span>
+              <span className="ml-1.5 font-medium font-mono text-warn-700">· Current {effectiveDeparture}</span>
             )}
           </span>
 

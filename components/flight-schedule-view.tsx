@@ -31,10 +31,10 @@ function FlightScheduleRow({ flight, onClick }: { flight: Flight; onClick: () =>
     <button
       type="button"
       onClick={onClick}
-      className="w-full flex items-center gap-3 flex-wrap px-4 py-2.5 text-left hover:bg-surface rounded-xl2 bg-card border border-border shadow-soft"
+      className="w-full flex items-center gap-3 flex-wrap px-4 py-2.5 min-h-[44px] text-left hover:bg-surface rounded-xl2 bg-card border border-border shadow-soft"
     >
-      <span className="text-xs font-medium text-muted w-12 shrink-0">{flight.scheduled_departure}</span>
-      <span className="font-semibold text-ink">{flight.flight_number}</span>
+      <span className="font-mono text-sm font-medium text-muted w-14 shrink-0">{flight.scheduled_departure}</span>
+      <span className="font-mono font-semibold text-ink">{flight.flight_number}</span>
       <span className="text-sm text-ink">{flight.route}</span>
       <span className="text-sm text-muted">{flight.aircraft}</span>
       <TeamBadge name={flight.airline} />

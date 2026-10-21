@@ -126,19 +126,25 @@ export function PlanningSummaryBar({
     { label: "Plan warnings", value: planWarnings, dot: "bg-warn-700", hint: "Rest, weekly-hours, consecutive-OFF, separated-OFF-days, or unconfirmed cross-week continuity issues in this week's plan — click to view", metric: "warnings" },
   ];
 
+  const tone = (s: { metric: SummaryMetric; value: number }) =>
+    s.value > 0 && (s.metric === "gaps" || s.metric === "zoneGaps")
+      ? "text-bad-700"
+      : s.value > 0 && s.metric === "warnings"
+        ? "text-warn-700"
+        : "text-ink";
+
   return (
-    <div className="flex flex-wrap gap-x-2 gap-y-2 bg-white border border-border rounded-xl2 px-2 py-2 shadow-soft text-sm">
+    <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-3">
       {stats.map((s) => (
         <button
           key={s.label}
           type="button"
           title={s.hint}
           onClick={() => onSelectMetric(s.metric)}
-          className="flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-brand-500"
+          className="text-left bg-white border border-border rounded-xl2 shadow-soft px-3 py-3 min-h-[44px] hover:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500"
         >
-          <span className={`w-2 h-2 rounded-full shrink-0 ${s.dot}`} />
-          <span className="text-muted">{s.label}</span>
-          <span className="font-semibold text-ink">{s.value}</span>
+          <span className="block text-xs text-muted leading-snug">{s.label}</span>
+          <span className={`block mt-1 font-mono text-2xl font-semibold ${tone(s)}`}>{s.value}</span>
         </button>
       ))}
     </div>

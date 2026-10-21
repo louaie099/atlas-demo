@@ -57,8 +57,6 @@ const EXPECTED_WIPED_TABLES = [
   "staffing_requirements",
   "flights",
   "employees",
-  "planning_labor_rules",
-  "planning_fatigue_config",
 ];
 
 describe("lib/reset-empty — resetToEmptyDatabase", () => {
@@ -83,5 +81,17 @@ describe("lib/reset-empty — resetToEmptyDatabase", () => {
     const untouched = db.from("some_other_table");
     await resetToEmptyDatabase(db as any);
     expect(untouched.deleteNeqCalls.length).toBe(0);
+  });
+});
+
+describe("reset keeps labor rules", () => {
+  it("does not touch planning_labor_rules or planning_fatigue_config", async () => {
+    const db = new FakeSupabase();
+    const rules = db.from("planning_labor_rules");
+    const fatigue = db.from("planning_fatigue_config");
+    const spyR = JSON.stringify(rules), spyF = JSON.stringify(fatigue);
+    await resetToEmptyDatabase(db as never);
+    expect(JSON.stringify(db.from("planning_labor_rules"))).toBe(spyR);
+    expect(JSON.stringify(db.from("planning_fatigue_config"))).toBe(spyF);
   });
 });

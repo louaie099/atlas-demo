@@ -45,8 +45,7 @@ export async function resetDatabase(supabase: SupabaseClient): Promise<void> {
   // DEFAULT_LABOR_RULES/DEFAULT_FATIGUE_CONFIG) -- Reset Demo genuinely
   // starts over, so any saved rule/fatigue edit is cleared exactly like
   // every other table above.
-  await supabase.from("planning_labor_rules").delete().neq("id", "");
-  await supabase.from("planning_fatigue_config").delete().neq("id", "");
+  // planning_labor_rules / planning_fatigue_config are deliberately NOT wiped: labor rules are configuration, not demo data.
 
   const { error: empErr } = await supabase.from("employees").insert(EMPLOYEES);
   if (empErr) throw new Error(`Seeding employees failed: ${empErr.message}`);
