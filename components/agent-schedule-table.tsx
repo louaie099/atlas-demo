@@ -45,15 +45,73 @@ const ISSUE_LABELS: Record<string, string> = {
 // Informational only (missing history from before this week) -- not a plan problem.
 const INFO_ISSUES = new Set(["cross_week_continuity_uncertain", "consecutive_work_history_unknown"]);
 
-function WeeklyIssueTag({ issues }: { issues: AgentScheduleEntry["weeklyIssues"] }) {
+function WeeklyIssueTag({ issues, onOpen }: { issues: AgentScheduleEntry["weeklyIssues"]; onOpen: () => void }) {
   const real = issues.filter((i) => !INFO_ISSUES.has(i.type));
   if (real.length === 0) return null; // history-unknown notes stay in the drawer, not on the row
   const first = ISSUE_LABELS[real[0].type] ?? "Plan issue";
   return (
-    <span title={real.map((i) => i.description).join("\n")} className={`text-[10.5px] font-medium ${ROSTER_COLORS.warning}`}>
+    <button
+      type="button"
+      onClick={onOpen}
+      title={real.map((i) => i.description).join("\n")}
+      className={`self-start text-left text-[10.5px] font-medium underline-offset-2 hover:underline min-h-[24px] ${ROSTER_COLORS.warning}`}
+    >
       ⚠ {first}
       {real.length > 1 ? ` +${real.length - 1}` : ""}
-    </span>
+    </button>
+  );
+}
+
+const HARD_ISSUES = new Set([
+  "weekly_hours_violation",
+  "weekly_paid_hours_violation",
+  "consecutive_off_violation",
+  "insufficient_off_days",
+  "off_days_not_consecutive",
+  "rest_violation",
+  "max_consecutive_night_shifts_violation",
+  "max_continuous_shift_duration_violation",
+]);
+
+function WeekIssuesPanel({ entry, onClose }: { entry: AgentScheduleEntry; onClose: () => void }) {
+  const dayIssues = entry.days.flatMap((d) => d.issues.map((i) => ({ ...i, dayOfWeek: i.dayOfWeek ?? d.dayOfWeek })));
+  const all = [...entry.weeklyIssues, ...dayIssues];
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
+      <div className="w-full max-w-md h-full bg-card shadow-soft overflow-y-auto p-5 flex flex-col gap-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-ink">{entry.employee.name}</h3>
+            <div className="flex items-center gap-2 mt-1">
+              <TeamBadge name={entry.employee.assignment} />
+              <Badge tone="neutral">Plan issues this week</Badge>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="text-muted hover:text-ink text-sm px-2 py-1 rounded-lg hover:bg-surface">
+            Close
+          </button>
+        </div>
+        {all.length === 0 && <p className="text-sm text-muted">No issues recorded.</p>}
+        <ul className="flex flex-col gap-3">
+          {all.map((i, idx) => {
+            const info = INFO_ISSUES.has(i.type);
+            return (
+              <li key={idx} className="rounded-xl2 border border-border p-3 flex flex-col gap-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-semibold text-ink">{ISSUE_LABELS[i.type] ?? (info ? "History unknown" : "Plan issue")}</span>
+                  <Badge tone={info ? "neutral" : HARD_ISSUES.has(i.type) ? "bad" : "warn"}>{info ? "Info" : HARD_ISSUES.has(i.type) ? "Hard rule" : "Soft rule"}</Badge>
+                  {i.dayOfWeek && <Badge tone="neutral">{i.dayOfWeek}</Badge>}
+                </div>
+                <p className="text-sm text-muted">{i.description}</p>
+              </li>
+            );
+          })}
+        </ul>
+        <p className="text-xs text-muted">
+          Atlas reports these after generating the roster. Some rules are prevented while generating and some are only detected — see the rules drawer in Planning.
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -116,9 +174,11 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
 function AgentRow({
   entry,
   onOpenDay,
+  onOpenIssues,
 }: {
   entry: AgentScheduleEntry;
   onOpenDay: (entry: AgentScheduleEntry, day: AgentDayEntry) => void;
+  onOpenIssues: (entry: AgentScheduleEntry) => void;
 }) {
   return (
     <tr className="border-b border-border last:border-0">
@@ -126,7 +186,7 @@ function AgentRow({
         <div className="flex flex-col gap-0.5 min-w-[168px] max-w-[200px]">
           <span className="text-sm font-medium text-ink truncate"><AgentLink id={entry.employee.id} name={entry.employee.name} /></span>
           <TeamBadge name={entry.employee.assignment} />
-          <WeeklyIssueTag issues={entry.weeklyIssues} />
+          <WeeklyIssueTag issues={entry.weeklyIssues} onOpen={() => onOpenIssues(entry)} />
         </div>
       </td>
       {entry.days.map((day) => (
@@ -154,6 +214,7 @@ export function AgentScheduleTable({
 }) {
   const [filters, setFilters] = useState<AgentScheduleFilterState>(EMPTY_AGENT_SCHEDULE_FILTERS);
   const [selected, setSelected] = useState<{ entry: AgentScheduleEntry; day: AgentDayEntry } | null>(null);
+  const [issueEntry, setIssueEntry] = useState<AgentScheduleEntry | null>(null);
 
   useEffect(() => {
     if (!focus) return;
@@ -228,12 +289,14 @@ export function AgentScheduleTable({
             </thead>
             <tbody>
               {filtered.map((entry) => (
-                <AgentRow key={entry.employee.id} entry={entry} onOpenDay={(e, d) => setSelected({ entry: e, day: d })} />
+                <AgentRow key={entry.employee.id} entry={entry} onOpenDay={(e, d) => setSelected({ entry: e, day: d })} onOpenIssues={setIssueEntry} />
               ))}
             </tbody>
           </table>
         </div>
       </div>
+
+      {issueEntry && <WeekIssuesPanel entry={issueEntry} onClose={() => setIssueEntry(null)} />}
 
       {selected && (
         <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={() => setSelected(null)}>
