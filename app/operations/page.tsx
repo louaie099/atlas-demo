@@ -1,3 +1,4 @@
+import { LiveT1Panel } from "@/components/live-t1-panel";
 "use client";
 
 import { useEffect, useState } from "react";
@@ -189,6 +190,8 @@ export default function OperationsPage() {
       )}
 
       {loading && <p className="text-sm text-muted">Loading…</p>}
+
+      {!loading && view && view.plan !== null && <LiveT1Panel date={date} />}
 
       {!loading && view && view.plan === null && (
         <Card className="text-sm text-ink">

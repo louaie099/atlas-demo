@@ -572,6 +572,8 @@ export interface ZoneCheckinAssignment {
   source: AssignmentSource;
   created_by: string | null;
   assigned_at: string;
+  /** Physical counter number a regulator pinned this agent to (null/absent = zone-level only). Migration 0019. */
+  counter?: number | null;
 }
 
 export interface AgentScheduleEntry {

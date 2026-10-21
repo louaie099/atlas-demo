@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { CandidateResult } from "@/lib/types";
 import { CandidateRow } from "./candidate-row";
 import { Button } from "./ui";
+import { ROLE_HEADER } from "@/lib/roles";
+import { useRole } from "./role-context";
 
 /**
  * The zone-gap variant of FindAgentSheet -- same UI/interaction shape,
@@ -16,13 +18,19 @@ import { Button } from "./ui";
  */
 export function ZoneFindAgentSheet({
   zoneRequirementId,
+  counter,
+  title,
   onClose,
   onAssigned,
 }: {
   zoneRequirementId: string;
+  /** When set, the chosen agent is pinned to this specific counter. */
+  counter?: number;
+  title?: string;
   onClose: () => void;
   onAssigned: () => void;
 }) {
+  const { role } = useRole();
   const [candidates, setCandidates] = useState<CandidateResult[] | null>(null);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,8 +49,8 @@ export function ZoneFindAgentSheet({
     try {
       const res = await fetch("/api/checkin-zone-assign", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ zoneRequirementId, employeeId }),
+        headers: { "Content-Type": "application/json", [ROLE_HEADER]: role },
+        body: JSON.stringify({ zoneRequirementId, employeeId, counter }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -50,6 +58,7 @@ export function ZoneFindAgentSheet({
         loadCandidates();
         return;
       }
+      if (data.counterWarning) setError(data.counterWarning);
       onAssigned();
       loadCandidates();
     } catch {
@@ -64,7 +73,7 @@ export function ZoneFindAgentSheet({
       <div className="absolute inset-0 bg-black/20" onClick={onClose} />
       <div className="relative w-full sm:max-w-md h-full bg-surface shadow-softer border-l border-border overflow-y-auto p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-ink">Find Agent — T1 Check-in Zone</h2>
+          <h2 className="text-lg font-semibold text-ink">{title ?? (counter ? `Assign agent — counter ${counter}` : "Find Agent — T1 Check-in Zone")}</h2>
           <Button variant="ghost" onClick={onClose}>
             Close
           </Button>

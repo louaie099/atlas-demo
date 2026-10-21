@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { scoreCandidates, TimeWindow } from "@/lib/scoring";
-import { CURRENT_WEEK_START } from "@/lib/seed-data";
-import { planIdForWeek, fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "@/lib/planning/weekly-plan-service";
+import { fetchAllRosterEntriesForPlan, fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "@/lib/planning/weekly-plan-service";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { flightDateFor } from "@/lib/flight-date";
 import { Employee, Assignment, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, ZoneCheckinAssignment } from "@/lib/types";
@@ -39,7 +38,7 @@ export async function GET(_req: Request, { params }: { params: { zoneRequirement
   const { data: employees, error: empErr } = await supabase.from("employees").select("*");
   if (empErr) return NextResponse.json({ error: empErr.message }, { status: 500 });
 
-  const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", planIdForWeek(CURRENT_WEEK_START));
+  const { data: planRows } = await supabase.from("weekly_plans").select("*").eq("id", requirement.plan_id);
   const plan = (planRows as WeeklyPlan[] | null)?.[0];
   const effectiveConfig = plan?.config_snapshot;
   if (!effectiveConfig) {
@@ -48,15 +47,15 @@ export async function GET(_req: Request, { params }: { params: { zoneRequirement
 
   // 2026-10-09 (pagination/cross-week-leakage audit — see
   // app/api/assign/route.ts's own doc comment for the full incident):
-  // scoped to this route's own (pre-existing, unchanged) CURRENT_WEEK_START
+  // scoped to the zone requirement's OWN plan week (2026-10-21: no longer the fixed seed week, so Live Operations works for today)
   // assumption instead of a bare, unscoped, unpaginated `.select("*")`.
-  const { data: weekFlightsRaw, error: allFlightErr } = await supabase.from("flights").select("*").eq("week_start", CURRENT_WEEK_START);
+  const { data: weekFlightsRaw, error: allFlightErr } = await supabase.from("flights").select("*").eq("week_start", plan!.week_start);
   if (allFlightErr) return NextResponse.json({ error: allFlightErr.message }, { status: 500 });
   const allFlights = (weekFlightsRaw ?? []) as Flight[];
   const weekFlightIds = allFlights.map((f) => f.id);
 
   const [allAssignments, allRequirements, { data: existingZoneAssignments, error: zoneAssignErr }] = await Promise.all([
-    fetchAllAssignmentsForPlan(supabase, planIdForWeek(CURRENT_WEEK_START)),
+    fetchAllAssignmentsForPlan(supabase, plan!.id),
     fetchAllRequirementsForFlightIds(supabase, weekFlightIds),
     supabase.from("checkin_zone_assignments").select("*").eq("zone_requirement_id", params.zoneRequirementId),
   ]);

@@ -81,6 +81,8 @@ export interface ZoneCoverageView {
   contributingFlights: Flight[];
   availableEmployees: Employee[];
   manuallyAssignedEmployees: Employee[];
+  /** employeeId -> counter number, for manual assignments a regulator pinned to a specific counter (Live Operations). */
+  manualCounters?: Record<string, number>;
   zoneRequirementId: string | null;
 }
 
@@ -197,6 +199,15 @@ function buildZoneCoverageViews(
       return ids.map((id) => employeesById.get(id)).filter((e): e is Employee => Boolean(e));
     };
 
+    const manualCountersFor = (zoneRequirementId: string | null): Record<string, number> => {
+      const out: Record<string, number> = {};
+      if (!zoneRequirementId) return out;
+      for (const a of humanZoneAssignments) {
+        if (a.zone_requirement_id === zoneRequirementId && typeof a.counter === "number") out[a.employee_id] = a.counter;
+      }
+      return out;
+    };
+
     // ORDINARY zones — derived Required/Available timeline.
     const previousDay = previousDayCarryoverContext(daysOrder, weekStart, dayIndex, rosterEntries, previousWeekLastDayRosterEntries);
     const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
@@ -239,6 +250,7 @@ function buildZoneCoverageViews(
           contributingFlights,
           availableEmployees,
           manuallyAssignedEmployees,
+          manualCounters: manualCountersFor(zoneRequirementId),
           zoneRequirementId,
         });
       }
@@ -267,6 +279,7 @@ function buildZoneCoverageViews(
         contributingFlights,
         availableEmployees: [],
         manuallyAssignedEmployees,
+        manualCounters: manualCountersFor(requirement.id),
         zoneRequirementId: requirement.id,
       });
     }

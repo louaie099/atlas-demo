@@ -26,6 +26,7 @@ export function T1CapacityMap({
   initialMinutes,
   compact = false,
   onFindAgent,
+  onCounterClick,
 }: {
   views: ZoneCoverageView[];
   day?: string;
@@ -33,6 +34,8 @@ export function T1CapacityMap({
   initialMinutes?: number;
   compact?: boolean;
   onFindAgent?: (zoneRequirementId: string) => void;
+  /** Live Operations: every OPEN counter becomes a control (assign an available agent / release one). */
+  onCounterClick?: (target: { view: ZoneCoverageView; counter: number; occupant: { id: string; name: string } | null }) => void;
 }) {
   const relevant = useMemo(() => views.filter((v) => v.required > 0 && ORDINARY_CHECKIN_ZONES.includes(v.zone)), [views]);
   const [min, max] = useMemo(() => {
@@ -114,29 +117,59 @@ export function T1CapacityMap({
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-1" role="img" aria-label={`${staffed} of ${required} open counters staffed`}>
-                {Array.from({ length: total }, (_, i) => {
-                  const open = i < required;
-                  const filled = i < staffed;
-                  const cls = !open
-                    ? "border-border bg-surface"
-                    : filled
-                      ? "border-brand-600 bg-brand-500"
-                      : "border-bad-500 bg-bad-50";
-                  const label = `Counter ${def.counters.from + i}`;
-                  return open && !filled && view && onFindAgent ? (
-                    <button
-                      key={i}
-                      type="button"
-                      title={`${label} — unstaffed, find agent`}
-                      aria-label={`${label} unstaffed, find agent`}
-                      onClick={() => onFindAgent(view.zoneRequirementId ?? view.id)}
-                      className={`w-4 h-4 rounded-sm border ${cls} hover:ring-2 hover:ring-bad-500`}
-                    />
-                  ) : (
-                    <span key={i} title={label} className={`w-4 h-4 rounded-sm border ${cls}`} />
-                  );
-                })}
+              <div className="flex flex-wrap gap-1" role={onCounterClick ? "group" : "img"} aria-label={`${staffed} of ${required} open counters staffed`}>
+                {(() => {
+                  const manual = view?.manualCounters ?? {};
+                  const byCounter = new Map<number, { id: string; name: string }>();
+                  for (const e of view?.manuallyAssignedEmployees ?? []) {
+                    const c = manual[e.id];
+                    if (typeof c === "number") byCounter.set(c, { id: e.id, name: e.name });
+                  }
+                  const pinned = byCounter.size;
+                  const openRest = Math.max(required - pinned, 0);
+                  const filledRest = Math.max(staffed - pinned, 0);
+                  let idx = 0; // position among non-pinned counters
+                  return Array.from({ length: total }, (_, i) => {
+                    const number = def.counters.from + i;
+                    const occupant = byCounter.get(number) ?? null;
+                    const open = occupant ? true : idx < openRest;
+                    const filled = occupant ? true : idx < filledRest;
+                    if (!occupant) idx++;
+                    const cls = occupant
+                      ? "border-brand-700 bg-brand-600 ring-2 ring-brand-200"
+                      : !open
+                        ? "border-border bg-surface"
+                        : filled
+                          ? "border-brand-600 bg-brand-500"
+                          : "border-bad-500 bg-bad-50";
+                    const label = occupant ? `Counter ${number} — ${occupant.name}` : `Counter ${number}${open ? (filled ? " — staffed" : " — open, no agent") : " — closed"}`;
+                    const clickable = Boolean(view && onCounterClick);
+                    if (clickable) {
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          title={label}
+                          aria-label={label}
+                          onClick={() => onCounterClick!({ view: view!, counter: number, occupant })}
+                          className={`w-5 h-5 rounded-sm border ${cls} hover:ring-2 hover:ring-brand-500`}
+                        />
+                      );
+                    }
+                    return open && !filled && view && onFindAgent ? (
+                      <button
+                        key={i}
+                        type="button"
+                        title={`${label} — find agent`}
+                        aria-label={`${label}, find agent`}
+                        onClick={() => onFindAgent(view.zoneRequirementId ?? view.id)}
+                        className={`w-4 h-4 rounded-sm border ${cls} hover:ring-2 hover:ring-bad-500`}
+                      />
+                    ) : (
+                      <span key={i} title={label} className={`w-4 h-4 rounded-sm border ${cls}`} />
+                    );
+                  });
+                })()}
               </div>
 
               {view && (
