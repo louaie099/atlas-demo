@@ -9,7 +9,7 @@ import { ZoneCheckinDemandPolicy, DEFAULT_ZONE_CHECKIN_DEMAND_POLICY } from "./c
  * Kept separate from DEFAULT_ZONE_CHECKIN_DEMAND_POLICY on purpose: that
  * static default (base 2 everywhere) is the engine prototype that the PoC /
  * small demos and the regression tests pin. This is the live, persisted
- * planner setting (planning_zone_demand_config) layered on top of it by
+ * planner setting (a "zone_demand" row in planning_fatigue_config) layered on top of it by
  * resolveEffectiveConfig, so the real app can run Main at 5 without
  * changing those fixtures.
  */

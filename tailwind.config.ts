@@ -4,6 +4,8 @@ const config: Config = {
   content: [
     "./app/**/*.{ts,tsx}",
     "./components/**/*.{ts,tsx}",
+    // lib/roster-colors.ts holds class strings too; without this they are never generated.
+    "./lib/**/*.{ts,tsx}",
   ],
   theme: {
     extend: {

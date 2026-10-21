@@ -96,14 +96,17 @@ export async function loadFatigueConfig(supabase: SupabaseClient): Promise<Fatig
   return row?.config ?? DEFAULT_FATIGUE_CONFIG;
 }
 
+// Stored as a second row of planning_fatigue_config (id "current" remains the
+// fatigue row; loadFatigueConfig filters by that id) so no new migration is needed.
+const ZONE_BASE_ROW_ID = "zone_demand";
+
 /**
  * Loads the T1 zone baseline setting. Unlike the labor/fatigue loaders, a
- * missing planning_zone_demand_config TABLE (migration 0019 not applied yet)
- * falls back to the defaults instead of throwing, so an un-migrated
- * deployment keeps generating plans exactly as before this setting existed.
+ * failed read falls back to the defaults instead of throwing, so plan
+ * generation never breaks over this one setting.
  */
 export async function loadZoneBaseSetting(supabase: SupabaseClient): Promise<ZoneBaseSetting> {
-  const { data, error } = await supabase.from("planning_zone_demand_config").select("*").eq("id", "current");
+  const { data, error } = await supabase.from("planning_fatigue_config").select("*").eq("id", ZONE_BASE_ROW_ID);
   if (error) return DEFAULT_ZONE_BASE_SETTING;
   const row = (data ?? [])[0] as { config: unknown } | undefined;
   return row ? sanitizeZoneBase(row.config) : DEFAULT_ZONE_BASE_SETTING;
@@ -111,7 +114,7 @@ export async function loadZoneBaseSetting(supabase: SupabaseClient): Promise<Zon
 
 export async function saveZoneBaseSetting(supabase: SupabaseClient, input: unknown): Promise<ZoneBaseSetting> {
   const config = sanitizeZoneBase(input);
-  const { error } = await supabase.from("planning_zone_demand_config").upsert({ id: "current", config, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  const { error } = await supabase.from("planning_fatigue_config").upsert({ id: ZONE_BASE_ROW_ID, config, updated_at: new Date().toISOString() }, { onConflict: "id" });
   if (error) throw new Error(error.message);
   return config;
 }

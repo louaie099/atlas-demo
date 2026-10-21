@@ -80,7 +80,7 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
     <button
       type="button"
       onClick={onClick}
-      className={`w-full h-full min-w-[104px] px-2.5 py-2 text-left rounded-lg flex flex-col gap-0.5 ${tone.bg} hover:brightness-95`}
+      className={`w-full h-full min-w-[104px] px-2.5 py-2 text-left rounded-lg border-l-4 flex flex-col gap-0.5 ${tone.bg} ${tone.accent} hover:brightness-95`}
     >
       <div className="flex items-center gap-1.5">
         <span className={`text-xs font-semibold ${tone.text}`}>{day.shiftCode ?? "—"}</span>
@@ -91,7 +91,7 @@ function DayCell({ day, onClick }: { day: AgentDayEntry; onClick: () => void }) 
         )}
       </div>
       {day.shiftStart && day.shiftEnd && (
-        <span className="text-[10.5px] text-muted leading-tight">
+        <span className={`text-[10.5px] leading-tight font-mono ${tone.text} opacity-80`}>
           {day.shiftStart}–{day.shiftEnd}
         </span>
       )}

@@ -45,6 +45,8 @@ export interface RosterCellTone {
   bg: string;
   /** Primary text color for content inside the cell. */
   text: string;
+  /** Left accent bar color (border-l-4) that marks the shift family. */
+  accent: string;
 }
 
 export const ROSTER_COLORS: {
@@ -62,13 +64,13 @@ export const ROSTER_COLORS: {
   // One clear hue per shift family so the grid reads at a glance:
   // morning = blue, midday/office = green, afternoon = orange,
   // night = violet, fixed-cycle day = teal, OFF = neutral gray.
-  off: { bg: "bg-gray-100", text: "text-gray-500" },
-  morningShift: { bg: "bg-sky-100", text: "text-sky-900" },
-  middayShift: { bg: "bg-emerald-100", text: "text-emerald-900" },
-  afternoonShift: { bg: "bg-orange-100", text: "text-orange-900" },
-  nightShift: { bg: "bg-violet-200", text: "text-violet-900" },
-  dayShift: { bg: "bg-teal-100", text: "text-teal-900" },
-  normalShift: { bg: "bg-slate-100", text: "text-slate-800" },
+  off: { bg: "bg-transparent border border-dashed border-[#C9D2DD]", text: "text-[#8794A3]", accent: "border-l-transparent" },
+  morningShift: { bg: "bg-[#E4F0FF]", text: "text-[#0B4A8F]", accent: "border-l-[#3B82F6]" },
+  middayShift: { bg: "bg-[#DFF5EA]", text: "text-[#0B6B45]", accent: "border-l-[#22A06B]" },
+  afternoonShift: { bg: "bg-[#FFEAD3]", text: "text-[#8A4300]", accent: "border-l-[#F08A24]" },
+  nightShift: { bg: "bg-[#E8E1FB]", text: "text-[#4B2A9A]", accent: "border-l-[#7C5CD6]" },
+  dayShift: { bg: "bg-[#DAF2F4]", text: "text-[#0B5F66]", accent: "border-l-[#1AA3AD]" },
+  normalShift: { bg: "bg-[#ECEFF3]", text: "text-[#3A4756]", accent: "border-l-[#8794A3]" },
   assignedDuty: "text-brand-700",
   confirmedDuty: "text-good-700",
   warning: "text-warn-700",
