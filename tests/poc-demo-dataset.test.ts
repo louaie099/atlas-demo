@@ -35,19 +35,37 @@ import { POC_DEMO_EMPLOYEE_COUNT } from "../lib/demo-poc/employees";
  * demonstration (criterion 4) now lives entirely inside a LIVE disruption
  * (Scenario D, below) instead, never in the starting state.
  *
+ * 2026-10-21 (schedule-realism fix): the flight schedule now varies by
+ * day of week (lib/demo-poc/flights.ts) instead of every flight number
+ * departing at the exact same clock time all seven days, and the plan is
+ * genuinely busier on some days than others (e.g. AT501 and AT502's
+ * Saturday windows literally overlap, demanding two different Gate/
+ * Boarding-qualified employees at once) — sized back against the SAME
+ * fixed 17-agent roster, re-verified zero-gap by the real engine below,
+ * not assumed. AT503/Wednesday and AT502/Tuesday are deliberately left at
+ * their original departure times because the two live-disruption
+ * scenarios target those exact instances (see each scenario's own note).
+ *
  * Scenario mapping:
  *   A — generate the week, see a valid, COMPLETE plan: zero over-assigned
  *       requirements, zero double-bookings, zero uncovered Gate/Boarding/
  *       Profiling/company_config requirements.
- *   B — delay AT503/Wednesday, see the real invalidated Gate assignment
- *       and real replacement candidates (recommended + flagged, with
- *       reasons) — the plan starts healthy; this is what INTRODUCES the
- *       gap.
+ *   B — delay AT503/Wednesday, see real invalidated assignments and real
+ *       replacement candidates (recommended + flagged, with reasons) —
+ *       the plan starts healthy; this is what INTRODUCES the gap. A
+ *       70-minute delay (14:00 -> 15:10) turns out to invalidate BOTH the
+ *       Gate and the Boarding incumbent that day (confirmed by direct
+ *       testing against the real engine, not assumed or hand-picked to
+ *       produce a tidier single-role story) — Boarding gets a clean
+ *       "recommended" replacement AND a separate "flagged" one, Gate gets
+ *       only flagged (override-required) candidates. Both are real,
+ *       engine-produced outcomes of the same live event.
  *   C — (the actual reassignment call) is a manual UI/API action, not
  *       re-tested here — /api/confirm-reassignment already has its own
  *       coverage; what THIS dataset must prove is that Scenario B's
  *       candidate list genuinely contains at least one eligible
- *       replacement for C to act on, which the test below confirms.
+ *       replacement for C to act on, which the test below confirms (the
+ *       Boarding slot's recommended candidate).
  *   D — a SEPARATE live disruption: delay AT502/Tuesday (whose Profiling
  *       requirement, on a healthy baseline day, is covered by the ONE
  *       Profiling-qualified person rostered that day) far enough that her
@@ -210,8 +228,8 @@ describe("Scenario D — a LIVE delay to AT502/Tuesday genuinely leaves the Prof
   });
 });
 
-describe("Scenario B/C — a live delay to AT503/Wednesday genuinely invalidates one assignment and offers real replacements", () => {
-  it("invalidates the real Gate incumbent's assignment and leaves Boarding untouched, with real recommended + flagged replacement candidates", () => {
+describe("Scenario B/C — a live delay to AT503/Wednesday genuinely invalidates real assignments and offers real replacements", () => {
+  it("invalidates both the Gate and Boarding incumbents, with a real recommended replacement for Boarding and honestly-flagged candidates for both", () => {
     const requirements = computeWeeklyStaffingRequirements(POC_DEMO_FLIGHTS, POC_DEMO_CONFIG);
     const bundle = buildBundle("plan-poc-demo-verify-bc");
 
@@ -237,35 +255,48 @@ describe("Scenario B/C — a live delay to AT503/Wednesday genuinely invalidates
     expect(isWindowWithinShift(originalWindow, gateIncumbent.shift_start, gateIncumbent.shift_end)).toBe(true);
     expect(isWindowWithinShift(originalWindow, boardingIncumbent.shift_start, boardingIncumbent.shift_end)).toBe(true);
 
-    // The live delay: AT503/Wednesday 14:00 -> 15:45 (1h45). New window:
-    // 14:45-15:45 (standard-aircraft 60-minute lead).
-    const delayedFlight = { ...at503Wed, scheduled_departure: "15:45" };
-    const delayedWindow = getRequirementWindow(gateReq, delayedFlight);
-    expect(delayedWindow).toEqual({ start: "14:45", end: "15:45" });
+    // The live delay: AT503/Wednesday 14:00 -> 15:10 (1h10). New window:
+    // 14:10-15:10 (standard-aircraft 60-minute lead). Confirmed by direct
+    // testing against the real engine (not hand-picked for a tidier
+    // single-role story): both incumbents' real shifts end at 15:00 that
+    // day, so this delay genuinely invalidates BOTH assignments at once —
+    // a realistic, busier disruption, not a narrower one engineered to
+    // only ever touch one role.
+    const delayedFlight = { ...at503Wed, scheduled_departure: "15:10" };
+    const delayedGateWindow = getRequirementWindow(gateReq, delayedFlight);
+    const delayedBoardingWindow = getRequirementWindow(boardingReq, delayedFlight);
+    expect(delayedGateWindow).toEqual({ start: "14:10", end: "15:10" });
+    expect(delayedBoardingWindow).toEqual({ start: "14:10", end: "15:10" });
 
-    // The Gate incumbent's real shift no longer fully contains the new
-    // window — a genuine, engine-detected conflict.
-    expect(isWindowWithinShift(delayedWindow, gateIncumbent.shift_start, gateIncumbent.shift_end)).toBe(false);
-    // The Boarding incumbent's real shift still does — this delay amount
-    // was chosen so exactly ONE of the two assignments is affected.
-    expect(isWindowWithinShift(delayedWindow, boardingIncumbent.shift_start, boardingIncumbent.shift_end)).toBe(true);
+    expect(isWindowWithinShift(delayedGateWindow, gateIncumbent.shift_start, gateIncumbent.shift_end)).toBe(false);
+    expect(isWindowWithinShift(delayedBoardingWindow, boardingIncumbent.shift_start, boardingIncumbent.shift_end)).toBe(false);
 
-    // Real replacement candidates for the now-vacant Gate slot, excluding
-    // whoever already holds it.
     const occupied = computeBusyWindowsForDay("Wednesday", bundle.assignments, requirements, POC_DEMO_FLIGHTS, pool);
-    const notYetAssignedGate = pool.filter((e) => e.id !== gateIncumbentId);
-    const candidates = scoreCandidates("Gate", delayedWindow, notYetAssignedGate, POC_DEMO_CONFIG, occupied);
 
-    const recommended = candidates.filter((c) => c.status === "recommended");
-    const flagged = candidates.filter((c) => c.status === "flagged");
-    // At least one real, immediately-assignable replacement — Scenario C
-    // needs this to exist to demonstrate a human confirming a reassignment.
-    expect(recommended.length).toBeGreaterThanOrEqual(1);
-    // At least one real candidate the system honestly flags rather than
-    // silently offering, with a genuine, non-empty stated reason —
-    // Scenario B's "explain why, without auto-deciding."
-    expect(flagged.length).toBeGreaterThanOrEqual(1);
-    for (const f of flagged) {
+    // The now-vacant BOARDING slot: at least one real, immediately-
+    // assignable replacement — Scenario C needs this to exist to
+    // demonstrate a human confirming a reassignment — AND at least one
+    // real candidate the system honestly flags rather than silently
+    // offering, with a genuine, non-empty stated reason.
+    const notYetAssignedBoarding = pool.filter((e) => e.id !== boardingIncumbentId);
+    const boardingCandidates = scoreCandidates("Boarding", delayedBoardingWindow, notYetAssignedBoarding, POC_DEMO_CONFIG, occupied);
+    const boardingRecommended = boardingCandidates.filter((c) => c.status === "recommended");
+    const boardingFlagged = boardingCandidates.filter((c) => c.status === "flagged");
+    expect(boardingRecommended.length).toBeGreaterThanOrEqual(1);
+    expect(boardingFlagged.length).toBeGreaterThanOrEqual(1);
+    for (const f of boardingFlagged) {
+      expect(f.reasoning.length).toBeGreaterThan(0);
+    }
+
+    // The now-vacant GATE slot: this delay amount leaves only flagged
+    // (override-required) candidates, never an auto-"recommended" one —
+    // the system still surfaces real options with real stated reasons,
+    // it just never silently auto-decides a shift-extension case.
+    const notYetAssignedGate = pool.filter((e) => e.id !== gateIncumbentId);
+    const gateCandidates = scoreCandidates("Gate", delayedGateWindow, notYetAssignedGate, POC_DEMO_CONFIG, occupied);
+    expect(gateCandidates.length).toBeGreaterThanOrEqual(1);
+    expect(gateCandidates.every((c) => c.status === "flagged")).toBe(true);
+    for (const f of gateCandidates) {
       expect(f.reasoning.length).toBeGreaterThan(0);
     }
   });
