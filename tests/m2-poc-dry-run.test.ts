@@ -261,10 +261,10 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     const employeesBody = await employeesRes.json();
     const employees: Employee[] = employeesBody.employees ?? employeesBody;
     expect(Array.isArray(employees)).toBe(true);
-    expect(employees).toHaveLength(14);
+    expect(employees).toHaveLength(17);
     const profilingQualified = employees.filter((e) => e.skills.includes("Profiling"));
     const qatarAuthorized = employees.filter((e) => e.foreign_company_authorizations.includes("Qatar Airways"));
-    expect(profilingQualified).toHaveLength(1);
+    expect(profilingQualified).toHaveLength(3);
     expect(qatarAuthorized).toHaveLength(3);
 
     const view = await getWeeklyView(POC_DEMO_WEEK_START);
@@ -276,7 +276,7 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     record(
       "1. Reset PoC dataset",
       "PASS",
-      `POST /api/reset-poc-demo → 200; GET /api/employees → 14 employees (1 Profiling-qualified, 3 Qatar-authorized); GET /api/planning/weekly-view?week_start=${POC_DEMO_WEEK_START} → 5 distinct flight numbers, a persisted plan already present.`
+      `POST /api/reset-poc-demo → 200; GET /api/employees → 17 employees (3 Profiling-qualified, 3 Qatar-authorized); GET /api/planning/weekly-view?week_start=${POC_DEMO_WEEK_START} → 5 distinct flight numbers, a persisted plan already present.`
     );
   });
 
@@ -353,36 +353,29 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     );
   });
 
-  it("STEP 4 — confirms the genuine, headcount-forced Profiling staffing gap on Monday and Tuesday", async () => {
+  it("STEP 4 — criterion 1: confirms ZERO uncovered StaffingRequirement rows across the whole baseline week", async () => {
+    // Every per-flight role requirement (Gate, Boarding, Profiling, Qatar
+    // Airways' company_config requirement) — not just Profiling, which
+    // the dataset's PREVIOUS design deliberately left short. This is the
+    // direct test of acceptance criterion 1's "zero uncovered
+    // requirements... do not fake or suppress gaps to make the demo
+    // pass": every row below is read straight from the real persisted
+    // plan, never hand-filtered to the rows that happen to pass.
+    const gapRows = rosterAfterGeneration.filter((r) => r.gap > 0);
+    expect(gapRows).toEqual([]);
+
     const profilingRows = rosterAfterGeneration.filter((r) => r.requirement.role === "Profiling");
     expect(profilingRows).toHaveLength(7); // AT502 runs daily
+    expect(profilingRows.every((r) => r.gap === 0)).toBe(true);
 
-    const gapDays = profilingRows.filter((r) => r.gap > 0).map((r) => r.flight.day_of_week);
-    const coveredDays = profilingRows.filter((r) => r.gap === 0).map((r) => r.flight.day_of_week);
-
-    expect(gapDays.length).toBeGreaterThanOrEqual(2);
-    expect(coveredDays.length).toBeGreaterThanOrEqual(5);
-    expect(new Set(gapDays)).toEqual(new Set(["Monday", "Tuesday"]));
-
-    // Prove it's a real headcount gap, not a scoring/qualification bug:
-    // the sole Profiling-qualified employee is genuinely off-roster on
-    // both gap days and genuinely on-roster on a covered day.
-    const employeesRes = await GET_employees();
-    const employees: Employee[] = (await employeesRes.json()).employees;
-    const profilingEmployee = employees.find((e) => e.skills.includes("Profiling"))!;
-    expect(profilingEmployee).toBeDefined();
-
-    for (const day of ["Monday", "Tuesday"]) {
-      const row = profilingRows.find((r) => r.flight.day_of_week === day)!;
-      const candidates = await getCandidates(row.requirement.id);
-      expect(candidates.status).toBe(200);
-      expect(candidates.body.candidates).toHaveLength(0);
-    }
+    const gateRows = rosterAfterGeneration.filter((r) => r.requirement.role === "Gate");
+    expect(gateRows.length).toBeGreaterThan(0);
+    expect(gateRows.every((r) => r.gap === 0)).toBe(true);
 
     record(
-      "4. Genuine Profiling gap on Monday & Tuesday",
+      "4. Zero uncovered requirements (criterion 1)",
       "PASS",
-      `GET /api/planning/weekly-view roster: the Profiling requirement shows gap > 0 on exactly {Monday, Tuesday} and gap = 0 on the other 5 days (one Profiling-qualified employee against daily demand — a real headcount constraint, not a hardcoded day name). GET /api/candidates confirms 0 real candidates on both gap days.`
+      `GET /api/planning/weekly-view roster: all ${rosterAfterGeneration.length} StaffingRequirement rows (Gate, Boarding, Profiling across all 7 days, Qatar Airways) report gap=0 in the baseline plan -- zero uncovered requirements, nothing hand-filtered or suppressed.`
     );
   });
 
@@ -588,13 +581,52 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     );
   });
 
-  it("STEP 10 — demonstrates the unresolved Profiling gap with zero eligible candidates (Monday)", async () => {
-    const mondayProfilingRow = rosterAfterGeneration.find((r) => r.requirement.role === "Profiling" && r.flight.day_of_week === "Monday")!;
-    expect(mondayProfilingRow).toBeDefined();
+  // -------------------------------------------------------------------------
+  // Step 10: criterion 4, "handle failure honestly" — a SEPARATE live
+  // disruption (AT502/Tuesday's Profiling requirement), not the AT503
+  // Gate scenario above. The baseline plan going into this step has ZERO
+  // gaps (step 4) -- this step introduces a real delay whose replacement
+  // search genuinely comes back empty, because no second Profiling-
+  // qualified employee is on roster that day, not because of any
+  // pre-existing shortfall.
+  // -------------------------------------------------------------------------
 
-    const liveOps = await getLiveOps(mondayProfilingRow.flight.flight_date);
-    const flightView = liveOps.body.flights.find((f) => f.flight.id === mondayProfilingRow.flight.id)!;
-    const reqView = flightView.requirements.find((r) => r.requirement.id === mondayProfilingRow.requirement.id)!;
+  let at502Tue: Flight;
+  let profilingReqId: string;
+
+  it("STEP 10 — criterion 4: a live AT502/Tuesday delay leaves the Profiling requirement with ZERO eligible replacements, reported honestly", async () => {
+    const view = await getWeeklyView(POC_DEMO_WEEK_START);
+    at502Tue = (view.body.flights as Flight[]).find((f) => f.flight_number === "AT502" && f.day_of_week === "Tuesday")!;
+    expect(at502Tue).toBeDefined();
+    expect(at502Tue.scheduled_departure).toBe("11:30");
+
+    const beforeProfilingRow = (view.body.roster as RosterRequirementView[]).find(
+      (r) => r.requirement.role === "Profiling" && r.flight.id === at502Tue.id
+    )!;
+    profilingReqId = beforeProfilingRow.requirement.id;
+    // Healthy going in -- this is a live disruption, not a pre-existing gap.
+    expect(beforeProfilingRow.gap).toBe(0);
+
+    const patchRes = await PATCH_operational(
+      new Request(`http://localhost/api/flights/${at502Tue.id}/operational`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actual_departure: "15:30", status: "delayed" }),
+      }),
+      { params: { id: at502Tue.id } }
+    );
+    expect(patchRes.status).toBe(200);
+    const patchBody = await patchRes.json();
+    expect(patchBody.flight.actual_departure).toBe("15:30");
+
+    const liveOps = await getLiveOps(at502Tue.flight_date);
+    expect(liveOps.status).toBe(200);
+    const flightView = liveOps.body.flights.find((f) => f.flight.id === at502Tue.id)!;
+    expect(flightView.effectiveDeparture).toBe("15:30");
+    const reqView = flightView.requirements.find((r) => r.requirement.id === profilingReqId)!;
+
+    expect(reqView.invalidatedAssignments).toHaveLength(1);
+    expect(reqView.coverageStatus).toBe("conflict");
     expect(reqView.gap).toBeGreaterThan(0);
     expect(reqView.gapResolution).toBeDefined();
     expect(reqView.gapResolution!.eligible).toBe(false);
@@ -603,14 +635,27 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
       expect(reqView.gapResolution!.exclusionSummary.length).toBeGreaterThan(0);
     }
 
-    const candidatesDirect = await getCandidates(mondayProfilingRow.requirement.id);
+    const impact = await POST_evaluateImpact(
+      new Request("http://localhost/api/live-ops/evaluate-impact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flightId: at502Tue.id }),
+      })
+    );
+    expect(impact.status).toBe(200);
+    const impactBody = await impact.json();
+    const profilingConflict = impactBody.conflicts.find((c: any) => c.requirement.id === profilingReqId);
+    expect(profilingConflict).toBeDefined();
+    expect(profilingConflict.replacementCandidates).toHaveLength(0);
+
+    const candidatesDirect = await getCandidates(profilingReqId);
     expect(candidatesDirect.body.candidates).toHaveLength(0);
     expect(candidatesDirect.body.exclusionSummary.length).toBeGreaterThan(0);
 
     record(
-      "10. Unresolved Profiling gap, zero eligible candidates (Monday)",
+      "10. Live disruption with zero eligible replacement (criterion 4)",
       "PASS",
-      `GET /api/live-ops reports gapResolution.eligible=false with 0 candidates and a non-empty exclusionSummary for Monday's Profiling requirement; GET /api/candidates independently confirms 0 candidates for the same requirement. ATLAS never fabricates or silently assigns a candidate here -- an honest, still-open staffing gap, exactly as the dataset was designed to force.`
+      `PATCH /api/flights/${at502Tue.id}/operational delayed AT502/Tuesday 11:30 -> 15:30 against a plan that started with gap=0 on this exact requirement (step 4). GET /api/live-ops now reports invalidatedAssignments.length=1, coverageStatus="conflict", gapResolution.eligible=false with 0 candidates and a non-empty exclusionSummary; POST /api/live-ops/evaluate-impact and GET /api/candidates independently confirm 0 replacement candidates. ATLAS never fabricates or silently assigns a candidate here -- an honest, LIVE-disruption-caused staffing gap, not a pre-existing one.`
     );
   });
 
@@ -644,7 +689,7 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
       `GET /api/planning/weekly-view zoneCoverage: ${gapRows.length}/${zoneCoverage.length} zone/day/window rows carry a real shortfall (available < required), concentrated in ${sortedWindows
         .slice(0, 3)
         .map(([w, n]) => `${w} (${n} rows)`)
-        .join(", ")}. Cause (consistent with the M1 dataset design, not a new finding): the General T1 Pool's three shift bands (MT01 05:45ish, NR01/NR02 08:00ish, AP01 13:45ish) leave the EARLY-MORNING and LATE-AFTERNOON/EVENING parts of the day thinly covered relative to Check-in's own demand curve, because the 10-person pool is sized against Gate/Boarding demand headroom, not Check-in's independent zone/window demand -- a genuine, engine-computed shortfall (never a hardcoded one), explicitly flagged as open in the M1 report and left unmodified here per this milestone's "do not manufacture or suppress gaps" instruction. Every row's available count stayed within the sane bound (<= ${totalActive} active employees).`
+        .join(", ")}. Cause (a SEPARATE, pre-existing, cross-dataset metric from "Requirements covered"/"Staffing gaps" above -- see components/planning-summary-bar.tsx's own doc comment and lib/demo-poc/employees.ts's module comment): the General T1 Pool's shift bands (MT01 05:45ish, NR01/NR02 08:00ish, AP01 13:45ish) leave the EARLY-MORNING and LATE-AFTERNOON/EVENING parts of the day thinly covered relative to Check-in's own demand curve -- a genuine, engine-computed shortfall (never a hardcoded one) confirmed to persist even after adding extra pure-Check-in headcount (Stage 6 never selects an overnight/evening-reaching catalog code for anyone in this dataset), the same known, shared limitation the main and small demo datasets also carry, explicitly out of scope for "fix POC blockers only" this milestone and reported here, not suppressed. Every row's available count stayed within the sane bound (<= ${totalActive} active employees).`
     );
   });
 });
@@ -667,18 +712,33 @@ describe("M2 — Step 12: reset and repeat (reproducibility)", () => {
     }
     expect(overAssigned).toBe(0);
 
-    const profilingRows = roster.filter((r) => r.requirement.role === "Profiling");
-    const gapDays = profilingRows.filter((r) => r.gap > 0).map((r) => r.flight.day_of_week);
-    expect(new Set(gapDays)).toEqual(new Set(["Monday", "Tuesday"]));
+    // Criterion 1 reproducibility: zero gaps in the fresh baseline too,
+    // not just the first run -- this used to be where the permanent
+    // Monday/Tuesday Profiling gap was reproduced; now there is no
+    // baseline gap to reproduce.
+    const baselineGapRows = roster.filter((r) => r.gap > 0);
+    expect(baselineGapRows).toEqual([]);
 
-    const mondayProfilingRow = profilingRows.find((r) => r.flight.day_of_week === "Monday")!;
-    const candidates = await getCandidates(mondayProfilingRow.requirement.id);
+    // Criterion 4 reproducibility: the SAME live Tuesday delay on a fresh
+    // database reproduces the same genuine zero-candidate outcome.
+    const tueProfilingRow = roster.find((r) => r.requirement.role === "Profiling" && r.flight.day_of_week === "Tuesday")!;
+    const delayedFlight = (await getWeeklyView(POC_DEMO_WEEK_START)).body.flights.find((f: Flight) => f.id === tueProfilingRow.flight.id)!;
+    const patchRes = await PATCH_operational(
+      new Request(`http://localhost/api/flights/${delayedFlight.id}/operational`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actual_departure: "15:30", status: "delayed" }),
+      }),
+      { params: { id: delayedFlight.id } }
+    );
+    expect(patchRes.status).toBe(200);
+    const candidates = await getCandidates(tueProfilingRow.requirement.id);
     expect(candidates.body.candidates).toHaveLength(0);
 
     record(
       "12. Reset and repeat (reproducibility)",
       "PASS",
-      `A second POST /api/reset-poc-demo against a completely fresh, independent fake database reproduces: 0 over-assigned requirements, the same {Monday, Tuesday} Profiling gap days, and 0 eligible candidates for Monday's Profiling requirement -- byte-identical outcome shape to the first run, confirming the dataset/engine pairing is deterministic, not order- or state-dependent.`
+      `A second POST /api/reset-poc-demo against a completely fresh, independent fake database reproduces: 0 over-assigned requirements, a zero-gap baseline plan (criterion 1), and -- after repeating the exact same AT502/Tuesday live delay -- 0 eligible candidates for the Profiling requirement (criterion 4) -- byte-identical outcome shape to the first run, confirming the dataset/engine pairing is deterministic, not order- or state-dependent.`
     );
 
     // eslint-disable-next-line no-console

@@ -9,16 +9,58 @@ import { pocDemoCompanyOperatingDays } from "./flights";
 /**
  * POC DEMO DATASET — workforce side.
  *
- * 14 NAMED, STABLE employees, sized against lib/demo-poc/flights.ts's real
- * demand to reliably exercise all four PoC demonstration scenarios
- * (docs/ATLAS_POC_PLAN.md Section 6), not for stress-testing or general
- * UI exploration — see lib/seed-data.ts and lib/demo-small/employees.ts
- * for those. Built with the exact same real engine machinery every other
- * dataset uses (getShiftTimesAs, buildStaggeredOffDays,
- * deriveTeamRotation) — nothing about eligibility/scoring/rotation is
- * reimplemented or special-cased for this dataset.
+ * 17 NAMED, STABLE employees, sized against lib/demo-poc/flights.ts's real
+ * demand to reliably exercise all four PoC demonstration scenarios, not
+ * for stress-testing or general UI exploration — see lib/seed-data.ts and
+ * lib/demo-small/employees.ts for those. Built with the exact same real
+ * engine machinery every other dataset uses (getShiftTimesAs,
+ * buildStaggeredOffDays, deriveTeamRotation) — nothing about
+ * eligibility/scoring/rotation is reimplemented or special-cased for this
+ * dataset.
  *
- *  - General T1 Pool (10) — ordinary RAM capacity for AT501/AT502/AT503's
+ * 2026-10-21 (PoC acceptance criteria fix): Profiling headcount raised
+ * from 1 to 3 so the BASELINE generated plan now achieves complete,
+ * zero-gap coverage of every per-flight StaffingRequirement (Gate,
+ * Boarding, Profiling, and Qatar Airways' company_config requirement) —
+ * criterion 1's "zero uncovered requirements." The previous 1-person
+ * Profiling team deliberately left 2 of AT502's 7 weekly instances
+ * permanently, structurally uncovered as a standing "honest failure"
+ * demonstration — that conflicted with criterion 1's explicit zero-gap
+ * baseline requirement once the PoC's acceptance criteria were
+ * formalized. The "honest failure" demonstration (criterion 4) now lives
+ * entirely inside a LIVE disruption scenario instead (see
+ * tests/poc-demo-dataset.test.ts's Scenario D), never in the starting
+ * state. (2 Profiling-qualified people, each with 2 disjoint OFF days,
+ * was tried first and verified NOT sufficient — the engine's own
+ * demand-aware OFF-window water-filling, lib/planning/off-window.ts,
+ * is a heuristic, not a global optimizer, and left one day with both
+ * people off; 3 people closes it, empirically re-verified after the
+ * change, not assumed.)
+ *
+ * SEPARATE, PRE-EXISTING, OUT-OF-SCOPE LIMITATION (not touched by this
+ * fix, not specific to this dataset): the T1 Check-in ZONE coverage model
+ * (lib/planning/checkin-zone-placement.ts /
+ * lib/planning/checkin-capacity-timeline.ts) is its own distinct metric
+ * from "Requirements covered"/"Staffing gaps" above — see
+ * components/planning-summary-bar.tsx's own doc comment, which explicitly
+ * labels it "a DIFFERENT kind of number... one zone requirement can
+ * represent several flights' combined workload, not one flight+role
+ * slot," and the model itself is commented "prototype/configurable demand
+ * policy, not yet confirmed management policy." It derives purely from
+ * whatever Stage 6 already decided for per-flight roles, with no
+ * placement of its own (confirmed: zoneAssignments.length is always 0).
+ * This dataset still leaves a real, engine-computed Check-in zone
+ * shortfall in the early-morning/late-evening hours, same as the main and
+ * small demo datasets' own documented Check-in zone gaps (see
+ * lib/demo-small/employees.ts) — a known, shared, cross-dataset
+ * limitation of Stage 6's own shift-code selection (confirmed: adding
+ * extra pure-Check-in headcount was tried and did NOT close it — Stage 6
+ * never selects an overnight/evening-reaching catalog code for anyone in
+ * this dataset, a deeper scoring-engine question outside "fix POC
+ * blockers only, no unrelated refactoring" for this milestone). Left
+ * as-is and reported, not suppressed.
+ *
+ *  - General T1 Pool (11) — ordinary RAM capacity for AT501/AT502/AT503's
  *    universal Gate + Boarding demand. Shift codes are baseline anchors
  *    only (rest-hour calc, off-day staggering) — the real day-to-day code
  *    is demand-driven, assigned fresh each day by the real Stage 6 shift
@@ -31,13 +73,27 @@ import { pocDemoCompanyOperatingDays } from "./flights";
  *    untouched, and to leave at least one real "recommended" and one real
  *    "flagged" replacement candidate for the vacant Gate slot — nothing
  *    about this outcome is hand-asserted; it's what the real engine
- *    actually produces from this roster.
- *  - Profiling (1) — covers AT502's daily Profiling requirement. A single
- *    person working a normal 5-day week (2 OFF days, the same confirmed
- *    rule every employee here follows) can physically cover at most 5 of
- *    AT502's 7 weekly instances, so at least 2 days are a REAL,
- *    headcount-forced Profiling gap (Scenario D) regardless of which 2
- *    days the engine's own OFF-day optimizer picks.
+ *    actually produces from this roster. The eleventh (Yassine Alami,
+ *    Gate-only, MT01) is a 2026-10-21 criterion-1 addition: with only 3
+ *    early-shift Gate-qualified people (Gamal/Reda/Hanae), the OFF-window
+ *    planner happened to land all three off the SAME day (Saturday),
+ *    leaving only the two 08:00-start NR01 Gate+Check-in people on
+ *    roster — too late to reach AT501's 06:30 Gate window, a real,
+ *    engine-computed gap confirmed by a direct per-day dump. A fourth
+ *    early-shift body closes it, re-verified empirically, not assumed.
+ *  - Profiling (3) — covers AT502's daily Profiling requirement. Each of
+ *    the three has their own 2 OFF days (Khadija: Mon/Tue, Salma: Thu/Fri,
+ *    Ilham: Sat/Sun); the real engine's own demand-aware OFF-window
+ *    planner (not this dataset) decides exactly who ends up rostered on
+ *    which day, but with three people spread this way every one of the 7
+ *    days empirically ends up with at least one Profiling-qualified
+ *    person on roster — verified via a direct per-day dump of the
+ *    generated plan's real assignments, not assumed from the seed data.
+ *    Four of the seven days are covered by exactly one of the three,
+ *    which is what makes a live delay scenario against one of those
+ *    single-coverage days (not a permanent baseline shortfall) a
+ *    genuinely unresolvable "no eligible replacement" case for criterion
+ *    4 — see tests/poc-demo-dataset.test.ts's Scenario D.
  *  - Qatar Airways (3) — real demand: 2 agents/flight, Mon/Wed/Fri only
  *    (see flights.ts's QR601), headcount/off-days derived through the same
  *    Rotation Feasibility Engine every other dataset's foreign-company
@@ -97,17 +153,81 @@ const GENERAL_T1_POOL = [
   { id: "poc-othmane-rifai", name: "Othmane Rifai", skills: ["Boarding", "Check-in"], shift_code: "NR01", weekly_hours: 24 },
   { id: "poc-nisrine-fassi", name: "Nisrine Fassi", skills: ["Check-in", "Weight Control"], shift_code: "MT03", weekly_hours: 24 },
   { id: "poc-youssef-benali", name: "Youssef Benali", skills: ["Check-in", "Weight Control"], shift_code: "NR01", weekly_hours: 24 },
+  // 2026-10-21 (PoC acceptance criterion 1 fix): a fourth early-shift
+  // Gate-qualified employee. With only 3 (Gamal/Reda/Hanae, all an early
+  // MT0x code — AT501's 06:30-07:30 Gate window needs someone whose shift
+  // actually starts that early; the two NR01 Gate+Check-in people start
+  // at 08:00, too late), the demand-aware OFF-window planner's own
+  // heuristic (see the Profiling section's doc comment above for the same
+  // caveat) happened to land all three on the SAME day off (Saturday),
+  // leaving zero early-shift Gate coverage that one day — confirmed by a
+  // direct per-day dump of the generated plan, not assumed. A fourth
+  // early-shift body closes it — re-verified empirically after the
+  // change (see tests/poc-demo-dataset.test.ts's criterion 1 assertion).
+  { id: "poc-yassine-alami", name: "Yassine Alami", skills: ["Gate"], shift_code: "MT01", weekly_hours: 24 },
 ];
 
 /**
- * Profiling (1) — the single Profiling-qualified employee, Scenario D's
- * genuinely unresolvable gap. Also carries a real second RAM skill
- * (Boarding) so idle time outside AT502's Profiling window is ordinary
- * reachable capacity, consistent with every other dataset's 2026-10-05
- * correction (see lib/demo-small/employees.ts's module comment for the
- * full explanation of why the engine already supports this).
+ * Profiling (3) — 2026-10-21 (PoC acceptance criterion 1 fix): raised
+ * from 1 to 3 Profiling-qualified employees, each with explicitly chosen
+ * OFF days (not run through buildStaggeredOffDays's generic rotation —
+ * see below), so the baseline plan has zero Profiling gaps across all 7
+ * days of the week. The generation engine's own demand-aware OFF-window
+ * planner (lib/planning/specialized-team-generation.ts's
+ * planSpecializedOffWindows, same machinery as off-window.ts's
+ * cross-population water-filling) ultimately decides each week's REAL
+ * per-day roster from these three people's inputs — it does NOT simply
+ * honor the off_days below verbatim (confirmed by direct inspection of
+ * generated plan output). Two people with perfectly disjoint 2-day OFF
+ * blocks (Mon/Tue + Thu/Fri) were tried FIRST and found NOT sufficient:
+ * the planner's own heuristic (a water-filling refinement, not a global
+ * optimizer) still left one day with both people off, re-verified by
+ * dumping the actual generated per-day Profiling assignment, not assumed
+ * from the seed. A third person closes it — every one of the 7 days
+ * empirically has at least one Profiling-qualified person rostered,
+ * closing what used to be a permanent, headcount-forced baseline gap
+ * (the dataset's previous 1-person design deliberately left 2 days a week
+ * uncovered as Scenario D's "honest failure" case — see
+ * tests/poc-demo-dataset.test.ts for the replacement: a genuinely
+ * UNRESOLVABLE gap is now demonstrated via a LIVE disruption on one of
+ * the days only a single Profiling-qualified person ends up rostered,
+ * never by a standing structural shortfall in the baseline plan itself,
+ * per the explicit "zero uncovered requirements" baseline requirement).
+ * All three carry a real second RAM skill (Boarding) so idle time outside
+ * AT502's Profiling window is ordinary reachable capacity, consistent
+ * with every other dataset's 2026-10-05 correction (see
+ * lib/demo-small/employees.ts's module comment for the full explanation
+ * of why the engine already supports this).
  */
-const PROFILING = [{ id: "poc-khadija-mernissi", name: "Khadija Mernissi", skills: ["Profiling", "Boarding"], shift_code: "NR02", weekly_hours: 24 }];
+const PROFILING: Omit<Employee, "weekly_shifts">[] = [
+  buildEmployee({
+    id: "poc-khadija-mernissi",
+    name: "Khadija Mernissi",
+    skills: ["Profiling", "Boarding"],
+    assignment: "Profiling",
+    shift_code: "NR02",
+    weekly_hours: 24,
+    off_days: ["Monday", "Tuesday"],
+  }),
+  buildEmployee({
+    id: "poc-salma-idrissi",
+    name: "Salma Idrissi",
+    skills: ["Profiling", "Boarding"],
+    assignment: "Profiling",
+    shift_code: "NR02",
+    weekly_hours: 24,
+    off_days: ["Thursday", "Friday"],
+  }),
+  buildEmployee({
+    id: "poc-ilham-benkirane",
+    name: "Ilham Benkirane",
+    skills: ["Profiling", "Boarding"],
+    assignment: "Profiling",
+    shift_code: "NR02",
+    weekly_hours: 24,
+    off_days: ["Saturday", "Sunday"],
+  }),
+];
 
 /** Builds the flat-rule (non-foreign) employees above, each staggered 2 OFF days/week, Wednesday kept working (so AT503's Wednesday delay scenario always has real incumbents on roster). */
 function buildFlatRuleEmployees(
@@ -178,7 +298,11 @@ const QATAR_AIRWAYS_NAMES = [
 
 export const POC_DEMO_FLAT_RULE_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = [
   ...buildFlatRuleEmployees(GENERAL_T1_POOL, "General T1 Pool"),
-  ...buildFlatRuleEmployees(PROFILING, "Profiling"),
+  // PROFILING is built directly above (explicit, disjoint off-days,
+  // assignment already set to "Profiling"), not routed through
+  // buildFlatRuleEmployees's generic stagger — see its own doc comment
+  // for why.
+  ...PROFILING,
 ];
 
 export const POC_DEMO_QATAR_AIRWAYS_EMPLOYEES: Omit<Employee, "weekly_shifts">[] = buildForeignCompanyGroup(
@@ -188,5 +312,5 @@ export const POC_DEMO_QATAR_AIRWAYS_EMPLOYEES: Omit<Employee, "weekly_shifts">[]
   24
 );
 
-// 10 General T1 Pool + 1 Profiling + 3 Qatar Airways = 14 employees total.
+// 11 General T1 Pool + 3 Profiling + 3 Qatar Airways = 17 employees total.
 export const POC_DEMO_EMPLOYEE_COUNT = POC_DEMO_FLAT_RULE_EMPLOYEES.length + POC_DEMO_QATAR_AIRWAYS_EMPLOYEES.length;

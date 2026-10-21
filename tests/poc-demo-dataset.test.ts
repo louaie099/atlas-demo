@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { generateDraftWeeklyPlan } from "../lib/planning/generate-draft-plan";
 import { buildDraftPlanBundle } from "../lib/planning/weekly-plan-service";
 import { computeWeeklyStaffingRequirements } from "../lib/planning/weekly-requirements";
 import { buildPersistedWeeklyPlanView } from "../lib/planning/persisted-plan-view";
@@ -17,47 +16,60 @@ import {
 import { POC_DEMO_EMPLOYEE_COUNT } from "../lib/demo-poc/employees";
 
 /**
- * M1 verification — the PoC demo dataset (docs/ATLAS_POC_PLAN.md Section
- * 5). Every assertion here runs the REAL planning/scoring engine against
- * the real dataset and checks what it actually produces; nothing is
- * asserted from a hand-predicted outcome. This is the dry-run evidence
- * the approved plan calls for, kept as a permanent regression so a future
- * change to the dataset OR the engine that breaks one of the four demo
- * scenarios fails a test instead of being discovered live in front of
- * management.
+ * M1 verification — the PoC demo dataset. Every assertion here runs the
+ * REAL planning/scoring engine against the real dataset and checks what it
+ * actually produces; nothing is asserted from a hand-predicted outcome.
+ * This is the dry-run evidence the PoC acceptance criteria call for, kept
+ * as a permanent regression so a future change to the dataset OR the
+ * engine that breaks one of the four demo scenarios fails a test instead
+ * of being discovered live in front of management.
  *
- * Scenario mapping (docs/ATLAS_POC_PLAN.md Section 6):
- *   A — generate the week, see a valid plan with a genuine, identified gap.
- *   B — delay AT503/Wednesday, see the real invalidated assignment and
- *       real replacement candidates (recommended + flagged, with reasons).
+ * 2026-10-21 (PoC acceptance criteria formalized — see the delivered PoC
+ * report): headcount raised from 14 to 17 (Profiling: 1 -> 3, plus one
+ * extra early-shift Gate-qualified body) so the
+ * BASELINE plan now has ZERO uncovered StaffingRequirement rows (Gate,
+ * Boarding, Profiling, Qatar Airways), satisfying acceptance criterion 1's
+ * explicit "zero uncovered requirements" — this used to be a deliberate,
+ * standing gap (AT502's Profiling requirement, uncovered 2 of 7 days no
+ * matter what) used as the "honest failure" demonstration. That
+ * demonstration (criterion 4) now lives entirely inside a LIVE disruption
+ * (Scenario D, below) instead, never in the starting state.
+ *
+ * Scenario mapping:
+ *   A — generate the week, see a valid, COMPLETE plan: zero over-assigned
+ *       requirements, zero double-bookings, zero uncovered Gate/Boarding/
+ *       Profiling/company_config requirements.
+ *   B — delay AT503/Wednesday, see the real invalidated Gate assignment
+ *       and real replacement candidates (recommended + flagged, with
+ *       reasons) — the plan starts healthy; this is what INTRODUCES the
+ *       gap.
  *   C — (the actual reassignment call) is a manual UI/API action, not
  *       re-tested here — /api/confirm-reassignment already has its own
  *       coverage; what THIS dataset must prove is that Scenario B's
  *       candidate list genuinely contains at least one eligible
  *       replacement for C to act on, which the test below confirms.
- *   D — AT502's Profiling requirement on a day the single Profiling-
- *       qualified employee is off-roster: genuinely zero candidates.
+ *   D — a SEPARATE live disruption: delay AT502/Tuesday (whose Profiling
+ *       requirement, on a healthy baseline day, is covered by the ONE
+ *       Profiling-qualified person rostered that day) far enough that her
+ *       shift no longer reaches the new window. No other Profiling-
+ *       qualified employee is on roster that day (the other two are
+ *       genuinely off), so the replacement search comes back with zero
+ *       real candidates — a genuine, engine-computed "no eligible
+ *       replacement" case, caused by a live disruption, never a
+ *       pre-existing baseline shortfall.
+ *
+ * T1 Check-in ZONE coverage (a separate, pre-existing, cross-dataset,
+ * explicitly-labeled "prototype/unconfirmed policy" metric — see
+ * components/planning-summary-bar.tsx's own doc comment and
+ * lib/demo-poc/employees.ts's module comment for the full explanation of
+ * why this is NOT the same thing as "uncovered requirements") is left
+ * unchanged and still shows a real shortfall below — reported, not
+ * suppressed, and explicitly out of scope for this milestone.
  */
 
-describe("PoC demo dataset — composition", () => {
-  it("has exactly 14 employees and 5 distinct flight programs", () => {
-    expect(POC_DEMO_EMPLOYEES.length).toBe(14);
-    expect(POC_DEMO_EMPLOYEE_COUNT).toBe(14);
-    const distinctFlightNumbers = new Set(POC_DEMO_FLIGHTS.map((f) => f.flight_number));
-    expect(distinctFlightNumbers.size).toBe(5);
-  });
-
-  it("includes exactly one Profiling-qualified employee and one foreign-committed group", () => {
-    const profilingQualified = POC_DEMO_EMPLOYEES.filter((e) => e.skills.includes("Profiling"));
-    expect(profilingQualified.length).toBe(1);
-    const qatarAuthorized = POC_DEMO_EMPLOYEES.filter((e) => e.foreign_company_authorizations.includes("Qatar Airways"));
-    expect(qatarAuthorized.length).toBe(3);
-  });
-});
-
-describe("Scenario A — generated plan is valid and has a genuine, identified gap", () => {
-  const bundle = buildDraftPlanBundle({
-    planId: "plan-poc-demo-verify",
+function buildBundle(planId: string) {
+  return buildDraftPlanBundle({
+    planId,
     weekStart: POC_DEMO_WEEK_START,
     weekLabel: POC_DEMO_WEEK_LABEL,
     revision: 1,
@@ -66,6 +78,26 @@ describe("Scenario A — generated plan is valid and has a genuine, identified g
     config: POC_DEMO_CONFIG,
     daysOrder: POC_DEMO_DAYS_WITH_DATA,
   });
+}
+
+describe("PoC demo dataset — composition", () => {
+  it("has exactly 17 employees and 5 distinct flight programs", () => {
+    expect(POC_DEMO_EMPLOYEES.length).toBe(17);
+    expect(POC_DEMO_EMPLOYEE_COUNT).toBe(17);
+    const distinctFlightNumbers = new Set(POC_DEMO_FLIGHTS.map((f) => f.flight_number));
+    expect(distinctFlightNumbers.size).toBe(5);
+  });
+
+  it("includes exactly three Profiling-qualified employees and one foreign-committed group", () => {
+    const profilingQualified = POC_DEMO_EMPLOYEES.filter((e) => e.skills.includes("Profiling"));
+    expect(profilingQualified.length).toBe(3);
+    const qatarAuthorized = POC_DEMO_EMPLOYEES.filter((e) => e.foreign_company_authorizations.includes("Qatar Airways"));
+    expect(qatarAuthorized.length).toBe(3);
+  });
+});
+
+describe("Scenario A — generated plan is valid and has COMPLETE (zero-gap) staffing coverage", () => {
+  const bundle = buildBundle("plan-poc-demo-verify");
   const requirements = computeWeeklyStaffingRequirements(POC_DEMO_FLIGHTS, POC_DEMO_CONFIG);
 
   it("never persists a discrete automatic zone assignment row (same invariant as the main/small datasets)", () => {
@@ -90,20 +122,23 @@ describe("Scenario A — generated plan is valid and has a genuine, identified g
     }
   });
 
-  it("has a genuine, non-zero Profiling shortfall across the week (the gap Scenario A/D shares)", () => {
+  it("criterion 1 — ZERO uncovered StaffingRequirement rows (Gate, Boarding, Profiling, Qatar Airways)", () => {
+    expect(requirements.length).toBeGreaterThan(0);
+    const uncovered = requirements.filter(
+      (r) => !bundle.assignments.some((a) => a.staffing_requirement_id === r.id) || bundle.assignments.filter((a) => a.staffing_requirement_id === r.id).length < r.total_requirement
+    );
+    expect(uncovered).toEqual([]);
+
+    // Specifically re-confirm Profiling (the role the previous 1-person
+    // design deliberately left short): all 7 of AT502's weekly instances
+    // are now genuinely covered.
     const profilingReqs = requirements.filter((r) => r.role === "Profiling");
     expect(profilingReqs.length).toBe(7); // AT502 runs daily
     const coveredDays = profilingReqs.filter((r) => bundle.assignments.some((a) => a.staffing_requirement_id === r.id));
-    const uncoveredDays = profilingReqs.filter((r) => !bundle.assignments.some((a) => a.staffing_requirement_id === r.id));
-    // Headcount-forced: 1 Profiling-qualified employee can cover at most
-    // 5 of 7 days (2 OFF days/week, the same confirmed rule every
-    // employee follows) — so at least 2 days MUST be short, regardless of
-    // which 2 the engine's own OFF-day optimizer picks.
-    expect(uncoveredDays.length).toBeGreaterThanOrEqual(2);
-    expect(coveredDays.length).toBeGreaterThanOrEqual(5);
+    expect(coveredDays.length).toBe(7);
   });
 
-  it("has at least one genuine T1 Check-in zone coverage gap", () => {
+  it("has at least one genuine T1 Check-in ZONE coverage gap (a separate, pre-existing, cross-dataset, out-of-scope metric — see this dataset's own module comment)", () => {
     const view = buildPersistedWeeklyPlanView(
       bundle.plan,
       bundle.rosterEntries,
@@ -127,76 +162,58 @@ describe("Scenario A — generated plan is valid and has a genuine, identified g
   });
 });
 
-describe("Scenario D — AT502's Profiling requirement is genuinely unresolvable on an uncovered day", () => {
-  it("finds a day with zero real candidates for AT502's Profiling requirement", () => {
-    const draft = generateDraftWeeklyPlan(
-      POC_DEMO_FLIGHTS,
-      POC_DEMO_EMPLOYEES,
-      [],
-      POC_DEMO_CONFIG,
-      POC_DEMO_DAYS_WITH_DATA,
-      POC_DEMO_WEEK_LABEL,
-      POC_DEMO_WEEK_START
-    );
+describe("Scenario D — a LIVE delay to AT502/Tuesday genuinely leaves the Profiling requirement with zero eligible replacements", () => {
+  it("invalidates the sole Profiling incumbent rostered that day, with no other Profiling-qualified employee on roster to replace her", () => {
     const requirements = computeWeeklyStaffingRequirements(POC_DEMO_FLIGHTS, POC_DEMO_CONFIG);
-    const bundle = buildDraftPlanBundle({
-      planId: "plan-poc-demo-verify-d",
-      weekStart: POC_DEMO_WEEK_START,
-      weekLabel: POC_DEMO_WEEK_LABEL,
-      revision: 1,
-      flights: POC_DEMO_FLIGHTS,
-      employees: POC_DEMO_EMPLOYEES,
-      config: POC_DEMO_CONFIG,
-      daysOrder: POC_DEMO_DAYS_WITH_DATA,
-    });
+    const bundle = buildBundle("plan-poc-demo-verify-d");
 
-    const profilingReqs = requirements.filter((r) => r.role === "Profiling");
-    const uncoveredDayReq = profilingReqs.find(
-      (r) => !bundle.assignments.some((a) => a.staffing_requirement_id === r.id)
-    );
-    expect(uncoveredDayReq).toBeDefined();
+    const at502Tue = POC_DEMO_FLIGHTS.find((f) => f.flight_number === "AT502" && f.day_of_week === "Tuesday")!;
+    expect(at502Tue.scheduled_departure).toBe("11:30");
 
-    const flight = POC_DEMO_FLIGHTS.find((f) => f.id === uncoveredDayReq!.flight_id)!;
-    const window = getRequirementWindow(uncoveredDayReq!, flight);
-    const pool = buildDayEffectivePoolFromRosterEntries(POC_DEMO_EMPLOYEES, bundle.rosterEntries, flight.day_of_week, flight.flight_date);
-    const occupied = computeBusyWindowsForDay(flight.day_of_week, bundle.assignments, requirements, POC_DEMO_FLIGHTS, pool);
-    const candidates = scoreCandidates("Profiling", window, pool, POC_DEMO_CONFIG, occupied);
+    const profilingReq = requirements.find((r) => r.flight_id === at502Tue.id && r.role === "Profiling")!;
+    const originalWindow = getRequirementWindow(profilingReq, at502Tue);
+    expect(originalWindow).toEqual({ start: "10:30", end: "11:30" });
 
-    // The genuinely unresolvable case: nobody qualified is even on roster
-    // that day — the one Profiling-qualified employee is off.
+    const pool = buildDayEffectivePoolFromRosterEntries(POC_DEMO_EMPLOYEES, bundle.rosterEntries, "Tuesday", at502Tue.flight_date);
+    const profilingOnRosterBefore = pool.filter((e) => e.skills.includes("Profiling"));
+    // The baseline plan is healthy going in: exactly one Profiling-
+    // qualified person is rostered Tuesday, and her real shift already
+    // covers the original window (this is a live disruption, not a
+    // pre-existing bug).
+    expect(profilingOnRosterBefore).toHaveLength(1);
+    const incumbent = profilingOnRosterBefore[0];
+    expect(isWindowWithinShift(originalWindow, incumbent.shift_start, incumbent.shift_end)).toBe(true);
+    const incumbentId = bundle.assignments.find((a) => a.staffing_requirement_id === profilingReq.id)?.employee_id;
+    expect(incumbentId).toBe(incumbent.id);
+
+    // The live delay: AT502/Tuesday 11:30 -> 15:30 (4h). New window:
+    // 14:30-15:30 (standard-aircraft 60-minute lead) — past the
+    // incumbent's own real shift end.
+    const delayedFlight = { ...at502Tue, scheduled_departure: "15:30" };
+    const delayedWindow = getRequirementWindow(profilingReq, delayedFlight);
+    expect(delayedWindow).toEqual({ start: "14:30", end: "15:30" });
+    expect(isWindowWithinShift(delayedWindow, incumbent.shift_start, incumbent.shift_end)).toBe(false);
+
+    // Real replacement search for the now-vacant Profiling slot, excluding
+    // whoever already (invalidly) holds it — the SAME engine Find Agent
+    // uses, never a separate or looser rule.
+    const occupied = computeBusyWindowsForDay("Tuesday", bundle.assignments, requirements, POC_DEMO_FLIGHTS, pool);
+    const notYetAssigned = pool.filter((e) => e.id !== incumbent.id);
+    const candidates = scoreCandidates("Profiling", delayedWindow, notYetAssigned, POC_DEMO_CONFIG, occupied);
+
+    // The genuinely unresolvable case: no OTHER Profiling-qualified
+    // employee is even on roster Tuesday (the other two are genuinely
+    // off that day) — zero real candidates, honestly reported, never
+    // fabricated.
     expect(candidates.length).toBe(0);
-    expect(pool.some((e) => e.skills.includes("Profiling"))).toBe(false);
-
-    // Sanity: a DIFFERENT day's Profiling requirement (one the engine DID
-    // cover) genuinely has the qualified employee on roster — proving the
-    // zero-candidate day above is a real headcount gap, not a dataset-wide
-    // bug that would make every day show zero.
-    const coveredDayReq = profilingReqs.find((r) => bundle.assignments.some((a) => a.staffing_requirement_id === r.id));
-    expect(coveredDayReq).toBeDefined();
-    const coveredFlight = POC_DEMO_FLIGHTS.find((f) => f.id === coveredDayReq!.flight_id)!;
-    const coveredPool = buildDayEffectivePoolFromRosterEntries(
-      POC_DEMO_EMPLOYEES,
-      bundle.rosterEntries,
-      coveredFlight.day_of_week,
-      coveredFlight.flight_date
-    );
-    expect(coveredPool.some((e) => e.skills.includes("Profiling"))).toBe(true);
+    expect(pool.filter((e) => e.skills.includes("Profiling") && e.id !== incumbent.id)).toHaveLength(0);
   });
 });
 
 describe("Scenario B/C — a live delay to AT503/Wednesday genuinely invalidates one assignment and offers real replacements", () => {
   it("invalidates the real Gate incumbent's assignment and leaves Boarding untouched, with real recommended + flagged replacement candidates", () => {
     const requirements = computeWeeklyStaffingRequirements(POC_DEMO_FLIGHTS, POC_DEMO_CONFIG);
-    const bundle = buildDraftPlanBundle({
-      planId: "plan-poc-demo-verify-bc",
-      weekStart: POC_DEMO_WEEK_START,
-      weekLabel: POC_DEMO_WEEK_LABEL,
-      revision: 1,
-      flights: POC_DEMO_FLIGHTS,
-      employees: POC_DEMO_EMPLOYEES,
-      config: POC_DEMO_CONFIG,
-      daysOrder: POC_DEMO_DAYS_WITH_DATA,
-    });
+    const bundle = buildBundle("plan-poc-demo-verify-bc");
 
     const at503Wed = POC_DEMO_FLIGHTS.find((f) => f.flight_number === "AT503" && f.day_of_week === "Wednesday")!;
     expect(at503Wed.scheduled_departure).toBe("14:00");
