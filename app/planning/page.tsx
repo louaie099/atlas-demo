@@ -216,7 +216,7 @@ export default function PlanningPage() {
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <div className="flex items-center gap-2.5 flex-wrap">
-            <h1 className="text-2xl font-semibold text-ink">Monthly Planning</h1>
+            <h1 className="text-[28px] leading-tight font-bold tracking-tight text-ink">Planning</h1>
             <span
               className={`px-2.5 py-1 rounded-full text-xs font-medium uppercase tracking-wide ${
                 plan === undefined && loadError ? "bg-bad-50 text-bad-700" : "bg-gray-100 text-gray-600"
@@ -231,10 +231,10 @@ export default function PlanningPage() {
                   : "Current Plan"}
             </span>
           </div>
-          <p className="text-muted mt-1 max-w-2xl">
+          <p className="text-[15px] text-muted mt-1.5 max-w-2xl">
             {plan === null
               ? "No plan has been generated for this week yet. Click Make Planning to generate one from the current flight schedule."
-              : "ATLAS generated this plan from the weekly flight program -- every requirement traces back to a flight and a rule. Normal staffing below is assigned directly as part of the plan; management can review and edit it directly here, and changes flow straight through to Live Operations. Only exceptional situations -- a renfort decision, a live-operational reassignment -- are surfaced as recommendations awaiting a human decision. After changing the flight schedule or the planning rules above, click Make Planning to regenerate this plan from the updated program -- a page refresh alone never does this."}
+              : "Built from the flight program and your rules. Every requirement traces back to a flight and a rule. Edit assignments here and they flow straight to Live operations; only exceptions come back to you as decisions."}
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
@@ -277,7 +277,9 @@ export default function PlanningPage() {
 
       {plan && isStale && (
         <div className="bg-warn-50 border border-warn-200 text-warn-700 rounded-xl2 px-4 py-3 text-sm flex items-center justify-between gap-3">
-          <span>The flight schedule or planning rules have changed since this draft was generated. Click Make Planning to update it.</span>
+          <span>
+            <strong>Plan is out of date.</strong> The flight schedule or planning rules changed since this draft was generated. Click Make Planning to update it.
+          </span>
         </div>
       )}
 

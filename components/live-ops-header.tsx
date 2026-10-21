@@ -56,7 +56,7 @@ export function LiveOpsHeader({
     <div className="bg-card border border-border rounded-xl2 shadow-soft px-5 py-4 flex flex-col gap-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-xs font-semibold tracking-wide text-muted uppercase">Live Operations</h1>
+          <h1 className="text-xs font-semibold tracking-wider text-muted uppercase">Live operations</h1>
           <p className="text-lg font-semibold text-ink mt-0.5">{date}</p>
         </div>
         {rightSlot}

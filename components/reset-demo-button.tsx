@@ -76,7 +76,7 @@ function ResetButton() {
 
   if (confirming) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted">Wipe all data (no dataset reloaded)?</span>
         <Button variant="danger" onClick={() => run("/api/reset-empty")} disabled={loading}>
           {loading ? "Resetting…" : "Confirm"}
@@ -90,7 +90,7 @@ function ResetButton() {
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <Button variant="secondary" onClick={() => setConfirming(true)}>
         Reset
       </Button>
@@ -108,7 +108,7 @@ function LoadDatasetControl() {
 
   if (confirming) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted">Replace all data with “{dataset.label}”?</span>
         <Button variant="danger" onClick={() => run(dataset.endpoint)} disabled={loading}>
           {loading ? "Loading…" : "Confirm"}
@@ -122,7 +122,7 @@ function LoadDatasetControl() {
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <select
         value={selected}
         onChange={(e) => setSelected(e.target.value)}
@@ -145,7 +145,7 @@ function LoadDatasetControl() {
 
 export function ResetDemoButton() {
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex flex-wrap items-center gap-3">
       <ResetButton />
       <LoadDatasetControl />
     </div>

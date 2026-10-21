@@ -17,8 +17,8 @@ export default function AuditPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-2xl font-semibold text-ink">Audit Trail</h1>
-        <p className="text-muted mt-1">
+        <h1 className="text-[28px] leading-tight font-bold tracking-tight text-ink">Audit trail</h1>
+        <p className="text-[15px] text-muted mt-1.5">
           Every recommendation, human decision, and operational event, in order — nothing here was
           executed automatically.
         </p>
