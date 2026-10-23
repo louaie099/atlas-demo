@@ -23,6 +23,10 @@ type ViewTab = "workforce" | "matrix" | "wellbeing";
 
 export default function EmployeesPage() {
   const [view, setView] = useState<ViewTab>("workforce");
+  // Grouped-by-team is the default (2026-10-23 product decision) -- flat,
+  // alphabetical is one toggle away for anyone who specifically wants a
+  // single list instead.
+  const [groupByTeam, setGroupByTeam] = useState(true);
   const [employees, setEmployees] = useState<EnrichedEmployee[] | null>(null);
   const [demoToday, setDemoToday] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -118,7 +122,27 @@ export default function EmployeesPage() {
           {employees && <WorkforceSummaryLine employees={employees} />}
 
           <div className="flex flex-wrap items-center justify-between gap-3">
-            {employees && <EmployeeFilters filters={filters} onChange={setFilters} allSkills={allSkills} />}
+            <div className="flex flex-wrap items-center gap-3">
+              {employees && <EmployeeFilters filters={filters} onChange={setFilters} allSkills={allSkills} />}
+              <div className="flex gap-1 bg-white border border-border rounded-lg p-1 text-xs">
+                <button
+                  onClick={() => setGroupByTeam(true)}
+                  className={`px-2.5 py-1 rounded-md font-medium ${
+                    groupByTeam ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+                  }`}
+                >
+                  By Team
+                </button>
+                <button
+                  onClick={() => setGroupByTeam(false)}
+                  className={`px-2.5 py-1 rounded-md font-medium ${
+                    !groupByTeam ? "bg-brand-50 text-brand-700" : "text-muted hover:text-ink"
+                  }`}
+                >
+                  All (A–Z)
+                </button>
+              </div>
+            </div>
             <div className="flex gap-2">
               <ImportEmployeesDialog onImported={loadEmployees} />
               <AddEmployeeForm onAdded={loadEmployees} />
@@ -128,7 +152,7 @@ export default function EmployeesPage() {
           {employees === null ? (
             <p className="text-sm text-muted">Loading…</p>
           ) : (
-            <EmployeeTable employees={filtered} onSelect={setSelectedId} />
+            <EmployeeTable employees={filtered} onSelect={setSelectedId} groupByTeam={groupByTeam} />
           )}
         </>
       )}
