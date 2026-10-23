@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Employee } from "@/lib/types";
 import { AddEmployeeForm } from "@/components/add-employee-form";
+import { ImportEmployeesDialog } from "@/components/import-employees-dialog";
 import { WorkforceSummaryLine } from "@/components/employees/workforce-summary-line";
 import { EmployeeFilters, EmployeeFilterState } from "@/components/employees/employee-filters";
 import { EmployeeTable } from "@/components/employees/employee-table";
@@ -118,7 +119,10 @@ export default function EmployeesPage() {
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             {employees && <EmployeeFilters filters={filters} onChange={setFilters} allSkills={allSkills} />}
-            <AddEmployeeForm onAdded={loadEmployees} />
+            <div className="flex gap-2">
+              <ImportEmployeesDialog onImported={loadEmployees} />
+              <AddEmployeeForm onAdded={loadEmployees} />
+            </div>
           </div>
 
           {employees === null ? (
