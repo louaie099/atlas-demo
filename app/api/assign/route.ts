@@ -7,7 +7,8 @@ import { planIdForWeek, fetchAllAssignmentsForPlan, fetchAllRequirementsForFligh
 import { previousWeekStart } from "@/lib/planning/rotation-context";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
-import { ROLE_HEADER, getRoleFromHeader, canManageOperations } from "@/lib/roles";
+import { canManageOperations } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
 
 const PLANNER_NAME = "Mohammed Alaoui";
@@ -43,7 +44,7 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageOperations(role)) {
     return NextResponse.json({ error: "Viewers cannot make assignments — Planner or Administrator role required." }, { status: 403 });
   }

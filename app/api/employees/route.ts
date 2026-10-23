@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { computeEmployeeDaySummary } from "@/lib/employee-status";
 import { DEMO_TODAY } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight } from "@/lib/types";
-import { ROLE_HEADER, getRoleFromHeader, canManageEmployees } from "@/lib/roles";
+import { canManageEmployees } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 import { fetchAllTableRows } from "@/lib/planning/weekly-plan-service";
 
 export const dynamic = "force-dynamic";
@@ -75,7 +76,7 @@ function slugify(name: string): string {
  * Administrator role header is rejected regardless of what the UI showed.
  */
 export async function POST(req: Request) {
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageEmployees(role)) {
     return NextResponse.json(
       { error: "Administrator permission required to create employees." },

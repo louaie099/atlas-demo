@@ -4,7 +4,8 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { computeEmployeeDaySummary } from "@/lib/employee-status";
 import { DAYS_WITH_DATA } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight, AuditLogEntry } from "@/lib/types";
-import { ROLE_HEADER, getRoleFromHeader, canManageEmployees } from "@/lib/roles";
+import { canManageEmployees } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 import { fetchAllTableRows } from "@/lib/planning/weekly-plan-service";
 
 export const dynamic = "force-dynamic";
@@ -70,7 +71,7 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
  * asked for.
  */
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageEmployees(role)) {
     return NextResponse.json(
       { error: "Administrator permission required to edit employees." },

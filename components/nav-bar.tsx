@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { ReactNode } from "react";
 import { ResetDemoButton } from "./reset-demo-button";
 import { useRole } from "./role-context";
 import { ROLES, ROLE_LABELS, UserRole } from "@/lib/roles";
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 const iconProps = {
   width: 18,
@@ -76,7 +77,14 @@ const links: { href: string; label: string; icon: ReactNode }[] = [
 ];
 
 function RoleSwitcher() {
-  const { role, setRole } = useRole();
+  const { role, setRole, authenticated, demoMode } = useRole();
+
+  // Once a real session exists, or this deployment hasn't opted into demo
+  // mode, there is nothing for this control to do -- role comes from the
+  // server (see lib/resolve-role.ts), and a client-side dropdown pretending
+  // otherwise would be actively misleading.
+  if (authenticated || !demoMode) return null;
+
   return (
     <label className="flex flex-col gap-1 text-xs text-muted">
       Viewing as
@@ -105,6 +113,54 @@ function RoleChip() {
   );
 }
 
+/**
+ * Real sign-in state -- see docs/known-limitations/auth-and-rls.md. Shows a
+ * "Sign in" link when nobody's authenticated, or the signed-in email + the
+ * server-resolved role (never the demo role) + a sign-out button once they
+ * are. This is the one place in the sidebar that reflects what the SERVER
+ * actually trusts, as distinct from RoleChip/RoleSwitcher's demo-only
+ * client-side role, which only ever applies when signed out.
+ */
+function AuthStatus() {
+  const router = useRouter();
+  const { authenticated, email, role, loading } = useRole();
+
+  if (loading) return null;
+
+  if (!authenticated) {
+    return (
+      <Link
+        href="/login"
+        className="mx-2 flex items-center justify-center rounded-lg bg-white px-3 py-2 text-xs font-medium text-navy-900 hover:bg-gray-100"
+      >
+        Sign in
+      </Link>
+    );
+  }
+
+  async function handleSignOut() {
+    const supabase = getSupabaseBrowserClient();
+    await supabase.auth.signOut();
+    router.push("/login");
+    router.refresh();
+  }
+
+  return (
+    <div className="mx-2 flex flex-col gap-1.5 rounded-lg border border-navy-700 px-3 py-2 text-xs text-navy-dim">
+      <span className="truncate" title={email ?? undefined}>
+        {email} <span className="text-white font-medium">({ROLE_LABELS[role]})</span>
+      </span>
+      <button
+        type="button"
+        onClick={handleSignOut}
+        className="self-start rounded-md border border-navy-700 px-2 py-1 text-navy-dim hover:bg-navy-800"
+      >
+        Sign out
+      </button>
+    </div>
+  );
+}
+
 function Logo() {
   return (
     <Link href="/" className="flex items-center gap-3 px-2 shrink-0">
@@ -127,7 +183,8 @@ export function Sidebar() {
   return (
     <aside className="bg-navy-900 lg:w-60 lg:shrink-0 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto flex flex-col gap-3 lg:gap-7 px-3 py-3 lg:px-4 lg:py-6">
       <Logo />
-      <div className="hidden lg:block -mt-3">
+      <div className="hidden lg:flex lg:flex-col lg:gap-2 -mt-3">
+        <AuthStatus />
         <RoleChip />
       </div>
 

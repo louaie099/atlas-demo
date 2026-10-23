@@ -12,6 +12,7 @@
     "seed:small-demo": "tsx scripts/seed-small-demo.ts"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.45.4",
     "next": "14.2.35",
     "react": "^18.3.1",

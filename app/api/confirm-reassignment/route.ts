@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { confirmReassignment } from "@/lib/live-ops-service";
-import { ROLE_HEADER, getRoleFromHeader, canManageOperations } from "@/lib/roles";
+import { canManageOperations } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,7 @@ export const dynamic = "force-dynamic";
  * may call this, checked server-side.
  */
 export async function POST(req: Request) {
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageOperations(role)) {
     return NextResponse.json({ error: "Viewers cannot make reassignments — Planner or Administrator role required." }, { status: 403 });
   }

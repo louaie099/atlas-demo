@@ -7,7 +7,8 @@ import { loadLaborRules, saveLaborRuleEdit, loadFatigueConfig, saveFatigueConfig
 import { resolveDefaultLaborRules, LABOR_RULE_SEVERITY } from "@/lib/labor-rules";
 import { FatigueConfig } from "@/lib/fatigue-config";
 import { BreakPolicy } from "@/lib/break-policy";
-import { ROLE_HEADER, getRoleFromHeader, canManageLaborRules } from "@/lib/roles";
+import { canManageLaborRules } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 import { buildConfigFromResolvedRules } from "@/lib/seed-data";
 import { auditLaborRuleConfigurationFeasibility } from "@/lib/planning/labor-rule-feasibility";
 
@@ -83,7 +84,7 @@ export async function PUT(req: Request) {
   // Moses's explicit "appear to the planner... configured by the admins"
   // direction. Checked before parsing the body so an unauthorized request
   // never reaches saveLaborRuleEdit/saveFatigueConfig at all.
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageLaborRules(role)) {
     return NextResponse.json(
       { error: "Only an administrator may edit Planning Rules." },
