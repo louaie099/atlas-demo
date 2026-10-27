@@ -759,6 +759,30 @@ export interface FlexibleEmployeeTopUpResult {
  * sum past a per-week hours ceiling — REMOVED 2026-09-29: that ceiling was
  * never a confirmed rule; see hard-work-caps.ts's removal note. The normal
  * target applies unconditionally now, hard caps or not.)
+ *
+ * 2026-10-27 FIX (off_days_not_consecutive parity with the Profiling/
+ * Mesure/foreign-company top-up): computeEmployeeDayCountTopUp's own
+ * "Pass 2: if a real shortfall remains, fall back to the reserved days
+ * too" (roster-generation.ts) can add a day INSIDE the employee's reserved
+ * consecutive-OFF block to close a genuine shortfall — that's correct and
+ * intentional on its own, but it SPLITS what was otherwise a single legal
+ * OFF block into two separated short ones (each individually still under
+ * max_consecutive_off_days, so nothing inside that search catches it) —
+ * exactly the off_days_not_consecutive shape validation.ts's
+ * checkOffDaysSeparated treats as a HARD violation whenever
+ * config.normal_off_days_consecutive is true. specialized-team-
+ * generation.ts's structurally-identical Profiling/Mesure/foreign-company
+ * top-up already guards against this by dropping any addition that lands
+ * inside its own reserved block (see its "Two guards" doc comment); this
+ * function never had the equivalent guard, so every genuine shortfall
+ * among FLEXIBLE pool ("General T1 Pool") employees — not just hard-cap-
+ * excluded ones — could silently fragment their OFF block instead of
+ * surfacing an honest, human-reviewable gap. Recomputing the SAME reserved
+ * block here (chooseTopUpReservedOffDays, the exact pure function
+ * computeEmployeeDayCountTopUp already used internally, with the exact
+ * same inputs) and dropping any addition inside it reproduces that same
+ * honest-gap convention here. No-op when the rule is off or nothing was
+ * added inside the block — every existing test keeps passing unchanged.
  */
 export function computeFlexibleEmployeeTopUp(
   employeeId: string,
@@ -780,6 +804,7 @@ export function computeFlexibleEmployeeTopUp(
 
   const fatigueReasons = fatigueConfig?.enabled ? new Map<string, string[]>() : undefined;
   const shortfall: { day: string; reason: HardCapExclusionReason }[] = [];
+  const preferredStart = preferredWindowStart(daysOrder, ctx.preferredOffDaysByEmployee?.get(employeeId), offWindowLength);
   const additions = computeEmployeeDayCountTopUp(
     employeeId,
     daysOrder,
@@ -793,13 +818,51 @@ export function computeFlexibleEmployeeTopUp(
     offWindowLength,
     proratedObligationHoursForWindow(config, daysOrder.length),
     ctx.t1PeakDemandMinuteByDay,
-    preferredWindowStart(daysOrder, ctx.preferredOffDaysByEmployee?.get(employeeId), offWindowLength),
+    preferredStart,
     fatigueReasons ? { config: fatigueConfig!, reasonsOut: fatigueReasons } : undefined,
     hardCaps
       ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employeeId) ?? 0, shortfallOut: shortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }
       : undefined
   );
-  return { additions, fatigueReasons, shortfall };
+
+  let finalAdditions = additions;
+  if (config.normal_off_days_consecutive) {
+    const freeDays = new Set(daysOrder.filter((d) => !scheduledDays.has(d)));
+    const reserved = chooseTopUpReservedOffDays(daysOrder, freeDays, offWindowLength, preferredStart);
+    if (reserved.size > 0) {
+      const kept = new Map([...additions].filter(([day]) => !reserved.has(day)));
+      // SAFETY (x2): dropping the reserved-window addition can only ever ADD
+      // an OFF day (never remove one), so it must earn its place by actually
+      // curing the split, not just moving it:
+      //  (a) the extra OFF day can land next to an already-OFF day from an
+      //      unrelated cause (a demand-driven gap, or another hard-cap-
+      //      closed day elsewhere this week) and form a run LONGER than
+      //      config.max_consecutive_off_days — a different hard violation
+      //      (consecutive_off_violation) the split never was;
+      //  (b) in a heavily cap-constrained week (several OTHER days already
+      //      forced OFF by max_consecutive_work_days), the week's OFF days
+      //      can already be unavoidably scattered for reasons that have
+      //      nothing to do with this one reserved-window addition — dropping
+      //      it then only loses a day of real coverage while the split
+      //      persists regardless.
+      // So the drop is adopted only when the resulting pattern is a genuine,
+      // full cure: within the cap AND every OFF day in that one cyclic run.
+      // Otherwise the addition stays (the pre-fix split, still the
+      // lesser-evil fallback for a case this one narrow move cannot fix).
+      if (kept.size !== additions.size) {
+        const workedAt = (adds: Map<string, string>, day: string) => scheduledDays.has(day) || adds.has(day);
+        const runFor = (adds: Map<string, string>) =>
+          maxConsecutiveOffCyclic(daysOrder.map((day) => ({ status: workedAt(adds, day) ? ("working" as const) : ("off" as const) })));
+        const offCountFor = (adds: Map<string, string>) => daysOrder.filter((day) => !workedAt(adds, day)).length;
+        const keptRun = runFor(kept);
+        const keptOffCount = offCountFor(kept);
+        const isOneCleanBlock = keptRun <= config.max_consecutive_off_days && (keptOffCount === 0 || keptRun === keptOffCount);
+        if (isOneCleanBlock) finalAdditions = kept;
+      }
+    }
+  }
+
+  return { additions: finalAdditions, fatigueReasons, shortfall };
 }
 
 /**
