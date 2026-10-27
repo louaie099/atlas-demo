@@ -39,7 +39,7 @@ export async function GET(req: Request) {
     supabase.from("weekly_plans").select("*").eq("id", planId),
   ]);
   if (flightsErr || empErr || planErr) {
-    return NextResponse.json({ error: (flightsErr || empErr || planErr)!.message }, { status: 500 });
+  return NextResponse.json({ error: (flightsErr || empErr || planErr)!.message }, { status: 500 });
   }
 
   const employees = (employeesRaw ?? []) as Employee[];
@@ -70,6 +70,10 @@ export async function GET(req: Request) {
     prior = undefined;
   }
 
+  // Full Qatar Airways QR601 Company Team, so assignments/shift_code can be
+  // compared across all 4 real teammates, not just the 3 "broken" ones.
+  const qrTeamIds = Array.from(new Set([...targetIds, "mehdi-ouazzani", "nawal-benjelloun", "siham-lahrichi"]));
+
   let bundleResult: unknown = null;
   let bundleErr: string | null = null;
   try {
@@ -86,6 +90,34 @@ export async function GET(req: Request) {
       priorPlanRosterEntries: prior?.priorRosterEntries,
       priorWeekPublished: prior?.published,
     });
+
+    // Per-day roster status/shift_code for the full QR601 team -- "is this
+    // person working today at all", independent of which specific duty (if
+    // any) they end up deployed to.
+    const rosterByDay = qrTeamIds.map((id) => ({
+      id,
+      days: bundle.rosterEntries
+        .filter((r) => r.employee_id === id)
+        .sort((a, b) => a.day_of_week.localeCompare(b.day_of_week))
+        .map((r) => ({ day: r.day_of_week, status: r.status, shift_code: r.shift_code })),
+    }));
+
+    // Actual DEPLOYMENT to a specific staffing requirement -- this is what
+    // the Find Agent / candidates list actually reads. A QR601 Company Team
+    // requirement id looks like "req-qr601-<day>-company-team" per the
+    // existing convention (see tests/foreign-company-roster-topup.test.ts).
+    const qr601Assignments = bundle.assignments.filter(
+      (a) => qrTeamIds.includes(a.employee_id) || a.staffing_requirement_id.includes("qr601")
+    );
+
+    // Every unfilled_duty issue the draft raised, plus any issue naming one
+    // of the 4 QR team members specifically (by employeeId) regardless of
+    // type -- in case the explanation is a rest/off-day violation rather
+    // than a plain staffing gap.
+    const relevantIssues = bundle.plan.issues.filter(
+      (i) => i.type === "unfilled_duty" || (i.employeeId && qrTeamIds.includes(i.employeeId))
+    );
+
     bundleResult = {
       totalRosterEntries: bundle.rosterEntries.length,
       staffingGaps: bundle.summary.staffingGaps,
@@ -95,6 +127,10 @@ export async function GET(req: Request) {
         rosterEntries: bundle.rosterEntries.filter((r) => r.employee_id === id).length,
         workingDays: bundle.rosterEntries.filter((r) => r.employee_id === id && r.shift_code).length,
       })),
+      rosterByDay,
+      qr601Assignments,
+      relevantIssues,
+      allUnfilledDutyIssues: bundle.plan.issues.filter((i) => i.type === "unfilled_duty"),
     };
   } catch (err) {
     bundleErr = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
