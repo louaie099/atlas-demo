@@ -1111,16 +1111,20 @@ describe("PHASE 2, part B — no-op, determinism, fixed-cycle exemption, bounded
     const fixture = JSON.parse(readFileSync(join(__dirname, "fixtures", "pre-hard-caps-demo-plan.json"), "utf8")) as { roster: Record<string, string> };
     const boundary = deriveFallbackBoundaryContext(EMPLOYEES, DAYS_WITH_DATA, CURRENT_WEEK_START);
     const p = generateDraftWeeklyPlan(FLIGHTS, EMPLOYEES, [], CONFIG, DAYS_WITH_DATA, CURRENT_WEEK_LABEL, CURRENT_WEEK_START, boundary, "fallback_static_baseline");
-    // 2026-09-29 correction: 0, not >0, for the real demo data — Stage 6
-    // itself now respects OFF/OFF pairing as a hard constraint (see the
-    // youssef-el-amrani test above), which already prevents the specific
-    // lockstep/OFF-block scenarios this repair pass used to need to fix
-    // here. The exemption loop below is kept as a structural guard (it
-    // still passes trivially with zero repairs); synthetic scenarios
-    // elsewhere in this file (e.g. "flexible pool (Stage 6): the same
-    // streak-ordering gap" below) exercise the repair pass itself with
-    // repairs > 0.
-    expect(p.hardCapRepairs.length).toBe(0);
+    // 2026-09-29 correction: Stage 6 itself respects OFF/OFF pairing as a
+    // hard constraint (see the youssef-el-amrani test above), which already
+    // prevents the specific hard-cap-driven lockstep/OFF-block scenarios
+    // this repair pass used to need to fix here — so repairs.length WAS 0
+    // for this fixture.
+    // 2026-10-27 UPDATE: repairFlexiblePoolWeek now also merges a split OFF
+    // pattern that has NOTHING to do with any hard cap (a demand-driven
+    // shift making the next day rest-illegal regardless of window choice —
+    // see hard-cap-repair.ts's hasSplitViolation), and this real fixture
+    // does contain that exact shape, so repairs.length is no longer
+    // required to be 0. What still matters, and is asserted below exactly
+    // as before: no repair ever touches a fixed-cycle/static employee, and
+    // every fixed-cycle roster stays byte-identical to the pre-phase
+    // fixture — this pass may only ever move flexible/General-T1-Pool days.
     const staticIds = new Set(EMPLOYEES.filter((e) => !isGenerationDrivenPopulation(e)).map((e) => e.id));
     for (const r of p.hardCapRepairs) for (const id of [r.fromEmployeeId, r.toEmployeeId, r.filledByEmployeeId]) if (id) expect(staticIds.has(id), id).toBe(false);
     for (const e of EMPLOYEES.filter((x) => usesFixedCycleRotation(x.assignment))) {
@@ -1320,4 +1324,75 @@ describe("repairFlexiblePoolWeek — OFF/OFF regression (2026-10-06): a hard-cap
   // ACEs so the tired ones cover Tuesday") — proving the new check rejects
   // only the specific off-day-rule-breaking moves it targets, not
   // repair in general.
+});
+
+describe("repairFlexiblePoolWeek — OFF/OFF regression (2026-10-27): a split caused by NO hard-cap exclusion at all must still be repaired", () => {
+  // Live Operations shape (Mouna Sqalli, Week 5): a flexible employee's week
+  // already meets the normal 5-work/2-off target with zero hard-cap
+  // exclusions, but still ends up with two SEPARATED single-day OFF days
+  // (e.g. Thursday OFF, Sunday OFF) instead of one consecutive block —
+  // because a demand-driven shift elsewhere made the day next to it
+  // rest-illegal, not because any cap closed anything. Before this fix,
+  // repairFlexiblePoolWeek never even ran in this shape: it bailed out at
+  // the top whenever Stage 6 recorded zero hard-cap exclusions
+  // (flexExclusions.length === 0), and its OFF-RUN phase only ever looked at
+  // hard-cap-excluded employees with an over-long run — this employee is
+  // neither. Now the pass also detects (and tries to merge) a split that
+  // has nothing to do with any cap.
+  const ctx = {
+    daysOrder: DAYS,
+    weekStart: WEEK,
+    minimumRestHours: 15,
+    caps: { maxConsecutiveWorkDays: 6, maxContinuousShiftHours: null, maxConsecutiveNightShifts: null },
+    incomingStreakByEmployee: new Map<string, number>(),
+    priorWeekBoundaryContext: new Map(),
+  };
+  const offDayRules = { minimumOffDays: 2, consecutive: true };
+  // X: worked Mon/Tue/Wed/Fri/Sat, OFF Thu+Sun — already at the 5-work
+  // target, zero hard-cap exclusions, but split across two single-day
+  // blocks (Thu alone; Sun alone, since Sat and Mon on either side are
+  // worked).
+  const workedDaysX = ["Monday", "Tuesday", "Wednesday", "Friday", "Saturday"];
+  const stage6ShiftsByDay = Object.fromEntries(DAYS.map((d) => [d, workedDaysX.includes(d) ? [{ employeeId: "x", dayOfWeek: d, shiftCode: "NR01", coversRoles: [] }] : []]));
+  const employees = [makeEmployee({ id: "x", name: "X", skills: ["Gate"] })];
+
+  function offRunAndSplit(pattern: ("working" | "off")[]) {
+    const run = maxConsecutiveOffCyclic(pattern.map((status) => ({ status })));
+    const offCount = pattern.filter((s) => s === "off").length;
+    return { run, isOneBlock: offCount === 0 || run === offCount };
+  }
+
+  it("merges the split into one consecutive OFF block, with zero hard-cap exclusions in play", () => {
+    const input: FlexibleRepairInput = {
+      ctx,
+      employees,
+      demandByDay: {}, // no demand tracked -- isolates the OFF-day-rule merge from coverage bookkeeping
+      stage6ShiftsByDay,
+      exclusions: [], // the exact shape this fix is for: NO hard-cap exclusion at all
+      maxConsecutiveOffDays: 2,
+      simulateTopUp: () => new Map(), // X is already at the 5-work target; nothing for a top-up to add
+      offDayRules,
+    };
+    const result = repairFlexiblePoolWeek(input);
+
+    const finalPattern = DAYS.map((d) => ((result.stage6ShiftsByDay[d] ?? []).some((g) => g.employeeId === "x") ? "working" : "off")) as ("working" | "off")[];
+    const { isOneBlock } = offRunAndSplit(finalPattern);
+
+    expect(isOneBlock).toBe(true);
+    expect(result.repairs.length).toBeGreaterThan(0);
+    // Every applied move still keeps X at (at least) their original 5 worked days.
+    expect(finalPattern.filter((s) => s === "working").length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("WITHOUT the fix (exclusions-gated detection), this exact shape was invisible to the pass: confirms the scenario really is cap-free", () => {
+    // Sanity check on the fixture itself, not the fix: zero hard-cap
+    // exclusions and an over-long run would both be false, so the
+    // PRE-fix trigger (flexExclusions non-empty, runBefore > max) never
+    // applied here at all -- this scenario is a genuine, previously-unseen
+    // gap, not a restatement of the 2026-10-06 test above.
+    const pattern = DAYS.map((d) => (workedDaysX.includes(d) ? "working" : "off")) as ("working" | "off")[];
+    const { run, isOneBlock } = offRunAndSplit(pattern);
+    expect(run).toBeLessThanOrEqual(2); // no over-long run
+    expect(isOneBlock).toBe(false); // yet still split
+  });
 });

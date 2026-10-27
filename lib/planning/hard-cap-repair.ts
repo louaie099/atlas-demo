@@ -579,8 +579,39 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
   const n = ctx.daysOrder.length;
   const noop: FlexibleRepairResult = { stage6ShiftsByDay: input.stage6ShiftsByDay, repairs: [], search: { attemptsUsed: 0, budget, budgetExhausted: false } };
   const flexExclusions = input.exclusions.filter((x) => x.population === "flexible_pool");
-  if (flexExclusions.length === 0) return noop;
+  // 2026-10-27 FIX (off_days_not_consecutive without a hard-cap exclusion):
+  // this pass used to run ONLY when Stage 6 recorded a hard-cap exclusion
+  // (flexExclusions), because the only recognized OFF-block problem was an
+  // over-long run a work-day cap had created. But a flexible employee's week
+  // can also end up with OFF days split into two separate short blocks for a
+  // reason that has nothing to do with any cap — e.g. a demand-driven shift
+  // that ends late enough to make the very next day rest-illegal regardless
+  // of which day was meant to be the "reserved" OFF window (the Thursday-
+  // after-a-late-AP02 shape). Before this fix, such a split simply never
+  // reached this repair pass at all, no matter how cheaply it could have
+  // been merged into one block by a move this module already knows how to
+  // make. hasSplitViolation (defined below, after `shifts`/`ids` exist) is
+  // checked right after those are set up, just below.
   const dedicated = input.dedicatedRoleCovered ?? (() => false);
+  // Cheap pre-check, using only the raw inputs (no other local state needed
+  // yet): is there any flexible employee whose OFF days, after the SAME
+  // top-up simulation the real pipeline uses, are already split across more
+  // than one cyclic block? If not, and Stage 6 recorded no hard-cap
+  // exclusion either, this pass has nothing to do — restores the exact
+  // reference-identical no-op every pre-existing caller/test relies on.
+  const hasSplitViolation = (): boolean => {
+    if (!input.offDayRules?.consecutive || n !== 7) return false;
+    for (const e of input.employees) {
+      const topUp = input.simulateTopUp(e.id, input.stage6ShiftsByDay);
+      const pattern = ctx.daysOrder.map((day) => (input.stage6ShiftsByDay[day] ?? []).find((g) => g.employeeId === e.id)?.shiftCode ?? topUp.get(day) ?? null);
+      const offCount = pattern.filter((c) => !c).length;
+      if (offCount === 0) continue;
+      const run = maxConsecutiveOffCyclic(pattern.map((c) => ({ status: c ? ("working" as const) : ("off" as const) })));
+      if (run < offCount) return true;
+    }
+    return false;
+  };
+  if (flexExclusions.length === 0 && !hasSplitViolation()) return noop;
 
   const employeesById = new Map(input.employees.map((e) => [e.id, e]));
   const ids = input.employees.map((e) => e.id).sort(byId);
@@ -760,15 +791,27 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
   // ---- Phase 2: OFF-RUN repair ---------------------------------------------
   // topUpCache/fullPattern moved up before Phase 1 (shared by both phases now).
   const offRun = (p: WeekPattern) => maxConsecutiveOffCyclic(p.map((c) => ({ status: c ? ("working" as const) : ("off" as const) })));
+  const offCount = (p: WeekPattern) => p.filter((c) => !c).length;
   const workDays = (p: WeekPattern) => p.filter(Boolean).length;
-  const offPhrase = (runBefore: number) => `avoiding a ${runBefore}-day OFF block (max ${input.maxConsecutiveOffDays} consecutive OFF days)`;
+  const offPhrase = (runBefore: number, split: boolean) =>
+    split && runBefore <= input.maxConsecutiveOffDays
+      ? `merging their separated OFF days back into one consecutive block`
+      : `avoiding a ${runBefore}-day OFF block (max ${input.maxConsecutiveOffDays} consecutive OFF days)`;
 
-  const candidatesX = [...new Set(flexExclusions.map((x) => x.employeeId))].filter((id) => employeesById.has(id)).sort(byId);
+  // 2026-10-27 FIX: candidatesX used to be exactly the hard-cap-excluded
+  // employees (the only people who could have an over-long OFF run). Now
+  // also includes anyone whose week is already split across more than one
+  // OFF block — same move primitives (shift-own-day / hand-off) below, just
+  // a different "what counts as fixed" target (see xOk).
+  const splitViolatorIds = input.offDayRules?.consecutive && n === 7 ? ids.filter((id) => offCount(fullPattern(id, shifts, true)) > offRun(fullPattern(id, shifts, true))) : [];
+  const candidatesX = [...new Set([...flexExclusions.map((x) => x.employeeId), ...splitViolatorIds])].filter((id) => employeesById.has(id)).sort(byId);
   for (const x of candidatesX) {
     if (exhausted) break;
     const xFull = fullPattern(x, shifts, true);
     const runBefore = offRun(xFull);
-    if (runBefore <= input.maxConsecutiveOffDays) continue;
+    const offCountBefore = offCount(xFull);
+    const splitBefore = offCountBefore > 0 && runBefore < offCountBefore;
+    if (runBefore <= input.maxConsecutiveOffDays && !splitBefore) continue;
     const base = patternOf(x);
     const cap = flexExclusions.find((e) => e.employeeId === x)?.reason ?? null;
     // 2026-10-06 FIX: offRun(after) <= max alone only bounds the LONGEST
@@ -777,11 +820,22 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
     // fragmenting it into several short, separated ones (each individually
     // under the ceiling) instead of genuinely shortening it. breaksOffDayRules
     // (the same check repairCoverageGaps already uses) closes that gap.
-    const xOk = (after: WeekPattern) =>
-      offRun(after) <= input.maxConsecutiveOffDays &&
-      workDays(after) >= workDays(xFull) &&
-      hardCapBreach(ctx, x, after) === null &&
-      !breaksOffDayRules(xFull, after, input.offDayRules);
+    // 2026-10-27 FIX: when the original problem was a SPLIT (not an
+    // over-long run — runBefore was already within the cap), a candidate
+    // must actually cure the split (every OFF day back in one cyclic run),
+    // not merely keep the longest run within the cap — the longest run was
+    // never the issue for this employee.
+    const xOk = (after: WeekPattern) => {
+      const offCountAfter = offCount(after);
+      const splitOk = !splitBefore || offCountAfter === 0 || offRun(after) >= offCountAfter;
+      return (
+        offRun(after) <= input.maxConsecutiveOffDays &&
+        splitOk &&
+        workDays(after) >= workDays(xFull) &&
+        hardCapBreach(ctx, x, after) === null &&
+        !breaksOffDayRules(xFull, after, input.offDayRules)
+      );
+    };
     let fixed = false;
 
     // (a) SHIFT OWN DAY: d -> u, nobody else touched.
@@ -806,7 +860,8 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
         const candidate = withDays({ [dayD]: newD, [dayU]: [...(shifts[dayU] ?? []), { employeeId: x, dayOfWeek: dayU, shiftCode: code.code, coversRoles: [] }] });
         const xAfter = fullPattern(x, candidate, false);
         if (!xOk(xAfter)) continue;
-        const explanation = `${nameOf(x)}'s ${dayD} work moved to ${dayU} (${code.code}) so their week stays within ${capPhrase(cap, ctx.caps)} while ${offPhrase(runBefore)}; ${dayD}'s ${entry.coversRoles.join("/") || "demand"} coverage there is held by the dedicated team.`;
+        const capClause = cap ? ` so their week stays within ${capPhrase(cap, ctx.caps)} while` : " while";
+        const explanation = `${nameOf(x)}'s ${dayD} work moved to ${dayU} (${code.code})${capClause} ${offPhrase(runBefore, splitBefore)}; ${dayD}'s ${entry.coversRoles.join("/") || "demand"} coverage there is held by the dedicated team.`;
         const xEntry: GeneratedShiftAssignment = {
           employeeId: x, dayOfWeek: dayU, shiftCode: code.code, coversRoles: replayU.claimedRoles[replayU.claimedRoles.length - 1], ...extraKeys(entry), hardCapRepairReason: explanation,
         };
@@ -848,7 +903,8 @@ export function repairFlexiblePoolWeek(input: FlexibleRepairInput): FlexibleRepa
         )
           continue;
         const gained = ctx.daysOrder.filter((_, j) => xAfter[j] && !xFull[j]);
-        const explanation = `${dayD} reassigned from ${nameOf(x)} to ${nameOf(y)} (${entry.shiftCode}) so ${nameOf(x)} could work ${gained.length > 0 ? gained.join(", ") : "another day"} instead within ${capPhrase(cap, ctx.caps)}, ${offPhrase(runBefore)}.`;
+        const capClause2 = cap ? ` within ${capPhrase(cap, ctx.caps)}` : "";
+        const explanation = `${dayD} reassigned from ${nameOf(x)} to ${nameOf(y)} (${entry.shiftCode}) so ${nameOf(x)} could work ${gained.length > 0 ? gained.join(", ") : "another day"} instead${capClause2}, ${offPhrase(runBefore, splitBefore)}.`;
         shifts = withDays({ [dayD]: newD.map((g) => (g.employeeId === y ? { ...entry, employeeId: y, hardCapRepairReason: explanation } : g)) });
         topUpCache.delete(x);
         topUpCache.delete(y);

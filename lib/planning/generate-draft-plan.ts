@@ -792,7 +792,18 @@ export function generateDraftWeeklyPlan(
     (role === "Profiling" || role === "Mesure") && employees.some((e) => e.active && e.assignment === role) && !dedicatedTeamShortDays.has(`${role}|${day}`);
 
   let repairedDemandDrivenShiftsByDay = demandDrivenShiftsByDay;
-  if (hardCapRepairEnabled && stage6CapExclusions.length > 0) {
+  // 2026-10-27 FIX: used to gate on stage6CapExclusions.length > 0 only —
+  // repairFlexiblePoolWeek's OFF-RUN phase could then only ever see a
+  // flexible employee whose over-long OFF run a hard cap had caused. A week
+  // can also split a flexible employee's OFF days into two separate short
+  // blocks for a reason that has nothing to do with any cap (e.g. a
+  // demand-driven shift ending late enough to force the very next day
+  // rest-illegal) — that case was never even handed to this repair pass.
+  // repairFlexiblePoolWeek now detects that case itself (hasSplitViolation)
+  // and no-ops immediately, reference-identical, when there is truly nothing
+  // to do, so calling it whenever hard-cap repair is enabled is safe and
+  // the exclusions-only cost it used to save is now paid only when needed.
+  if (hardCapRepairEnabled) {
     const repair = repairFlexiblePoolWeek({
       ctx: { daysOrder, weekStart, minimumRestHours: config.minimum_rest_hours, caps: hardWorkCaps, incomingStreakByEmployee, priorWeekBoundaryContext },
       employees: employees.filter(isFlexibleGeneralPool),

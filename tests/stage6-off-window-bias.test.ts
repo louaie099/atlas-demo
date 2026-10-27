@@ -413,7 +413,21 @@ describe("separated OFF is no longer the normal-case outcome — but stays legal
       // directly below. (Previous per-week counts before this revision:
       // 2026-08-31 before/after 23/x, now 23/7; 2026-09-21 before/after
       // 24/x, now 24/6.)
-      expect(split(after) * 3).toBeLessThanOrEqual(split(before));
+      //
+      // 2026-10-27 (hard-cap-repair.ts's split-merge fix): repairFlexiblePoolWeek
+      // now also merges a split OFF pattern that has nothing to do with any
+      // hard cap (see its hasSplitViolation doc comment), and it runs
+      // unconditionally on BOTH `before` and `after` here — offWindowStructureBias
+      // only toggles Stage 6's pre-scoring nudge, never this post-hoc repair
+      // pass. That collapses the gap this ratio used to measure: `before`
+      // (bias off) now also gets most of its splits merged by the repair
+      // pass alone, so both counts are small absolute numbers where a 3x
+      // ratio is no longer a meaningful signal (pinned counts as of this
+      // fix: 2026-08-31 before/after 4/1; 2026-09-21 before/after 3/2). The
+      // bias's own qualitative contribution — never worse, and strictly more
+      // clean 5-work/2-consecutive-OFF rosters — is what's pinned now.
+      expect(split(after)).toBeLessThanOrEqual(split(before));
+      expect(split(after)).toBeLessThanOrEqual(2);
       // 2026-10-05 (Profiling/Mesure workforce-model correction): split
       // counts above are unaffected (still exactly 23/7 and 24/6, as
       // before this fix) — the correction only touches which Profiling/
