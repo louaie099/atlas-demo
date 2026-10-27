@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { computeEmployeeDaySummary } from "@/lib/employee-status";
-import { DEMO_TODAY } from "@/lib/seed-data";
+import { DEMO_TODAY, CURRENT_WEEK_START } from "@/lib/seed-data";
 import { Employee, Assignment, StaffingRequirement, Flight } from "@/lib/types";
 import { canManageEmployees } from "@/lib/roles";
 import { resolveRole } from "@/lib/resolve-role";
-import { fetchAllTableRows } from "@/lib/planning/weekly-plan-service";
+import { fetchAllTableRows, fetchAllRosterEntriesForPlan, planIdForWeek } from "@/lib/planning/weekly-plan-service";
 
 export const dynamic = "force-dynamic";
 
@@ -31,15 +31,27 @@ export async function GET() {
     return NextResponse.json({ error: empErr.message }, { status: 500 });
   }
 
+  // "Today"'s real roster, straight from the persisted plan (2026-10-27
+  // fix — see computeEmployeeDaySummary's realRosterEntry doc comment).
+  // CURRENT_WEEK_START's plan may not exist yet (nobody has generated a
+  // plan at all) — fetchAllRosterEntriesForPlan returns [] for a
+  // nonexistent plan_id rather than erroring, so this never needs a
+  // separate existence check; every employee then falls back to the exact
+  // prior (weekly_shifts-only) behavior.
+  const todayRosterEntries = await fetchAllRosterEntriesForPlan(supabase, planIdForWeek(CURRENT_WEEK_START));
+  const todayRosterByEmployee = new Map(todayRosterEntries.filter((r) => r.day_of_week === DEMO_TODAY).map((r) => [r.employee_id, r]));
+
   // Enrich each employee with today's operational status, computed from
   // real assignment data — the whole point of moving beyond a static list.
   const enriched = (employees as Employee[]).map((e) => {
+    const realRosterEntry = todayRosterByEmployee.get(e.id);
     const today = computeEmployeeDaySummary(
       e,
       DEMO_TODAY,
       assignments as Assignment[],
       requirements as StaffingRequirement[],
-      flights as Flight[]
+      flights as Flight[],
+      realRosterEntry ? { shift_code: realRosterEntry.shift_code, status: realRosterEntry.status } : undefined
     );
     return { ...e, today };
   });

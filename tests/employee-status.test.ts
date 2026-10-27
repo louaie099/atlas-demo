@@ -137,4 +137,50 @@ describe("computeEmployeeDaySummary", () => {
     expect(summary.duties).toHaveLength(0);
     expect(summary.status).toBe("on_duty");
   });
+
+  describe("realRosterEntry — reading Weekly Planning's own persisted roster instead of the legacy weekly_shifts column (2026-10-27 'Not Rostered after regenerate' fix)", () => {
+    it("a bulk-imported employee (weekly_shifts always []) reports on_duty once a real persisted roster entry exists, even though weekly_shifts was never written to", () => {
+      const employee = makeEmployee({ id: "new-hire", weekly_shifts: [] });
+      // Without realRosterEntry supplied: reproduces the exact bug -- stuck
+      // "not_rostered" forever, no matter how many times generation ran,
+      // because generation never writes to employee.weekly_shifts.
+      const withoutFix = computeEmployeeDaySummary(employee, "Wednesday", [], [], []);
+      expect(withoutFix.status).toBe("not_rostered");
+
+      // With the real persisted roster entry (what Generate/Regenerate
+      // Planning actually writes, in weekly_plan_roster_entries): the
+      // employee's true working status is reported instead.
+      const withFix = computeEmployeeDaySummary(employee, "Wednesday", [], [], [], { shift_code: "MT01", status: "working" });
+      expect(withFix.status).toBe("on_duty");
+      expect(withFix.shiftCode).toBe("MT01");
+    });
+
+    it("a real persisted OFF entry reports off, not not_rostered, for a bulk-imported employee", () => {
+      const employee = makeEmployee({ id: "new-hire-2", weekly_shifts: [] });
+      const summary = computeEmployeeDaySummary(employee, "Wednesday", [], [], [], { shift_code: null, status: "off" });
+      expect(summary.status).toBe("off");
+      expect(summary.shiftCode).toBeNull();
+    });
+
+    it("an established employee's real weekly_shifts baseline is untouched when realRosterEntry is omitted -- full backward compatibility", () => {
+      const employee = makeEmployee({ id: "sara" });
+      const summary = computeEmployeeDaySummary(employee, "Wednesday", [], [], []);
+      expect(summary.status).toBe("on_duty");
+      expect(summary.shiftCode).toBe("MT01");
+    });
+
+    it("a real persisted entry still correctly attaches that day's duties/foreign commitment -- the fix only changes the shift/off source, nothing else in the function", () => {
+      const employee = makeEmployee({ id: "ayoub", assignment: "Emirates", weekly_shifts: [] });
+      const assignments: Assignment[] = [
+        { id: "a1", plan_id: "plan-test", staffing_requirement_id: "req-ek751", employee_id: "ayoub", source: "atlas_generated", created_by: null, assigned_at: "" },
+      ];
+      const summary = computeEmployeeDaySummary(employee, "Wednesday", assignments, [foreignRequirement], [foreignFlight], {
+        shift_code: "AP01",
+        status: "working",
+      });
+      expect(summary.status).toBe("committed");
+      expect(summary.shiftCode).toBe("AP01");
+      expect(summary.foreignCommitment).toEqual({ airline: "Emirates", window: { start: "11:20", end: "15:50" } });
+    });
+  });
 });
