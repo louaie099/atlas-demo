@@ -1085,7 +1085,14 @@ export function generateProfilingMesureShifts(
             undefined, // fatigue — this generator has no fatigue input
             hardCaps
               ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employee.id) ?? 0, shortfallOut: capShortfall, maxConsecutiveOffDays: hardCaps.maxConsecutiveOffDays }
-              : undefined
+              : undefined,
+            undefined, // t1Coverage — not applicable to Profiling/Mesure
+            undefined, // t1CoverageReasonsOut
+            undefined, // t1DecrementedByDayOut
+            undefined, // dutyCoverage — not applicable to Profiling/Mesure's own top-up
+            undefined, // dutyCoverageReasonsOut
+            undefined, // dutyDecrementedByDayOut
+            employee.shift_code // BASELINE SHIFT CODE TIE-BREAK (2026-10-27) — see computeEmployeeDayCountTopUp's own doc comment
           );
           const kept = [...additions].filter(([day]) => !reserved.has(day));
           return { kept, capShortfall, clean: kept.length === additions.size && scheduledDays.size + kept.length >= targetWorkDays };
@@ -1605,7 +1612,14 @@ export function generateForeignCompanyShifts(
           topUpReasons ? { config: fatigue!.config, reasonsOut: topUpReasons } : undefined,
           hardCaps
             ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employee.id) ?? 0, shortfallOut: capShortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }
-            : undefined
+            : undefined,
+          undefined, // t1Coverage — not applicable to a foreign-company team
+          undefined, // t1CoverageReasonsOut
+          undefined, // t1DecrementedByDayOut
+          undefined, // dutyCoverage — not applicable to a foreign-company team's own top-up
+          undefined, // dutyCoverageReasonsOut
+          undefined, // dutyDecrementedByDayOut
+          employee.shift_code // BASELINE SHIFT CODE TIE-BREAK (2026-10-27) — see computeEmployeeDayCountTopUp's own doc comment
         );
         for (const { day, reason } of capShortfall) {
           hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "foreign_company_top_up", reason });

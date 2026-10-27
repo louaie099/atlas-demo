@@ -633,7 +633,33 @@ export function computeEmployeeDayCountTopUp(
   /** Output: day -> explanation, mirrors t1CoverageReasonsOut's own convention, for the duty-coverage bias. Only ever set when `dutyCoverage` is supplied and the employee has at least one matching role. */
   dutyCoverageReasonsOut?: Map<string, string>,
   /** Output: day -> exactly the DutyWindowGap entries THIS call's final, kept commit for that day decremented — mirrors t1DecrementedByDayOut's own convention/purpose exactly. */
-  dutyDecrementedByDayOut?: Map<string, DutyWindowGap[]>
+  dutyDecrementedByDayOut?: Map<string, DutyWindowGap[]>,
+  // BASELINE SHIFT CODE TIE-BREAK (2026-10-27 — see this module's own
+  // doc comment on shortestFirstCatalogCodes). On a day with no real
+  // demand signal at all (no T1/duty coverage, no peak-minute match —
+  // orderedCandidates' pickFirst would otherwise fall through to
+  // `list[0]`), several catalog codes are routinely tied for the
+  // shortest legal duration (e.g. MT03/NR01/AP01 all at 9h00 in the
+  // current regime). `list[0]` among ties is decided purely by
+  // Object.entries(shiftCatalogForDate(...))'s OWN insertion order —
+  // an accident of the catalog's declaration order, never a real
+  // decision — which is how an entire idle week silently converged on
+  // one single code (MT03) for nearly every employee regardless of
+  // team or personal pattern, while employees for whom that code
+  // happened to be rest-illegal fell through to whichever code was
+  // next in that same accidental order. This parameter is the
+  // employee's own STATIC `shift_code` (Employee.shift_code — their
+  // regular, contracted pattern, never the day's generated code):
+  // when it is itself among the legal candidates tied for the
+  // shortest duration, it is preferred over the catalog's own
+  // insertion-order default. Never picks a LONGER shift than the
+  // shortest-legal rule already requires, never overrides a real
+  // coverage/peak-minute signal (both are checked first), and is a
+  // no-op whenever the employee's baseline code isn't itself tied for
+  // shortest that day. Omitted/null — reproduces the prior
+  // (catalog-order) behavior exactly, so every existing caller/test
+  // keeps working unchanged.
+  employeeBaselineShiftCode?: string | null
 ): Map<string, string> {
   const additional = new Map<string, string>(); // day -> shiftCode, this employee only
   const t1Active = t1Coverage?.employeeEligible === true;
@@ -926,7 +952,22 @@ export function computeEmployeeDayCountTopUp(
           return peakAndTopScore ?? topScorers[0];
         }
       }
-      return peakMinute != null && list.length > 1 ? list.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? list[0] : list[0];
+      if (peakMinute != null && list.length > 1) {
+        const peakMatch = list.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute));
+        if (peakMatch) return peakMatch;
+      }
+      // No real coverage or peak-minute signal at all — see this
+      // function's `employeeBaselineShiftCode` param doc comment: prefer
+      // the employee's own baseline code over list[0]'s accidental
+      // catalog-order default, but ONLY when it's genuinely tied with
+      // list[0] for the shortest legal duration (never a longer shift
+      // than the rule already requires).
+      if (employeeBaselineShiftCode && list.length > 1) {
+        const shortestDuration = list[0].sortieMin - list[0].entreeMin;
+        const baselineMatch = list.find((c) => c.code === employeeBaselineShiftCode && c.sortieMin - c.entreeMin === shortestDuration);
+        if (baselineMatch) return baselineMatch;
+      }
+      return list[0];
     }
     if (useFatigue) {
       // Same structure as below, with each preference group re-ordered by
@@ -1277,7 +1318,12 @@ export function computeFlexibleEmployeeTopUp(
   // omitted. The caller (generateObligationToppedUpShifts) computes this
   // once per employee; omitted here = empty set = no change from before
   // this feature.
-  employeeDutyRoles: ReadonlySet<string> = new Set()
+  employeeDutyRoles: ReadonlySet<string> = new Set(),
+  // BASELINE SHIFT CODE TIE-BREAK (2026-10-27) — see
+  // computeEmployeeDayCountTopUp's own `employeeBaselineShiftCode` doc
+  // comment. Threaded straight through; omitted = prior catalog-order
+  // behavior, unchanged.
+  employeeBaselineShiftCode?: string | null
 ): FlexibleEmployeeTopUpResult {
   const { daysOrder, config, weekStart, hardCaps, fatigueConfig } = ctx;
   const targetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
@@ -1324,7 +1370,8 @@ export function computeFlexibleEmployeeTopUp(
     t1Decremented,
     dutyActive ? { remainingByDay: ctx.remainingDutyGapsByDay!, employeeRoles: employeeDutyRoles } : undefined,
     dutyCoverageReasons,
-    dutyDecremented
+    dutyDecremented,
+    employeeBaselineShiftCode
   );
 
   let finalAdditions = additions;
@@ -1489,7 +1536,8 @@ export function generateObligationToppedUpShifts(
       demandDrivenShiftsByDay,
       ctx,
       employeeT1Eligible,
-      employeeDutyRoles
+      employeeDutyRoles,
+      employee.shift_code
     );
     for (const { day, reason } of shortfall) {
       hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "flexible_pool_top_up", reason });

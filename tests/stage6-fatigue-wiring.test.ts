@@ -731,15 +731,35 @@ describe("(e) the fatigue wiring resolves each real date across the 2026-09-20 r
 // 1899064ffedfe68b.)
 // 2026-10-21: the two "plan:" whole-pipeline fingerprints were re-pinned after the hard-rule gate
 // (hard-rule-gate.ts) started repairing OFF blocks; every stage-level fingerprint is unchanged.
+// 2026-10-27 RE-PIN of "topup:2026-09-21" only: computeEmployeeDayCountTopUp's
+// pickFirst (lib/planning/roster-generation.ts) now prefers an employee's own
+// baseline shift_code over the shift catalog's arbitrary object-declaration
+// order when (and only when) that baseline code is itself tied for the
+// shortest legal duration that day -- fixing a bug where, under flat/zero
+// demand, every topped-up employee silently defaulted to whichever
+// same-duration code happened to be declared first in shift-templates.ts
+// (MT03), regardless of their own contracted shift. This changes real output
+// for the 2026-09-21 week's real EMPLOYEES/FLIGHTS fixture (at least one
+// flexible-pool employee's baseline code ties for shortest duration on a
+// top-up day). The same baseline-shift-code parameter was threaded through
+// generate-draft-plan.ts's simulateTopUp (hard-cap repair simulation) and
+// specialized-team-generation.ts's two call sites (Profiling/Mesure and
+// foreign-company top-ups), so "plan:2026-09-21" (full pipeline) and
+// "foreign:2026-09-21" (generateForeignCompanyShifts) move too, for the same
+// reason; "topup:2026-08-31"/"plan:2026-08-31"/"foreign:2026-08-31" and every
+// stage6:/score: hash are confirmed unaffected, consistent with the fix being
+// additive and scoped to pickFirst's catalog-order fallback only.
+// (Previous values: topup:2026-09-21 14206ef5e76dbc39, plan:2026-09-21
+// 0dfbc9f44e8fa675, foreign:2026-09-21 cb7c11e486d15733.)
 const PRE_WIRING_FINGERPRINTS: Record<string, string> = {
   "plan:2026-08-31": "dad915ea57ce540f",
   "stage6:2026-08-31": "ddcee0c124cf2d9e",
   "topup:2026-08-31": "796fa5d0f3bc9033",
   "foreign:2026-08-31": "e6999dcc5728d50d",
-  "plan:2026-09-21": "0dfbc9f44e8fa675",
+  "plan:2026-09-21": "bea2bbf63ccba535",
   "stage6:2026-09-21": "94b99a613619e9d7",
-  "topup:2026-09-21": "14206ef5e76dbc39",
-  "foreign:2026-09-21": "cb7c11e486d15733",
+  "topup:2026-09-21": "5617ba80a8a3e8c1",
+  "foreign:2026-09-21": "4adefac189166711",
   "score:Boarding:0": "691d7ad390321e8f",
   "score:Qatar:0": "fa5ba07a44f0763d",
   "score:Boarding:1": "01f539800931d0a6",

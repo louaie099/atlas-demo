@@ -915,7 +915,13 @@ export function generateDraftWeeklyPlan(
       stage6ShiftsByDay: demandDrivenShiftsByDay,
       exclusions: stage6CapExclusions,
       maxConsecutiveOffDays: config.max_consecutive_off_days,
-      simulateTopUp: (employeeId, shifts) => computeFlexibleEmployeeTopUp(employeeId, shifts, topUpContext).additions,
+      // Same baseline-shift-code tie-break the real pass below uses (see
+      // computeEmployeeDayCountTopUp's doc comment) -- without it, this
+      // hard-cap-repair simulation could judge a day "fixed" by a
+      // catalog-order default the real generation pass (which DOES pass
+      // the employee's baseline) would never actually produce.
+      simulateTopUp: (employeeId, shifts) =>
+        computeFlexibleEmployeeTopUp(employeeId, shifts, topUpContext, undefined, undefined, employees.find((e) => e.id === employeeId)?.shift_code).additions,
       dedicatedRoleCovered,
       fatigueActive: Boolean(fatigueConfig),
       // 2026-10-06 FIX: same two weekly OFF-day hard rules already passed
