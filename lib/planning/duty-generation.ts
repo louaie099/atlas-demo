@@ -455,6 +455,36 @@ export function generateDutiesForDay(
         // coverage on the day it carries INTO (the day it STARTS was a
         // separate bug, fixed via shiftOverlapsWindow in lib/scoring.ts).
         rest_before_shift_hours: carryover ? Number.POSITIVE_INFINITY : actualRest ?? e.rest_before_shift_hours,
+        // 2026-10-27 (bulk-import/new-employee duty-eligibility fix): a
+        // newly created or bulk-imported employee's Employee.weekly_hours
+        // is deliberately null forever (see employee-import.ts's own doc
+        // comment -- planning state is never accepted at creation time; it
+        // "belongs to Weekly Planning/roster generation"). But nothing in
+        // generation ever writes it back onto the Employee row, and
+        // scoring.ts's hasRosterAssigned HARD-EXCLUDES any candidate whose
+        // weekly_hours is strictly null from ALL duty scoring -- not just
+        // flagged, not even considered. For a GENERATION-DRIVEN employee
+        // (isGenerationDrivenPopulation) this was a real, confirmed,
+        // permanent deadlock: Stage 6 (shift generation) correctly gives
+        // them a real working shift every day (proven repeatedly, offline
+        // and via this file's own effectiveShiftForDay above), but Stage 9
+        // (this function) silently dropped them from EVERY requirement's
+        // eligible pool forever, with no error and no path to ever self-
+        // correct -- confirmed live for a real bulk-imported Qatar Airways
+        // employee (authorized, on-shift, correctly rostered, yet never
+        // deployed to her own authorized company's duty, both unfilled
+        // slots going to legacy seed employees whose static weekly_hours
+        // happened to already be non-null). `hoursScheduledThisWindow` is
+        // exactly the real total hours this SAME run has already generated
+        // for this employee this week (see generate-draft-plan.ts's own
+        // doc comment on it) -- substituting it here when the static
+        // baseline is null makes a brand-new employee's weekly_hours
+        // reflect their own real, just-generated roster from their very
+        // first week, instead of a stale null that can never clear itself.
+        // Employees with a real static baseline (every pre-existing
+        // employee) are completely unaffected -- `??` only ever applies to
+        // a genuinely null value.
+        weekly_hours: e.weekly_hours ?? hoursScheduledThisWindow.get(e.id) ?? 0,
       } as Employee;
     })
     .filter((e) => e !== null) as Employee[];
