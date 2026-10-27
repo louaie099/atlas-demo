@@ -460,6 +460,58 @@ describe("buildDayEffectivePoolFromRosterEntries — the same day-off gate manua
     expect(pool[0].shift_start).toBe("13:45");
     expect(pool[0].shift_end).toBe("22:45");
   });
+
+  it("a brand-new employee (static rest_before_shift_hours/weekly_hours both null) still gets real, non-null values substituted -- the same hasRosterAssigned gate scoring.ts applies to this pool must never see null here", () => {
+    // Regression for the 2026-10-27 fix: this function used to substitute
+    // ONLY shift_start/shift_end, never rest_before_shift_hours or
+    // weekly_hours. A brand-new employee (bulk-imported or created via the
+    // single-employee form) always starts with both of those null by
+    // design -- scoring.ts's hasRosterAssigned hard-excludes any candidate
+    // whose weekly_hours (or rest_before_shift_hours) is still null from
+    // ALL scoring. Confirmed live: a real such employee, with a real
+    // persisted working roster entry for this exact day, was invisible to
+    // Find Agent / Live Operations even after the sibling fix to
+    // generation's OWN day-effective-pool builder (just above in this
+    // file) let automatic generation assign her.
+    const newEmployee = makeEmployee({
+      id: "new-employee", rest_before_shift_hours: null as unknown as number, weekly_hours: null,
+    });
+    const rosterEntries: WeeklyPlanRosterEntry[] = [
+      { id: "r1", plan_id: "plan-1", employee_id: "new-employee", day_of_week: "Wednesday", status: "working", shift_code: "AP01" },
+    ];
+
+    const pool = buildDayEffectivePoolFromRosterEntries([newEmployee], rosterEntries, "Wednesday", TEST_DATE);
+    expect(pool).toHaveLength(1);
+    expect(pool[0].rest_before_shift_hours).not.toBeNull();
+    expect(pool[0].weekly_hours).not.toBeNull();
+    // No shift yesterday was supplied at all -- nothing constrains today's
+    // rest, so it must come back abundant (Infinity), never a stale null.
+    expect(pool[0].rest_before_shift_hours).toBe(Number.POSITIVE_INFINITY);
+    // AP01 is a real ~9h shift this week so far -- a real number, not 0
+    // papering over a still-missing computation.
+    expect(pool[0].weekly_hours).toBeGreaterThan(0);
+  });
+
+  it("rest_before_shift_hours reflects the REAL elapsed rest since yesterday's persisted shift when the employee worked yesterday too, not an unconditional Infinity", () => {
+    const newEmployee = makeEmployee({
+      id: "new-employee", rest_before_shift_hours: null as unknown as number, weekly_hours: null,
+    });
+    const rosterEntries: WeeklyPlanRosterEntry[] = [
+      { id: "r1", plan_id: "plan-1", employee_id: "new-employee", day_of_week: "Wednesday", status: "working", shift_code: "AP01" },
+      { id: "r0", plan_id: "plan-1", employee_id: "new-employee", day_of_week: "Tuesday", status: "working", shift_code: "AP01" },
+    ];
+
+    const pool = buildDayEffectivePoolFromRosterEntries(
+      [newEmployee], rosterEntries, "Wednesday", TEST_DATE,
+      { dayOfWeek: "Tuesday", date: "2026-09-02", rosterEntries }
+    );
+    expect(pool).toHaveLength(1);
+    // AP01 -> AP01 on consecutive days: a real, finite rest figure (not
+    // Infinity, and not null) -- the exact real-rest calculation
+    // shift-generation.ts's own continuity math uses.
+    expect(pool[0].rest_before_shift_hours).not.toBe(Number.POSITIVE_INFINITY);
+    expect(pool[0].rest_before_shift_hours).toBeGreaterThan(0);
+  });
 });
 
 describe("generateDutiesForDay — Profiling/Mesure workforce-model correction (2026-10-05): qualification + protected window, never a full-shift-exclusive team", () => {

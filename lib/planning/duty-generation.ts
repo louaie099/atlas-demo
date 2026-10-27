@@ -4,9 +4,10 @@ import { scoreCandidates, TimeWindow } from "../scoring";
 import { getRequirementWindow } from "./requirement-window";
 import { getEmployeeForeignCommitments, computeForeignCompanyProtectedWindow } from "../foreign-company-window";
 import { GeneratedShiftAssignment, ActualRestHoursByEmployeeDay, PriorDayShiftMap } from "./shift-generation";
-import { getShiftTimesAs } from "../shift-templates";
+import { getShiftTimesAs, getShiftDurationHours } from "../shift-templates";
 import { isGenerationDrivenPopulation } from "./workforce-pools";
 import { isOvernightShift } from "../shift-interval";
+import { restHoursBetween } from "../roster-generation";
 
 /**
  * OVERNIGHT CARRYOVER (2026-10-06 activation): if `priorDayEffective`
@@ -240,13 +241,79 @@ export function buildDayEffectivePoolFromRosterEntries(
       const entry = byEmployee.get(e.id);
       if (entry && entry.status !== "off" && entry.shift_code) {
         const times = getShiftTimesAs(entry.shift_code, date);
-        return { ...e, shift_start: times.shift_start, shift_end: times.shift_end } as Employee;
+        return {
+          ...e,
+          shift_start: times.shift_start,
+          shift_end: times.shift_end,
+          // 2026-10-27 (same class of fix as duty-generation.ts's own
+          // dayEffectivePool, used by generation itself -- see that site's
+          // doc comment): this is a SEPARATE, independently-maintained
+          // day-effective-pool builder for Find Agent / Live Operations'
+          // manual replacement lookup, and had the exact same gap --
+          // scoring.ts's hasRosterAssigned hard-requires
+          // rest_before_shift_hours and weekly_hours to both be non-null,
+          // and neither was ever substituted here, only shift_start/
+          // shift_end. A brand-new, generation-driven employee (whose
+          // static Employee.rest_before_shift_hours/weekly_hours are null
+          // by design -- see employee-import.ts) was therefore invisible
+          // to a human using Find Agent, or to Live Operations looking for
+          // a replacement, even after generation itself could assign them.
+          // Confirmed live: a real bulk-imported employee with a real,
+          // persisted, on-shift roster entry for this exact day cleared
+          // every exclusion reason this file's buildExclusionSummary
+          // checks, yet never appeared in the candidates list either --
+          // she fell through a gap the exclusion summary itself doesn't
+          // have a bucket for.
+          //
+          // rest_before_shift_hours: the real elapsed rest since
+          // YESTERDAY's persisted shift, if they worked yesterday
+          // (restHoursBetween, the same calculation shift-generation.ts
+          // uses) -- a genuinely rested employee must never be reported as
+          // "insufficient rest" just because their static baseline is
+          // null. No shift yesterday (off, or no entry at all) means
+          // nothing constrains today's rest, so Infinity, matching this
+          // same file's own carryover-candidate convention just below.
+          rest_before_shift_hours: (() => {
+            const prevEntry = byEmployeePrevious.get(e.id);
+            if (prevEntry && prevEntry.status !== "off" && prevEntry.shift_code) {
+              const prevTimes = getShiftTimesAs(prevEntry.shift_code, previousDay!.date);
+              return restHoursBetween(prevTimes.shift_start, prevTimes.shift_end, times.shift_start);
+            }
+            return e.rest_before_shift_hours ?? Number.POSITIVE_INFINITY;
+          })(),
+          // weekly_hours: the real total hours this SAME persisted plan
+          // already has them rostered for, summed across every day of
+          // THIS week's roster (approximating each day's shift-template
+          // lookup with this requirement's own date -- the effective-dated
+          // catalog essentially never changes mid-week). Falls back to the
+          // static baseline, then 0, exactly like the generation-side fix.
+          weekly_hours:
+            e.weekly_hours ??
+            rosterEntries
+              .filter((r) => r.employee_id === e.id && r.status !== "off" && r.shift_code)
+              .reduce((sum, r) => sum + getShiftDurationHours(r.shift_code!, date), 0),
+        } as Employee;
       }
       if (previousDay) {
         const prevEntry = byEmployeePrevious.get(e.id);
         if (prevEntry && prevEntry.status !== "off" && prevEntry.shift_code) {
           const carryover = overnightCarryoverWindow(getShiftTimesAs(prevEntry.shift_code, previousDay.date));
-          if (carryover) return { ...e, shift_start: carryover.shift_start, shift_end: carryover.shift_end } as Employee;
+          if (carryover) {
+            return {
+              ...e,
+              shift_start: carryover.shift_start,
+              shift_end: carryover.shift_end,
+              // A carryover candidate is continuing yesterday's overnight
+              // shift, not clocking in fresh today -- same reasoning as
+              // this file's generation-side dayEffectivePool.
+              rest_before_shift_hours: Number.POSITIVE_INFINITY,
+              weekly_hours:
+                e.weekly_hours ??
+                rosterEntries
+                  .filter((r) => r.employee_id === e.id && r.status !== "off" && r.shift_code)
+                  .reduce((sum, r) => sum + getShiftDurationHours(r.shift_code!, date), 0),
+            } as Employee;
+          }
         }
       }
       return null;
