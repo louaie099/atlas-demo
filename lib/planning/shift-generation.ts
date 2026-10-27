@@ -87,6 +87,21 @@ export interface GeneratedShiftAssignment {
    * byte-identical to before.
    */
   t1CoverageReason?: string;
+  /**
+   * RAM DUTY (Gate/Boarding/Profiling/Mesure) COVERAGE EXPLAINABILITY
+   * (2026-10-27 — see roster-generation.ts's DutyWindowGap doc comment):
+   * present ONLY on a continuous-roster-generation (Stage 6.5) top-up
+   * addition that was chosen because its window still fully covers a real
+   * flight Gate/Boarding/Profiling/Mesure requirement gap, in plain words
+   * naming the role(s)/window(s) closed — never a raw score. Exactly the
+   * same candidate-ORDERING-only explanation convention as t1CoverageReason
+   * above: it never claims actual duty coverage itself (Stage 9's real
+   * duty allocation, computed from the real final roster, remains the sole
+   * authoritative source for which employee actually works which flight).
+   * Absent (not even the key) on every other assignment, so output without
+   * this bias enabled is byte-identical to before.
+   */
+  dutyCoverageReason?: string;
 }
 
 function timeToMinutes(t: string): number {

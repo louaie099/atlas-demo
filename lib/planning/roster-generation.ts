@@ -1,7 +1,8 @@
-import { Employee, Config } from "../types";
+import { Employee, Config, Flight, StaffingRequirement } from "../types";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { isFlexibleGeneralPool } from "./workforce-pools";
 import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
+import { getRequirementWindow, RAM_OPERATION_ROLES } from "./requirement-window";
 import { getShiftTimesAs, getShiftDurationHours, shiftCatalogForDate } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
 import { flightDateFor } from "../flight-date";
@@ -403,6 +404,135 @@ export function buildRemainingT1ZoneGaps(
 }
 
 /**
+ * RAM DUTY (Gate/Boarding/Profiling/Mesure) TOP-UP COVERAGE BIAS (2026-10-27)
+ * — the SAME mechanism as T1ZoneWindowGap/buildRemainingT1ZoneGaps above,
+ * generalized from T1 Check-in zone demand to real flight-duty requirement
+ * windows (getRequirementWindow's T-60/T-90-minute-before-departure rule for
+ * RAM_OPERATION_ROLES — see requirement-window.ts). This exists because the
+ * exact same enabling fact holds here as it did for T1: the window is
+ * computable from the flight schedule ALONE, with zero roster dependency,
+ * so it is known before this top-up stage runs, just like T1 zone demand.
+ *
+ * Built directly in response to a traced, concrete planning gap (AT512's
+ * 06:15 Gate/Boarding window going unstaffed while a rest-unconstrained,
+ * OFF-the-day-before flexible employee was instead given an idle default
+ * shift) — this bias steers that same idle employee's top-up code toward
+ * ALSO covering a real, still-short duty window when they hold the matching
+ * skill, exactly how the T1 bias already steers toward T1 Check-in gaps.
+ *
+ * One `DutyWindowGap` is one flight+role's own requirement window (unlike
+ * T1's per-zone aggregation, these are NOT merged across flights — two
+ * flights needing Gate the same morning are two separate windows, each with
+ * its own `remaining`, since they are genuinely separate operational
+ * obligations that can require different people). `role` is a plain RAM
+ * operation-rule role name ("Gate", "Boarding", "Profiling", "Mesure");
+ * eligibility to close a given gap is per-role (an employee's
+ * `skills` must include that exact role), unlike T1's single boolean
+ * eligibility flag — see TopUpDutyCoverageOptions below.
+ */
+export interface DutyWindowGap {
+  role: string;
+  windowStart: string;
+  windowEnd: string;
+  /** Still-needed headcount for this specific flight+role window, net of everyone already committed before this pass and everyone this pass has committed so far. Mutated in place — see this interface's own doc comment. */
+  remaining: number;
+}
+
+/**
+ * Per-employee, per-generation-pass duty coverage context — the duty
+ * analogue of TopUpT1CoverageOptions. Entirely optional and additive:
+ * omitted (the default for every existing caller/test) leaves
+ * computeEmployeeDayCountTopUp's candidate ordering completely unaffected
+ * by this bias; the T1 bias and the existing peak-minute bias are unchanged
+ * either way.
+ */
+export interface TopUpDutyCoverageOptions {
+  /** Per-day remaining duty windows — see DutyWindowGap. Shared by reference and mutated across this whole generation pass. */
+  remainingByDay: Record<string, DutyWindowGap[]>;
+  /** This employee's own skills, intersected with RAM_OPERATION_ROLES — e.g. an employee with skills ["Boarding", "Check-in"] can only ever close a "Boarding" gap, never a "Gate" or "Profiling" one. Empty set = this bias never applies to this employee (never touches the shared state), exactly like T1's `employeeEligible: false`. */
+  employeeRoles: ReadonlySet<string>;
+}
+
+/**
+ * Builds the STARTING `remaining` values for one day's DutyWindowGap list —
+ * the real per-flight, per-role requirement (`requirements`, computed from
+ * the flight schedule alone via computeWeeklyStaffingRequirements, entirely
+ * independent of the roster) minus whoever is ALREADY committed to a shift
+ * that day that fully covers a given requirement's window AND holds the
+ * matching skill, among `committedShifts` (Stage 6 + hard-cap-repair's real,
+ * demand-driven result for the flexible pool — the only other shifts
+ * decided before this stage runs; the SAME input buildRemainingT1ZoneGaps
+ * already uses).
+ *
+ * Only `fixed_rule` RAM_OPERATION_ROLES requirements with real headcount are
+ * considered — this naturally excludes `missingOperationRuleRequirement`'s
+ * placeholder rows (role "Staffing Rule"/"Destination Classification",
+ * total_requirement 0) and every self-managed `company_config` requirement,
+ * neither of which this bias has any business touching.
+ *
+ * HONEST, DOCUMENTED LIMITATION (the exact same one buildRemainingT1ZoneGaps
+ * already discloses, inherited unchanged): this counts an eligible,
+ * already-shifted employee as covering a window they overlap, without
+ * knowing whether Stage 9 (duty-generation.ts, which runs LATER) will
+ * actually place them on THIS specific flight's duty rather than another
+ * one, or redeploy them elsewhere entirely — that per-flight allocation
+ * genuinely does not exist yet at this point in the pipeline. This can
+ * under-count real remaining demand in a tight week; it can never
+ * OVER-claim it (never credits more than a requirement's own
+ * `total_requirement`, never goes negative) — a tie-break that only ever
+ * ADDS weight toward closing a real duty gap, never removes a legal
+ * candidate or claims actual coverage itself. The real, authoritative
+ * Gate/Boarding/Profiling/Mesure coverage report stays entirely Stage 9's
+ * job, computed later from the real final roster and real duty allocation.
+ */
+export function buildRemainingDutyGaps(
+  weekStart: string,
+  day: string,
+  requirements: readonly StaffingRequirement[],
+  flights: readonly Flight[],
+  committedShifts: GeneratedShiftAssignment[],
+  employees: readonly Employee[]
+): DutyWindowGap[] {
+  const flightsById = new Map(flights.map((f) => [f.id, f]));
+  const dayRequirements = requirements.filter((r) => {
+    if (r.source !== "fixed_rule" || !RAM_OPERATION_ROLES.has(r.role) || r.total_requirement <= 0) return false;
+    const flight = flightsById.get(r.flight_id);
+    return flight != null && flight.day_of_week === day;
+  });
+  if (dayRequirements.length === 0) return [];
+
+  const date = flightDateFor(weekStart, day);
+  // Cached per role (not per requirement) — several requirements the same
+  // day often share a role, and an employee's committed shift window for
+  // that day never changes across them.
+  const committedWindowsByRole = new Map<string, { entreeMin: number; sortieMin: number }[]>();
+  function committedWindowsForRole(role: string): { entreeMin: number; sortieMin: number }[] {
+    const cached = committedWindowsByRole.get(role);
+    if (cached) return cached;
+    const eligibleIds = new Set(employees.filter((e) => e.skills.includes(role)).map((e) => e.id));
+    const windows: { entreeMin: number; sortieMin: number }[] = [];
+    for (const g of committedShifts) {
+      if (!eligibleIds.has(g.employeeId)) continue;
+      const times = getShiftTimesAs(g.shiftCode, date);
+      const entreeMin = timeToMinutes(times.shift_start);
+      const sortieMinRaw = timeToMinutes(times.shift_end);
+      const sortieMin = sortieMinRaw > entreeMin ? sortieMinRaw : sortieMinRaw + 24 * 60; // normalize a real overnight committed shift so containment comparisons stay correct; top-up codes themselves are never overnight
+      windows.push({ entreeMin, sortieMin });
+    }
+    committedWindowsByRole.set(role, windows);
+    return windows;
+  }
+
+  return dayRequirements.map((r) => {
+    const flight = flightsById.get(r.flight_id)!;
+    const window = getRequirementWindow(r, flight);
+    const windows = committedWindowsForRole(r.role);
+    const covering = windows.filter((w) => windowFullyCovered(w.entreeMin, w.sortieMin, window.start, window.end)).length;
+    return { role: r.role, windowStart: window.start, windowEnd: window.end, remaining: Math.max(0, r.total_requirement - covering) };
+  });
+}
+
+/**
  * SHARED PER-EMPLOYEE DAY-COUNT/HOURS TOP-UP CORE (factored out 2026-09-22
  * — see docs/known-limitations/roster-planning-vs-duty-allocation.md's
  * "foreign-company employees get a normal RAM weekly roster" fix). This is
@@ -490,7 +620,20 @@ export function computeEmployeeDayCountTopUp(
    * supplied and the employee is eligible; omitted = not populated, no
    * behavior change for any caller that doesn't ask for it.
    */
-  t1DecrementedByDayOut?: Map<string, T1ZoneWindowGap[]>
+  t1DecrementedByDayOut?: Map<string, T1ZoneWindowGap[]>,
+  // RAM DUTY (Gate/Boarding/Profiling/Mesure) COVERAGE BIAS (2026-10-27) —
+  // see TopUpDutyCoverageOptions. A THIRD preference, combined ADDITIVELY
+  // with the T1 zone/window score (see orderedCandidates/pickFirst — the
+  // two scores are summed, so a code closing both a T1 gap and a duty gap
+  // outranks one closing only either alone) at the exact same tier, ahead
+  // of the single-peak-minute bias. Omitted, or an employee with no
+  // matching skills (`employeeRoles` empty) — reproduces the prior ordering
+  // byte-for-byte; every existing caller/test keeps working unchanged.
+  dutyCoverage?: TopUpDutyCoverageOptions,
+  /** Output: day -> explanation, mirrors t1CoverageReasonsOut's own convention, for the duty-coverage bias. Only ever set when `dutyCoverage` is supplied and the employee has at least one matching role. */
+  dutyCoverageReasonsOut?: Map<string, string>,
+  /** Output: day -> exactly the DutyWindowGap entries THIS call's final, kept commit for that day decremented — mirrors t1DecrementedByDayOut's own convention/purpose exactly. */
+  dutyDecrementedByDayOut?: Map<string, DutyWindowGap[]>
 ): Map<string, string> {
   const additional = new Map<string, string>(); // day -> shiftCode, this employee only
   const t1Active = t1Coverage?.employeeEligible === true;
@@ -538,6 +681,47 @@ export function computeEmployeeDayCountTopUp(
     if (!decremented) return;
     for (const w of decremented) w.remaining += 1;
     t1DecrementedByDay.delete(day);
+  }
+
+  // RAM DUTY COVERAGE BIAS (2026-10-27) — exact structural mirror of the T1
+  // score/commit/undo trio above, see TopUpDutyCoverageOptions/DutyWindowGap.
+  const dutyActive = Boolean(dutyCoverage && dutyCoverage.employeeRoles.size > 0);
+  const dutyDecrementedByDay = new Map<string, DutyWindowGap[]>();
+  /** Read-only: total still-needed headcount across every duty window `code` would fully cover on `day`, among windows for a role THIS employee actually holds and that still have real remaining demand. Never mutates. */
+  function dutyCoverageScore(day: string, code: string): number {
+    if (!dutyActive) return 0;
+    const windows = dutyCoverage!.remainingByDay[day];
+    if (!windows || windows.length === 0) return 0;
+    const { entreeMin, sortieMin } = t1CodeTimes(day, code);
+    let score = 0;
+    for (const w of windows) {
+      if (w.remaining > 0 && dutyCoverage!.employeeRoles.has(w.role) && windowFullyCovered(entreeMin, sortieMin, w.windowStart, w.windowEnd)) score += w.remaining;
+    }
+    return score;
+  }
+  /** Decrements (by 1, floor 0) every duty window `code` fully covers (for a role this employee holds) on `day`, recording exactly which ones so a matching dutyUndoCommit can reverse it precisely. */
+  function dutyApplyCommit(day: string, code: string): void {
+    if (!dutyActive) return;
+    const windows = dutyCoverage!.remainingByDay[day];
+    if (!windows || windows.length === 0) return;
+    const { entreeMin, sortieMin } = t1CodeTimes(day, code);
+    const decremented: DutyWindowGap[] = [];
+    for (const w of windows) {
+      if (w.remaining > 0 && dutyCoverage!.employeeRoles.has(w.role) && windowFullyCovered(entreeMin, sortieMin, w.windowStart, w.windowEnd)) {
+        w.remaining -= 1;
+        decremented.push(w);
+      }
+    }
+    if (decremented.length > 0) dutyDecrementedByDay.set(day, decremented);
+    else dutyDecrementedByDay.delete(day);
+  }
+  /** Reverses exactly what the matching dutyApplyCommit(day, ...) decremented — never a recomputation (see T1ZoneWindowGap's doc comment, same rationale). */
+  function dutyUndoCommit(day: string): void {
+    if (!dutyActive) return;
+    const decremented = dutyDecrementedByDay.get(day);
+    if (!decremented) return;
+    for (const w of decremented) w.remaining += 1;
+    dutyDecrementedByDay.delete(day);
   }
 
   const scheduledDays = new Set<string>(initialScheduledDays);
@@ -726,15 +910,18 @@ export function computeEmployeeDayCountTopUp(
      * false or no candidate scores above 0 — byte-identical to the prior
      * behavior in that case.
      */
+    function combinedCoverageScore(code: string): number {
+      return t1CoverageScore(day, code) + dutyCoverageScore(day, code);
+    }
     function pickFirst(list: CatalogCode[]): CatalogCode {
-      if (t1Active && list.length > 1) {
+      if ((t1Active || dutyActive) && list.length > 1) {
         let bestScore = -1;
         for (const c of list) {
-          const s = t1CoverageScore(day, c.code);
+          const s = combinedCoverageScore(c.code);
           if (s > bestScore) bestScore = s;
         }
         if (bestScore > 0) {
-          const topScorers = list.filter((c) => t1CoverageScore(day, c.code) === bestScore);
+          const topScorers = list.filter((c) => combinedCoverageScore(c.code) === bestScore);
           const peakAndTopScore = peakMinute != null ? topScorers.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) : undefined;
           return peakAndTopScore ?? topScorers[0];
         }
@@ -765,6 +952,7 @@ export function computeEmployeeDayCountTopUp(
     freeDays.delete(day);
     shortfallHours -= getShiftDurationHours(code, flightDateFor(weekStart, day));
     t1ApplyCommit(day, code);
+    dutyApplyCommit(day, code);
   }
   function uncommit(i: number, code: string): void {
     const day = daysOrder[i];
@@ -773,6 +961,7 @@ export function computeEmployeeDayCountTopUp(
     freeDays.add(day);
     shortfallHours += getShiftDurationHours(code, flightDateFor(weekStart, day));
     t1UndoCommit(day);
+    dutyUndoCommit(day);
   }
 
   function attemptDay(i: number, allowReserved: boolean): boolean {
@@ -927,9 +1116,11 @@ export function computeEmployeeDayCountTopUp(
         if (lastIsTopUp) {
           additional.delete(lastDay);
           t1UndoCommit(lastDay);
+          dutyUndoCommit(lastDay);
         } else if (firstIsTopUp) {
           additional.delete(firstDay);
           t1UndoCommit(firstDay);
+          dutyUndoCommit(firstDay);
         }
       }
     }
@@ -972,6 +1163,21 @@ export function computeEmployeeDayCountTopUp(
     for (const [day, windows] of t1DecrementedByDay) t1DecrementedByDayOut.set(day, windows);
   }
 
+  // RAM DUTY COVERAGE EXPLAINABILITY (2026-10-27) — exact mirror of the T1
+  // explainability block above.
+  if (dutyActive && dutyCoverageReasonsOut) {
+    for (const day of additional.keys()) {
+      const justClosed = dutyDecrementedByDay.get(day);
+      if (justClosed && justClosed.length > 0) {
+        const parts = justClosed.map((w) => `${w.role} (${w.windowStart}–${w.windowEnd})`);
+        dutyCoverageReasonsOut.set(day, `Covers a flight duty requirement still short on ${parts.join(", ")}, in addition to the normal roster obligation.`);
+      }
+    }
+  }
+  if (dutyActive && dutyDecrementedByDayOut) {
+    for (const [day, windows] of dutyDecrementedByDay) dutyDecrementedByDayOut.set(day, windows);
+  }
+
   return additional;
 }
 
@@ -1001,6 +1207,12 @@ export interface FlexibleTopUpContext {
   // real top-up relies on later. generate-draft-plan.ts is the one real
   // caller that supplies this, for the real (not simulated) top-up only.
   remainingT1ZoneGapsByDay?: Record<string, T1ZoneWindowGap[]>;
+  // RAM DUTY COVERAGE BIAS (2026-10-27) — see TopUpDutyCoverageOptions. Same
+  // "deliberately omitted from hard-cap-repair.ts's simulation context"
+  // rationale as remainingT1ZoneGapsByDay above — generate-draft-plan.ts is
+  // the one real caller that supplies this, for the real (not simulated)
+  // top-up only.
+  remainingDutyGapsByDay?: Record<string, DutyWindowGap[]>;
 }
 
 export interface FlexibleEmployeeTopUpResult {
@@ -1009,6 +1221,8 @@ export interface FlexibleEmployeeTopUpResult {
   shortfall: { day: string; reason: HardCapExclusionReason }[];
   /** day -> plain-words T1 coverage explanation — see computeEmployeeDayCountTopUp's t1CoverageReasonsOut. Only present when this employee is T1-eligible and ctx.remainingT1ZoneGapsByDay was supplied. */
   t1CoverageReasons?: Map<string, string>;
+  /** day -> plain-words duty coverage explanation — see computeEmployeeDayCountTopUp's dutyCoverageReasonsOut. Only present when this employee has at least one matching role and ctx.remainingDutyGapsByDay was supplied. */
+  dutyCoverageReasons?: Map<string, string>;
 }
 
 /**
@@ -1056,7 +1270,14 @@ export function computeFlexibleEmployeeTopUp(
   // omitted. The caller (generateObligationToppedUpShifts) computes this
   // once per employee via isEligibleForDefaultCheckinPlacement; omitted
   // here = treated as ineligible = no change from before this feature.
-  employeeT1Eligible = false
+  employeeT1Eligible = false,
+  // RAM DUTY COVERAGE BIAS (2026-10-27) — this employee's own skills
+  // intersected with RAM_OPERATION_ROLES (see TopUpDutyCoverageOptions).
+  // Irrelevant (and never consulted) when ctx.remainingDutyGapsByDay is
+  // omitted. The caller (generateObligationToppedUpShifts) computes this
+  // once per employee; omitted here = empty set = no change from before
+  // this feature.
+  employeeDutyRoles: ReadonlySet<string> = new Set()
 ): FlexibleEmployeeTopUpResult {
   const { daysOrder, config, weekStart, hardCaps, fatigueConfig } = ctx;
   const targetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
@@ -1077,6 +1298,9 @@ export function computeFlexibleEmployeeTopUp(
   const t1Active = Boolean(ctx.remainingT1ZoneGapsByDay) && employeeT1Eligible;
   const t1CoverageReasons = t1Active ? new Map<string, string>() : undefined;
   const t1Decremented = t1Active ? new Map<string, T1ZoneWindowGap[]>() : undefined;
+  const dutyActive = Boolean(ctx.remainingDutyGapsByDay) && employeeDutyRoles.size > 0;
+  const dutyCoverageReasons = dutyActive ? new Map<string, string>() : undefined;
+  const dutyDecremented = dutyActive ? new Map<string, DutyWindowGap[]>() : undefined;
   const additions = computeEmployeeDayCountTopUp(
     employeeId,
     daysOrder,
@@ -1097,7 +1321,10 @@ export function computeFlexibleEmployeeTopUp(
       : undefined,
     t1Active ? { remainingByDay: ctx.remainingT1ZoneGapsByDay!, employeeEligible: true } : undefined,
     t1CoverageReasons,
-    t1Decremented
+    t1Decremented,
+    dutyActive ? { remainingByDay: ctx.remainingDutyGapsByDay!, employeeRoles: employeeDutyRoles } : undefined,
+    dutyCoverageReasons,
+    dutyDecremented
   );
 
   let finalAdditions = additions;
@@ -1147,12 +1374,20 @@ export function computeFlexibleEmployeeTopUp(
               t1CoverageReasons?.delete(day);
             }
           }
+          // RAM DUTY CORRECTNESS (2026-10-27) — same reversal, for the duty
+          // coverage bias's own shared state; see the T1 comment above.
+          if (dutyActive && dutyDecremented) {
+            for (const [day] of dropped) {
+              for (const w of dutyDecremented.get(day) ?? []) w.remaining += 1;
+              dutyCoverageReasons?.delete(day);
+            }
+          }
         }
       }
     }
   }
 
-  return { additions: finalAdditions, fatigueReasons, shortfall, t1CoverageReasons };
+  return { additions: finalAdditions, fatigueReasons, shortfall, t1CoverageReasons, dutyCoverageReasons };
 }
 
 /**
@@ -1211,7 +1446,17 @@ export function generateObligationToppedUpShifts(
   // employee processed below is topped up — see T1ZoneWindowGap's own doc
   // comment. Optional; omitted reproduces the prior output byte-for-byte —
   // every existing caller/test keeps working unchanged.
-  remainingT1ZoneGapsByDay?: Record<string, T1ZoneWindowGap[]>
+  remainingT1ZoneGapsByDay?: Record<string, T1ZoneWindowGap[]>,
+  // RAM DUTY (Gate/Boarding/Profiling/Mesure) COVERAGE BIAS (2026-10-27) —
+  // see TopUpDutyCoverageOptions and buildRemainingDutyGaps. Per-day
+  // remaining duty-requirement windows, already net of Stage 6 + hard-cap
+  // repair's real demand-driven result (generate-draft-plan.ts builds this
+  // right before calling this function, the same way it already builds
+  // remainingT1ZoneGapsByDay). Mutated in place as each matching-skill
+  // employee processed below is topped up. Optional; omitted reproduces the
+  // prior output byte-for-byte — every existing caller/test keeps working
+  // unchanged.
+  remainingDutyGapsByDay?: Record<string, DutyWindowGap[]>
 ): Record<string, GeneratedShiftAssignment[]> {
   const additional: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) additional[day] = [];
@@ -1227,6 +1472,7 @@ export function generateObligationToppedUpShifts(
     fatigueConfig,
     hardCaps: hardCaps ? { caps: hardCaps.caps, incomingStreakByEmployee: hardCaps.incomingStreakByEmployee } : undefined,
     remainingT1ZoneGapsByDay,
+    remainingDutyGapsByDay,
   };
 
   // Never schedule below the employee's OFF-day entitlement for this
@@ -1235,11 +1481,15 @@ export function generateObligationToppedUpShifts(
   // an employee past the roster shape objective 1 establishes.
   for (const employee of employees.filter(isFlexibleGeneralPool)) {
     const employeeT1Eligible = Boolean(remainingT1ZoneGapsByDay) && isEligibleForDefaultCheckinPlacement(employee);
-    const { additions, fatigueReasons, shortfall, t1CoverageReasons } = computeFlexibleEmployeeTopUp(
+    const employeeDutyRoles: ReadonlySet<string> = remainingDutyGapsByDay
+      ? new Set(employee.skills.filter((s) => RAM_OPERATION_ROLES.has(s)))
+      : new Set();
+    const { additions, fatigueReasons, shortfall, t1CoverageReasons, dutyCoverageReasons } = computeFlexibleEmployeeTopUp(
       employee.id,
       demandDrivenShiftsByDay,
       ctx,
-      employeeT1Eligible
+      employeeT1Eligible,
+      employeeDutyRoles
     );
     for (const { day, reason } of shortfall) {
       hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "flexible_pool_top_up", reason });
@@ -1250,6 +1500,8 @@ export function generateObligationToppedUpShifts(
       if (fatigueReasons) g.fatigueReason = fatigueReasons.get(day) ?? [];
       const t1Reason = t1CoverageReasons?.get(day);
       if (t1Reason) g.t1CoverageReason = t1Reason;
+      const dutyReason = dutyCoverageReasons?.get(day);
+      if (dutyReason) g.dutyCoverageReason = dutyReason;
       additional[day].push(g);
     }
   }

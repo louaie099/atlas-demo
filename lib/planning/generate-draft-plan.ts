@@ -6,7 +6,7 @@ import { planPreferredOffWindows, Stage6OffWindowContext, windowIncludesDayZero,
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
-import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext, buildRemainingT1ZoneGaps } from "./roster-generation";
+import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext, buildRemainingT1ZoneGaps, buildRemainingDutyGaps } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { enforceHardRulesOnGeneratedRoster } from "./hard-rule-gate";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
@@ -570,6 +570,20 @@ export function generateDraftWeeklyPlan(
     // to true; false reproduces the pre-feature output exactly (tests
     // compare with/without).
     t1TopUpCoverageBias?: boolean;
+    // RAM DUTY (Gate/Boarding/Profiling/Mesure) TOP-UP COVERAGE BIAS
+    // (2026-10-27 — see roster-generation.ts's DutyWindowGap doc comment):
+    // the exact same mechanism as t1TopUpCoverageBias above, generalized
+    // from T1 Check-in zone demand to real flight Gate/Boarding/Profiling/
+    // Mesure requirement windows (getRequirementWindow's T-60/T-90-minute
+    // -before-departure rule). Built in direct response to a traced,
+    // concrete gap: an idle, rest-legal flexible employee getting a default
+    // top-up shift instead of one that would have covered an early flight's
+    // unstaffed Gate/Boarding window. A pure ordering preference — never
+    // adds a day beyond the normal roster obligation, never widens
+    // legality, never claims actual duty coverage itself (Stage 9's real
+    // duty allocation remains the sole authoritative source). Defaults to
+    // true; false reproduces the pre-feature output exactly.
+    dutyTopUpCoverageBias?: boolean;
   } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
@@ -936,6 +950,24 @@ export function generateDraftWeeklyPlan(
       )
     : undefined;
 
+  // RAM DUTY TOP-UP COVERAGE BIAS (2026-10-27 — see planningOptions.
+  // dutyTopUpCoverageBias and roster-generation.ts's DutyWindowGap doc
+  // comment): same structure as remainingT1ZoneGapsByDay above, built from
+  // the real per-flight, per-role requirements (`requirements`, computed
+  // from the flight schedule alone at the very top of this function) net of
+  // whoever Stage 6 + hard-cap repair already committed. Mutated in place
+  // by generateObligationToppedUpShifts below as each matching-skill
+  // employee is topped up.
+  const dutyTopUpCoverageBiasEnabled = planningOptions.dutyTopUpCoverageBias !== false;
+  const remainingDutyGapsByDay = dutyTopUpCoverageBiasEnabled
+    ? Object.fromEntries(
+        daysOrder.map((day) => [
+          day,
+          buildRemainingDutyGaps(weekStart, day, requirements, flights, repairedDemandDrivenShiftsByDay[day] ?? [], employees),
+        ])
+      )
+    : undefined;
+
   const obligationToppedUpByDay = generateObligationToppedUpShifts(
     daysOrder,
     employees,
@@ -948,7 +980,8 @@ export function generateDraftWeeklyPlan(
     preferredOffDaysByEmployee,
     fatigueConfig,
     { ...stageHardCaps, exclusionsOut: hardCapExclusions },
-    remainingT1ZoneGapsByDay
+    remainingT1ZoneGapsByDay,
+    remainingDutyGapsByDay
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {

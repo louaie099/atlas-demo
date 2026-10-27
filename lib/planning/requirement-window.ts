@@ -41,8 +41,16 @@ const RAM_REQUIREMENT_LEAD_MINUTES = {
   dreamliner: 90, // T-1h30
 };
 
-/** Gate, Boarding, Profiling, and (once configured) Mesure — the RAM operation-rule roles this timing rule governs. */
-const RAM_OPERATION_ROLES = new Set(["Gate", "Boarding", "Profiling", "Mesure"]);
+/**
+ * Gate, Boarding, Profiling, and (once configured) Mesure — the RAM
+ * operation-rule roles this timing rule governs. Exported (2026-10-27,
+ * duty-coverage top-up bias — see roster-generation.ts's
+ * TopUpDutyCoverageOptions) so the roster top-up stage can identify exactly
+ * which StaffingRequirement rows are real, flight-schedule-derived duty
+ * windows, the same set this module itself already keys off, instead of a
+ * second, independently-drifting copy of the role list.
+ */
+export const RAM_OPERATION_ROLES = new Set(["Gate", "Boarding", "Profiling", "Mesure"]);
 
 /**
  * The operational time window a staffing requirement actually needs
