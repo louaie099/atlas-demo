@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { Flight, FlightStatus } from "@/lib/types";
 import { FlightPhase, FLIGHT_PHASE_LABEL } from "@/lib/flight-phase";
+import { canManageOperations } from "@/lib/roles";
+import { resolveRole } from "@/lib/resolve-role";
 
 export const dynamic = "force-dynamic";
 
@@ -31,8 +33,21 @@ const VALID_PHASES = Object.keys(FLIGHT_PHASE_LABEL) as FlightPhase[];
  * This route does NOT itself run conflict detection — call POST
  * /api/live-ops/evaluate-impact with the same flightId afterward to see
  * the impact of the change.
+ *
+ * Role boundary (2026-10-27 FIX): this route had NO auth/role check at
+ * all — anyone able to reach it could mark any flight delayed, move its
+ * gate, or override its phase. Every other Live Operations mutation
+ * (app/api/assign, app/api/confirm-reassignment, app/api/checkin-zone-
+ * assign) already requires non-Viewer (canManageOperations); this route
+ * gets the same boundary now, checked server-side via resolveRole, not
+ * just hidden in the UI.
  */
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
+  const role = await resolveRole(req);
+  if (!canManageOperations(role)) {
+    return NextResponse.json({ error: "Viewers cannot report operational changes — Planner or Administrator role required." }, { status: 403 });
+  }
+
   const body = await req.json().catch(() => ({}));
   const { actual_departure, status, gate, operational_phase_override } = body as {
     actual_departure?: string | null;

@@ -8,10 +8,8 @@ import { previousWeekStart } from "@/lib/planning/rotation-context";
 import { getRequirementWindow } from "@/lib/planning/requirement-window";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { canManageOperations } from "@/lib/roles";
-import { resolveRole } from "@/lib/resolve-role";
+import { resolveRole, resolveActorName } from "@/lib/resolve-role";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry } from "@/lib/types";
-
-const PLANNER_NAME = "Mohammed Alaoui";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +46,7 @@ export async function POST(req: Request) {
   if (!canManageOperations(role)) {
     return NextResponse.json({ error: "Viewers cannot make assignments — Planner or Administrator role required." }, { status: 403 });
   }
+  const PLANNER_NAME = await resolveActorName();
 
   const { staffingRequirementId, employeeId } = await req.json();
 

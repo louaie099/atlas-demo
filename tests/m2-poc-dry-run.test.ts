@@ -397,7 +397,7 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     const patchRes = await PATCH_operational(
       new Request(`http://localhost/api/flights/${at503Wed.id}/operational`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-atlas-role": "planner" },
         body: JSON.stringify({ actual_departure: "15:10", status: "delayed" }),
       }),
       { params: { id: at503Wed.id } }
@@ -628,7 +628,7 @@ describe("M2 — ATLAS PoC complete dry run (docs/ATLAS_POC_PLAN.md)", () => {
     const patchRes = await PATCH_operational(
       new Request(`http://localhost/api/flights/${at502Tue.id}/operational`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-atlas-role": "planner" },
         body: JSON.stringify({ actual_departure: "15:30", status: "delayed" }),
       }),
       { params: { id: at502Tue.id } }
@@ -744,7 +744,7 @@ describe("M2 — Step 12: reset and repeat (reproducibility)", () => {
     const patchRes = await PATCH_operational(
       new Request(`http://localhost/api/flights/${delayedFlight.id}/operational`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-atlas-role": "planner" },
         body: JSON.stringify({ actual_departure: "15:30", status: "delayed" }),
       }),
       { params: { id: delayedFlight.id } }

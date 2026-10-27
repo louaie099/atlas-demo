@@ -5,11 +5,10 @@ import { scoreCandidates, TimeWindow } from "@/lib/scoring";
 import { fetchAllAssignmentsForPlan, fetchAllRequirementsForFlightIds } from "@/lib/planning/weekly-plan-service";
 import { computeBusyWindowsForDay, buildDayEffectivePoolFromRosterEntries } from "@/lib/planning/duty-generation";
 import { flightDateFor } from "@/lib/flight-date";
-import { ROLE_HEADER, getRoleFromHeader, canManageOperations } from "@/lib/roles";
+import { canManageOperations } from "@/lib/roles";
+import { resolveRole, resolveActorName } from "@/lib/resolve-role";
 import { CHECKIN_ZONES, CheckinZoneId } from "@/lib/checkin-zones";
 import { Assignment, Employee, Flight, StaffingRequirement, WeeklyPlan, WeeklyPlanRosterEntry, ZoneCheckinAssignment } from "@/lib/types";
-
-const PLANNER_NAME = "Mohammed Alaoui";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +30,11 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(req: Request) {
   const supabase = getSupabaseServerClient();
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageOperations(role)) {
     return NextResponse.json({ error: "Viewers cannot make assignments — Planner, Regulator or Administrator role required." }, { status: 403 });
   }
+  const PLANNER_NAME = await resolveActorName();
   const { zoneRequirementId, employeeId, counter } = await req.json();
 
   if (!zoneRequirementId || !employeeId) {
@@ -185,10 +185,11 @@ export async function POST(req: Request) {
  */
 export async function DELETE(req: Request) {
   const supabase = getSupabaseServerClient();
-  const role = getRoleFromHeader(req.headers.get(ROLE_HEADER));
+  const role = await resolveRole(req);
   if (!canManageOperations(role)) {
     return NextResponse.json({ error: "Viewers cannot change assignments — Planner, Regulator or Administrator role required." }, { status: 403 });
   }
+  const PLANNER_NAME = await resolveActorName();
   const { zoneRequirementId, employeeId } = await req.json();
   if (!zoneRequirementId || !employeeId) {
     return NextResponse.json({ error: "zoneRequirementId and employeeId are required" }, { status: 400 });

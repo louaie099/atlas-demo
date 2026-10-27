@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { confirmReassignment } from "@/lib/live-ops-service";
 import { canManageOperations } from "@/lib/roles";
-import { resolveRole } from "@/lib/resolve-role";
+import { resolveRole, resolveActorName } from "@/lib/resolve-role";
 
 export const dynamic = "force-dynamic";
 
@@ -49,12 +49,14 @@ export async function POST(req: Request) {
   }
 
   const supabase = getSupabaseServerClient();
+  const actorName = await resolveActorName();
   const result = await confirmReassignment(supabase, {
     staffingRequirementId,
     oldEmployeeId,
     newEmployeeId,
     reason: reason ?? "",
     overrideAcknowledged: overrideAcknowledged === true,
+    actorName,
   });
 
   if (!result.ok) {

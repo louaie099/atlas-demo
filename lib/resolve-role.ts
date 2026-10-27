@@ -37,3 +37,22 @@ export async function resolveRole(req: Request): Promise<UserRole> {
 
   return "viewer";
 }
+
+/**
+ * 2026-10-27 FIX: who to attribute a mutating action to in the persisted
+ * audit trail (assignments.created_by, assignment_modifications.changed_by,
+ * audit_log_entries.description) -- previously a fixed demo placeholder
+ * name ("Mohammed Alaoui") was written regardless of who was actually
+ * signed in, so a real logged-in user confirming a reassignment would have
+ * someone else's name permanently attached to it. Mirrors resolveRole's own
+ * precedence: a real, verified Supabase Auth session's email wins, full
+ * stop, whenever one exists. Only when there is NO real session does this
+ * fall back to the same fixed demo name every pre-existing caller/test
+ * already expects (none of them establish a session), so this is additive
+ * -- it changes behavior only once a real user is actually signed in.
+ */
+export async function resolveActorName(): Promise<string> {
+  const identity = await getAuthenticatedIdentity();
+  if (identity) return identity.email ?? `user:${identity.userId}`;
+  return "Mohammed Alaoui";
+}

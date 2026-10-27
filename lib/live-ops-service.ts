@@ -733,6 +733,17 @@ export interface ConfirmReassignmentInput {
    * of it.
    */
   overrideAcknowledged?: boolean;
+  /**
+   * 2026-10-27 FIX: the real signed-in identity performing this
+   * reassignment (resolve-role.ts's resolveActorName), threaded in from
+   * the route so the persisted audit trail (created_by/changed_by/
+   * description below) reflects who actually confirmed it, not the fixed
+   * PLANNER_NAME placeholder regardless of who's signed in. Omitted
+   * (every pre-existing direct caller/test) falls back to PLANNER_NAME,
+   * exactly as before -- additive only, never a behavior change for a
+   * caller that doesn't supply it.
+   */
+  actorName?: string;
 }
 
 export type ConfirmReassignmentResult =
@@ -803,6 +814,7 @@ export type ConfirmReassignmentResult =
  */
 export async function confirmReassignment(supabase: SupabaseClient, input: ConfirmReassignmentInput): Promise<ConfirmReassignmentResult> {
   const { staffingRequirementId, oldEmployeeId, newEmployeeId, reason, overrideAcknowledged } = input;
+  const actorName = input.actorName ?? PLANNER_NAME;
 
   const [{ data: requirement }, { data: oldEmployee }, { data: newEmployee }] = await Promise.all([
     supabase.from("staffing_requirements").select("*").eq("id", staffingRequirementId).single(),
@@ -880,7 +892,7 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
     staffing_requirement_id: staffingRequirementId,
     employee_id: newEmployeeId,
     source: "human_modified",
-    created_by: PLANNER_NAME,
+    created_by: actorName,
   });
   if (insertErr) return { ok: false, status: 500, error: insertErr.message };
 
@@ -892,7 +904,7 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
     action: "replaced",
     previous_employee_id: oldEmployeeId,
     new_employee_id: newEmployeeId,
-    changed_by: PLANNER_NAME,
+    changed_by: actorName,
     changed_at: new Date().toISOString(),
     reason: reason ?? null,
   });
@@ -910,7 +922,7 @@ export async function confirmReassignment(supabase: SupabaseClient, input: Confi
   await supabase.from("audit_log_entries").insert({
     id: `audit-${nextStep}`,
     step_number: nextStep,
-    description: `Operational reassignment: ${(flight as Flight).flight_number} ${(requirement as StaffingRequirement).role} moved from ${(oldEmployee as Employee).name} to ${(newEmployee as Employee).name} — ${reason}.${overrideNote} Confirmed by ${PLANNER_NAME}.`,
+    description: `Operational reassignment: ${(flight as Flight).flight_number} ${(requirement as StaffingRequirement).role} moved from ${(oldEmployee as Employee).name} to ${(newEmployee as Employee).name} — ${reason}.${overrideNote} Confirmed by ${actorName}.`,
   });
 
   return { ok: true, assignmentId };
