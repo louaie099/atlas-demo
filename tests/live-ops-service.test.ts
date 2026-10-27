@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { CONFIG } from "../lib/seed-data";
 import { planIdForWeek } from "../lib/planning/weekly-plan-service";
 import { getCandidatesForRequirement } from "../lib/planning/candidate-lookup";
-import { loadLiveOpsView, evaluateFlightDelayImpact, confirmReassignment } from "../lib/live-ops-service";
+import { loadLiveOpsView, evaluateFlightDelayImpact, confirmReassignment, detectStaleRequirements } from "../lib/live-ops-service";
 import { deriveFlightState } from "../lib/live-ops-flight-state";
 import { acknowledgeAlert, activeAlerts, reconcileAlerts } from "../lib/live-ops-alerts";
 import { effectiveDeparture } from "../lib/flight-operations";
@@ -691,6 +691,50 @@ describe("live-ops-service — invalidated-assignment effective coverage (2026-1
     const fake = new FakeSupabase();
     seedAT815Fixture(fake);
 
+    // AT815 is a Boeing 787-9 (Dreamliner) to a Europe/Schengen
+    // destination, so a FRESH classification (lib/planning/weekly-
+    // requirements.ts) requires 2 Gate + 2 Boarding + 2 Profiling, not
+    // just the single Gate requirement seedAT815Fixture persists for
+    // simplicity. Left as-is, the stale-requirement detector
+    // (2026-10-27, detectStaleRequirements) would correctly flag that
+    // real drift and keep this flight's alert open forever, which would
+    // make THIS test's assertion wrong, not the feature. So -- only for
+    // this full-lifecycle test, which is the one that walks the alert
+    // all the way to "resolved" -- make the persisted requirement set
+    // actually complete and consistent with AT815's real aircraft/
+    // destination, exactly like a real plan generation would have
+    // produced, so there is no genuine drift left for the detector to
+    // (correctly) report.
+    const secondGateAgent = makeEmployee({ id: "emp-at815-gate2", name: "Second Gate Agent", skills: ["Gate", "Boarding"], shift_start: "13:45", shift_end: "23:15" });
+    const boardingAgent1 = makeEmployee({ id: "emp-at815-boarding1", name: "Boarding Agent One", skills: ["Boarding"], shift_start: "13:45", shift_end: "23:15" });
+    const boardingAgent2 = makeEmployee({ id: "emp-at815-boarding2", name: "Boarding Agent Two", skills: ["Boarding"], shift_start: "13:45", shift_end: "23:15" });
+    const profilingAgent1 = makeEmployee({ id: "emp-at815-profiling1", name: "Profiling Agent One", skills: ["Profiling"], shift_start: "13:45", shift_end: "23:15" });
+    const profilingAgent2 = makeEmployee({ id: "emp-at815-profiling2", name: "Profiling Agent Two", skills: ["Profiling"], shift_start: "13:45", shift_end: "23:15" });
+    const reqBoarding = makeRequirement({ id: "req-at815-boarding", flight_id: "flight-at815", role: "Boarding", total_requirement: 2 });
+    const reqProfiling = makeRequirement({ id: "req-at815-profiling", flight_id: "flight-at815", role: "Profiling", total_requirement: 2 });
+    fake.from("employees").insert([secondGateAgent, boardingAgent1, boardingAgent2, profilingAgent1, profilingAgent2] as unknown as FakeRow[]);
+    // Same requirement ROW as seedAT815Fixture's req-at815-gate -- a real
+    // plan generation produces exactly one StaffingRequirement per role
+    // per flight (total_requirement already covers every seat for that
+    // role), never one row per assigned employee -- so this bumps that
+    // existing row's total to 2 rather than inserting a second Gate row.
+    await fake.from("staffing_requirements").update({ total_requirement: 2 }).eq("id", "req-at815-gate");
+    fake.from("staffing_requirements").insert([reqBoarding, reqProfiling] as unknown as FakeRow[]);
+    fake.from("assignments").insert([
+      { id: "assign-at815-gate2", plan_id: PLAN_ID, staffing_requirement_id: "req-at815-gate", employee_id: "emp-at815-gate2", source: "human_modified", created_by: "Test Setup", assigned_at: new Date().toISOString() },
+      { id: "assign-at815-boarding1", plan_id: PLAN_ID, staffing_requirement_id: "req-at815-boarding", employee_id: "emp-at815-boarding1", source: "human_modified", created_by: "Test Setup", assigned_at: new Date().toISOString() },
+      { id: "assign-at815-boarding2", plan_id: PLAN_ID, staffing_requirement_id: "req-at815-boarding", employee_id: "emp-at815-boarding2", source: "human_modified", created_by: "Test Setup", assigned_at: new Date().toISOString() },
+      { id: "assign-at815-profiling1", plan_id: PLAN_ID, staffing_requirement_id: "req-at815-profiling", employee_id: "emp-at815-profiling1", source: "human_modified", created_by: "Test Setup", assigned_at: new Date().toISOString() },
+      { id: "assign-at815-profiling2", plan_id: PLAN_ID, staffing_requirement_id: "req-at815-profiling", employee_id: "emp-at815-profiling2", source: "human_modified", created_by: "Test Setup", assigned_at: new Date().toISOString() },
+    ] as unknown as FakeRow[]);
+    fake.from("weekly_plan_roster_entries").insert([
+      { id: "roster-at815-gate2", plan_id: PLAN_ID, employee_id: "emp-at815-gate2", day_of_week: "Monday", status: "working", shift_code: "AP02" },
+      { id: "roster-at815-boarding1", plan_id: PLAN_ID, employee_id: "emp-at815-boarding1", day_of_week: "Monday", status: "working", shift_code: "AP02" },
+      { id: "roster-at815-boarding2", plan_id: PLAN_ID, employee_id: "emp-at815-boarding2", day_of_week: "Monday", status: "working", shift_code: "AP02" },
+      { id: "roster-at815-profiling1", plan_id: PLAN_ID, employee_id: "emp-at815-profiling1", day_of_week: "Monday", status: "working", shift_code: "AP02" },
+      { id: "roster-at815-profiling2", plan_id: PLAN_ID, employee_id: "emp-at815-profiling2", day_of_week: "Monday", status: "working", shift_code: "AP02" },
+    ] as unknown as FakeRow[]);
+
     // 1. The regulator delays AT815 from 13:45 to 18:45 -- an ordinary
     // operational PATCH, exactly what app/api/flights/[id]/operational
     // does. Nothing here calls evaluate-impact or opens any drawer.
@@ -1340,5 +1384,156 @@ describe("live-ops-service — confirmReassignment revalidates the replacement i
     const auditEntries = fake.table("audit_log_entries") as { step_number: number; description: string }[];
     const newest = [...auditEntries].sort((a, b) => b.step_number - a.step_number)[0];
     expect(newest.description).toContain("flagged candidate, override confirmed");
+  });
+});
+
+describe("detectStaleRequirements — 'aircraft change affecting staffing requirements' (2026-10-27)", () => {
+  // "Domestic" never triggers Profiling/Mesure (see ram-staffing-matrix.ts's
+  // own doc comment: "Africa, Domestic, or any destination with no confirmed
+  // classification... simply has no Profiling/Mesure requirement") -- used
+  // throughout this block to isolate the Gate/Boarding-only case under test,
+  // rather than every assertion also having to account for Profiling.
+  it("flags a persisted requirement whose role still applies but headcount changed (737 -> 787, Gate 1 -> 2)", () => {
+    const flight = makeFlight({ id: "flight-1", flight_number: "AT301", aircraft: "Boeing 787", destination_category: "Domestic" }); // CURRENT attributes, already changed since generation
+    const persisted = [
+      makeRequirement({ id: "req-gate", flight_id: "flight-1", role: "Gate", total_requirement: 1 }),
+      makeRequirement({ id: "req-boarding", flight_id: "flight-1", role: "Boarding", total_requirement: 1 }),
+    ]; // what was persisted BEFORE the aircraft changed
+    const { staleByRequirementId, missing } = detectStaleRequirements(flight, CONFIG, persisted);
+    expect(staleByRequirementId.get("req-gate")).toMatchObject({ role: "Gate", freshTotalRequirement: 2 });
+    expect(staleByRequirementId.get("req-boarding")).toMatchObject({ role: "Boarding", freshTotalRequirement: 2 });
+    expect(missing).toHaveLength(0); // both roles already have a persisted row -- this is a headcount mismatch, not a missing one
+  });
+
+  it("never flags anything when nothing has changed since generation — the overwhelmingly common case", () => {
+    const flight = makeFlight({ id: "flight-1", flight_number: "AT301", aircraft: "Boeing 737", destination_category: "Domestic" });
+    const persisted = [
+      makeRequirement({ id: "req-gate", flight_id: "flight-1", role: "Gate", total_requirement: 1 }),
+      makeRequirement({ id: "req-boarding", flight_id: "flight-1", role: "Boarding", total_requirement: 1 }),
+    ];
+    const { staleByRequirementId, missing } = detectStaleRequirements(flight, CONFIG, persisted);
+    expect(staleByRequirementId.size).toBe(0);
+    expect(missing).toHaveLength(0);
+  });
+
+  it("flags a role a fresh classification would now require that has NO persisted row at all (missing)", () => {
+    const flight = makeFlight({ id: "flight-1", flight_number: "AT301", aircraft: "Boeing 787", destination_category: "Domestic" });
+    const persisted = [makeRequirement({ id: "req-gate", flight_id: "flight-1", role: "Gate", total_requirement: 1 })]; // stale too (1 -> 2), but that's a separate assertion
+    const { missing } = detectStaleRequirements(flight, CONFIG, persisted);
+    expect(missing.map((m) => m.role)).toEqual(["Boarding"]); // Boarding was never persisted for this flight at all
+    // Re-run with Gate omitted entirely too: a fresh 787 classification requires both Gate and Boarding.
+    const { missing: missingBoth } = detectStaleRequirements(flight, CONFIG, []);
+    expect(missingBoth.map((m) => m.role).sort()).toEqual(["Boarding", "Gate"]);
+  });
+
+  it("flags a persisted role that no longer applies at all once the flight's attributes changed (freshTotalRequirement: 0)", () => {
+    // A self-managed (foreign carrier) flight's persisted "Ramp Team" requirement, but the airline has since
+    // been edited to Royal Air Maroc -- company_config no longer applies; classifyFlightRequirements now
+    // goes through the RAM path (Gate/Boarding) instead, so "Ramp Team" has no fresh match at all.
+    const flight = makeFlight({ id: "flight-1", flight_number: "AT301", airline: "Royal Air Maroc", operator_type: "atlas_managed", destination_category: "Domestic" });
+    const persisted = [makeRequirement({ id: "req-ramp", flight_id: "flight-1", role: "Ramp Team", total_requirement: 3, source: "company_config" })];
+    const { staleByRequirementId } = detectStaleRequirements(flight, CONFIG, persisted);
+    expect(staleByRequirementId.get("req-ramp")).toMatchObject({ role: "Ramp Team", freshTotalRequirement: 0 });
+  });
+
+  it("never compares the 'Staffing Rule'/'Destination Classification' honest-gap placeholder role -- it is never a real duty", () => {
+    // Gate/Boarding is a confirmed UNIVERSAL rule regardless of destination
+    // (2026-10-04 revision, weekly-requirements.ts's own doc comment) --
+    // the placeholder is now reachable only for a genuinely malformed
+    // flight record (missing aircraft), never merely an unclassified
+    // destination.
+    const flight = makeFlight({ id: "flight-1", flight_number: "AT301", aircraft: "", destination_category: null });
+    const persisted = [makeRequirement({ id: "req-placeholder", flight_id: "flight-1", role: "Destination Classification", total_requirement: 0 })];
+    const { staleByRequirementId, missing } = detectStaleRequirements(flight, CONFIG, persisted);
+    expect(staleByRequirementId.size).toBe(0);
+    expect(missing).toHaveLength(0);
+  });
+});
+
+describe("live-ops-service — loadLiveOpsView wires detectStaleRequirements through (2026-10-27)", () => {
+  it("surfaces staleRequirement on the EXISTING requirement view once the flight's aircraft is edited after generation, without a new plan ever being regenerated", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake); // req-1 (Boarding, flight-1, Boeing 737, total_requirement 1)
+
+    // Simulate Flight Schedule's full-rewrite PUT editing the aircraft in
+    // place, exactly as app/api/flights/[id]/route.ts's own doc comment
+    // describes -- it writes straight into the flights row with no
+    // operational-impact evaluation of any kind, so the persisted
+    // StaffingRequirement is left exactly as it was.
+    const flights = fake.table("flights") as unknown as Flight[];
+    const flight1 = flights.find((f) => f.id === "flight-1")!;
+    flight1.aircraft = "Boeing 787";
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-1")!;
+    const req1View = flightView.requirements.find((r) => r.requirement.id === "req-1")!;
+    expect(req1View.staleRequirement).toMatchObject({ role: "Boarding", freshTotalRequirement: 2 });
+    // The fresh classification for a 787 also needs Gate, which flight-1
+    // never had a persisted requirement for at all -- surfaced separately.
+    expect(flightView.missingRequirements.some((m) => m.role === "Gate")).toBe(true);
+  });
+
+  it("surfaces nothing for a flight whose COMPLETE, consistent requirement set still matches a fresh classification -- the overwhelmingly common case (nothing edited since generation)", async () => {
+    // seedBaseFixture itself deliberately persists only ONE role per flight
+    // (it exists for the reassignment/conflict tests above, not as a
+    // complete plan), so it is NOT a fair fixture for "nothing changed" --
+    // a fresh classification would always find roles it never persisted.
+    // This test instead builds its own flight with the FULL role set a
+    // fresh classification actually produces for it (Domestic -> Gate +
+    // Boarding only, no Profiling/Mesure noise), persisted in full.
+    const fake = new FakeSupabase();
+    const emp = makeEmployee({ id: "emp-complete" });
+    const flight = makeFlight({ id: "flight-complete", flight_number: "AT777", destination_category: "Domestic" });
+    const reqGate = makeRequirement({ id: "req-complete-gate", flight_id: "flight-complete", role: "Gate", total_requirement: 1 });
+    const reqBoarding = makeRequirement({ id: "req-complete-boarding", flight_id: "flight-complete", role: "Boarding", total_requirement: 1 });
+    const assign: Assignment = {
+      id: "assign-complete",
+      plan_id: PLAN_ID,
+      staffing_requirement_id: "req-complete-gate",
+      employee_id: "emp-complete",
+      source: "human_modified",
+      created_by: "Test Setup",
+      assigned_at: new Date().toISOString(),
+    };
+    const plan: WeeklyPlan = {
+      id: PLAN_ID,
+      week_start: WEEK_START,
+      week_label: "Test Week",
+      status: "draft",
+      revision: 1,
+      generated_at: new Date().toISOString(),
+      published_at: null,
+      generated_from_hash: "test-hash",
+      config_snapshot: CONFIG,
+      issues: [],
+      configuration_issues: [],
+    };
+    const roster: WeeklyPlanRosterEntry = { id: "roster-complete", plan_id: PLAN_ID, employee_id: "emp-complete", day_of_week: "Monday", status: "working", shift_code: "NR02" };
+
+    fake.from("employees").insert([emp] as unknown as FakeRow[]);
+    fake.from("flights").insert([flight] as unknown as FakeRow[]);
+    fake.from("staffing_requirements").insert([reqGate, reqBoarding] as unknown as FakeRow[]);
+    fake.from("assignments").insert([assign] as unknown as FakeRow[]);
+    fake.from("weekly_plans").insert([plan] as unknown as FakeRow[]);
+    fake.from("weekly_plan_roster_entries").insert([roster] as unknown as FakeRow[]);
+
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    const flightView = view.flights.find((f) => f.flight.id === "flight-complete")!;
+    expect(flightView.missingRequirements).toEqual([]);
+    for (const r of flightView.requirements) expect(r.staleRequirement).toBeUndefined();
+  });
+
+  it("every existing loadLiveOpsView test's partial fixtures keep working -- stale detection never throws or breaks any other field, even against an intentionally incomplete persisted set", async () => {
+    const fake = new FakeSupabase();
+    seedBaseFixture(fake);
+    const view = await loadLiveOpsView(fake as unknown as SupabaseClient, WEEK_START);
+    // seedBaseFixture's flights are NOT a complete plan (one role each), so
+    // missingRequirements legitimately reports the rest -- the point here
+    // is only that every OTHER field is unaffected and nothing throws.
+    expect(view.flights).toHaveLength(2);
+    for (const flightView of view.flights) {
+      expect(Array.isArray(flightView.missingRequirements)).toBe(true);
+      for (const r of flightView.requirements) expect(r.coverageStatus).toBeDefined();
+    }
   });
 });

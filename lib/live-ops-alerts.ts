@@ -43,19 +43,24 @@ import { resolveFlightPhase } from "./flight-phase";
  *    entered its boarding window (lib/flight-phase.ts's own existing
  *    thresholds -- never a new, second timing model) is `critical`
  *    rather than `warning`.
- *  - "An aircraft change affecting staffing requirements" -> NOT
- *    currently detectable. Live Operations' own operational edit route
- *    (app/api/flights/[id]/operational/route.ts) never accepts an
- *    aircraft field at all, and the Flight Schedule "Edit Flight" PUT
- *    route that CAN change aircraft writes straight into
- *    scheduled_departure/aircraft with no operational-impact evaluation
- *    of any kind (a separate, already-flagged architectural gap — see
- *    APPLY_NOTES_0101.txt). Building aircraft-change detection would mean
- *    adding a new "previous aircraft" tracking mechanism that does not
- *    exist anywhere in the schema today — out of scope for "the smallest
- *    reliable solution," and explicitly out of scope per this phase's
- *    own constraint against unrelated refactoring. Left undetected,
- *    honestly, rather than faked.
+ *  - "An aircraft change affecting staffing requirements" ->
+ *    `kind: "stale_requirement"` (2026-10-27). Live Operations' own
+ *    operational edit route (app/api/flights/[id]/operational/route.ts)
+ *    never accepts an aircraft field at all, and the Flight Schedule
+ *    "Edit Flight" PUT route that CAN change aircraft writes straight
+ *    into scheduled_departure/aircraft with no operational-impact
+ *    evaluation of any kind. live-ops-service.ts's own
+ *    `detectStaleRequirements` closes this without any new "previous
+ *    aircraft" schema or migration: it re-runs `classifyFlightRequirements`
+ *    against the flight's CURRENT aircraft/destination every time the
+ *    view loads and diffs the result, role by role, against whatever
+ *    `total_requirement` was persisted at generation time. That signal
+ *    (`LiveOpsRequirementView.staleRequirement` /
+ *    `LiveOpsFlightView.missingRequirements`) is what this module alerts
+ *    on below — a `stale_requirement` alert only when there is no
+ *    ordinary gap/conflict alert already covering the flight (if there
+ *    is, the stale note is folded into that SAME alert's `detail` rather
+ *    than minting a second one, preserving one-alert-per-flight).
  *
  * LIFECYCLE — one alert ID per flight (`alert-<flightId>`), never one per
  * requirement, so four simultaneous invalidated requirements on the same
@@ -96,7 +101,7 @@ import { resolveFlightPhase } from "./flight-phase";
 
 export type AlertSeverity = "info" | "warning" | "critical";
 export type AlertState = "new" | "acknowledged" | "resolved";
-export type AlertKind = "invalidation" | "shortage";
+export type AlertKind = "invalidation" | "shortage" | "stale_requirement";
 
 export interface OperationalAlert {
   /** Stable per flight — `alert-<flightId>` — never per requirement. */
@@ -145,7 +150,22 @@ interface FlightProblem {
  */
 function detectFlightProblem(view: LiveOpsFlightView, nowMinutesSinceMidnight: number | null): FlightProblem | null {
   const problemRequirements = view.requirements.filter((r) => r.coverageStatus === "gap" || r.coverageStatus === "conflict");
-  if (problemRequirements.length === 0) return null;
+
+  // A real stale-requirement signal (freshly-classified headcount now
+  // HIGHER than what was persisted, or a whole duty the current
+  // aircraft/destination requires that was never persisted at all) is a
+  // genuine under-coverage risk the ordinary gap/conflict check cannot
+  // see, because `effectiveGap` is computed from the STALE persisted
+  // `total_requirement`. A stale entry reading LOWER (or equal) is not
+  // actionable here -- that is "we now need fewer people than planned",
+  // never a shortage -- so only an increase, or an entirely missing
+  // duty, counts.
+  const staleIncreases = view.requirements
+    .map((r) => r.staleRequirement)
+    .filter((s): s is NonNullable<typeof s> => !!s && s.freshTotalRequirement > 0);
+  const staleNotes = [...staleIncreases, ...view.missingRequirements];
+
+  if (problemRequirements.length === 0 && staleNotes.length === 0) return null;
 
   const anyInvalidated = problemRequirements.some((r) => r.invalidatedAssignments.length > 0);
   const anyUnresolvable = problemRequirements.some((r) => r.gapResolution && !r.gapResolution.eligible);
@@ -160,11 +180,19 @@ function detectFlightProblem(view: LiveOpsFlightView, nowMinutesSinceMidnight: n
   // broken by a real flight change, not merely never staffed) is always
   // at least as urgent as an ordinary shortage with the same resolution
   // status.
-  const severity: AlertSeverity = anyUnresolvable
-    ? approachingWindow || anyInvalidated
-      ? "critical"
-      : "warning"
-    : "info";
+  const severity: AlertSeverity =
+    problemRequirements.length > 0
+      ? anyUnresolvable
+        ? approachingWindow || anyInvalidated
+          ? "critical"
+          : "warning"
+        : "info"
+      // No ordinary gap/conflict yet, but a real stale-requirement signal
+      // exists -- a real risk a human wouldn't otherwise see, so it is
+      // never silently "info", but it also isn't yet a confirmed gap, so
+      // it does not escalate to "critical" purely off the boarding-window
+      // check the way an ordinary unresolvable shortage does.
+      : "warning";
 
   const affectedCount = problemRequirements.reduce((n, r) => n + r.gap, 0);
   const requirementIds = problemRequirements.map((r) => r.requirement.id);
@@ -179,13 +207,25 @@ function detectFlightProblem(view: LiveOpsFlightView, nowMinutesSinceMidnight: n
     })
     .join("; ");
 
-  return { kind: anyInvalidated ? "invalidation" : "shortage", severity, requirementIds, affectedCount, detail };
+  const staleDetail = staleNotes.map((s) => s.reason).join("; ");
+
+  return {
+    // An ordinary problem already covers the flight -- fold the stale
+    // note into that SAME alert rather than minting a second one
+    // (one-alert-per-flight is preserved); only emit "stale_requirement"
+    // as its own kind when there is no other problem to attach it to.
+    kind: problemRequirements.length > 0 ? (anyInvalidated ? "invalidation" : "shortage") : "stale_requirement",
+    severity,
+    requirementIds,
+    affectedCount,
+    detail: [detail, staleDetail].filter(Boolean).join(problemRequirements.length > 0 && staleDetail ? " | " : ""),
+  };
 }
 
 function alertTitle(flight: Flight, problem: FlightProblem): string {
-  return problem.kind === "invalidation"
-    ? `${flight.flight_number} — staffing invalidated by flight change`
-    : `${flight.flight_number} — staffing shortage`;
+  if (problem.kind === "invalidation") return `${flight.flight_number} — staffing invalidated by flight change`;
+  if (problem.kind === "stale_requirement") return `${flight.flight_number} — requirements may be out of date`;
+  return `${flight.flight_number} — staffing shortage`;
 }
 
 /**

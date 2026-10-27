@@ -66,6 +66,7 @@ function makeView(overrides: Partial<LiveOpsFlightView> = {}): LiveOpsFlightView
     flight,
     effectiveDeparture: flight.scheduled_departure,
     requirements: [],
+    missingRequirements: [],
     ...overrides,
   };
 }

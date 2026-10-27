@@ -11,12 +11,15 @@ import {
 import { getRequirementWindow } from "./planning/requirement-window";
 import { getCandidatesForRequirement } from "./planning/candidate-lookup";
 import { buildDayEffectivePoolFromRosterEntries } from "./planning/duty-generation";
+import { classifyFlightRequirements } from "./planning/weekly-requirements";
+import { resolveEffectiveConfig } from "./planning/rules-service";
 import { effectiveDeparture } from "./flight-operations";
 import { TimeWindow, isWindowWithinShift } from "./scoring";
 import {
   Assignment,
   AssignmentModification,
   CandidateResult,
+  Config,
   Employee,
   Flight,
   RosterRequirementView,
@@ -172,12 +175,60 @@ export interface LiveOpsRequirementView {
   gapResolution?: LiveOpsGapResolution;
   /** Always present, empty when nothing is invalidated — see LiveOpsInvalidatedAssignment's own doc comment. */
   invalidatedAssignments: LiveOpsInvalidatedAssignment[];
+  /**
+   * STALE REQUIREMENT DETECTION (2026-10-27, Live Ops notifications
+   * follow-up — "an aircraft change affecting staffing requirements").
+   * `requirement.total_requirement`/`role` were persisted at the plan's
+   * last generation time, computed by classifyFlightRequirements from the
+   * flight's attributes AS THEY WERE THEN. Nothing re-runs that
+   * classification afterward — a later edit to `flight.aircraft` (or
+   * destination/destination_category) through Flight Schedule's full PUT
+   * route changes the flight record itself, but never touches the
+   * already-persisted StaffingRequirement row. getRequirementWindow
+   * elsewhere in this file already picks up a live aircraft change for
+   * TIMING (the Dreamliner T-1h30 vs T-1h lead-time rule reads
+   * `flight.aircraft` fresh on every call); this field is what closes the
+   * other half — a HEADCOUNT/role mismatch nothing previously surfaced at
+   * all. Computed by detectStaleRequirements below, once per flight,
+   * re-running classifyFlightRequirements against the flight's CURRENT
+   * attributes and diffing by role against what's actually persisted.
+   * Present only when this requirement's role would now classify to a
+   * different headcount than what's persisted (undefined = still in
+   * sync, the overwhelmingly common case, including every existing test
+   * and every flight nothing has edited since generation).
+   */
+  staleRequirement?: LiveOpsStaleRequirement;
+}
+
+/**
+ * One requirement whose persisted `total_requirement` no longer matches
+ * what a fresh classification of the flight's CURRENT attributes would
+ * produce — see LiveOpsRequirementView.staleRequirement's own doc
+ * comment for why this can only ever under-react (a flight nobody has
+ * touched since generation never triggers this) rather than over-react.
+ */
+export interface LiveOpsStaleRequirement {
+  role: string;
+  /** What a fresh classification would require right now, for this role. */
+  freshTotalRequirement: number;
+  reason: string;
 }
 
 export interface LiveOpsFlightView {
   flight: Flight;
   effectiveDeparture: string;
   requirements: LiveOpsRequirementView[];
+  /**
+   * Roles a fresh classification of this flight's CURRENT attributes would
+   * require that have NO persisted StaffingRequirement row at all (e.g. a
+   * Flight Schedule edit changed the aircraft to one needing an extra
+   * role entirely, like Mesure, after the plan was generated without it).
+   * Distinct from LiveOpsRequirementView.staleRequirement, which only
+   * covers a role that DOES have a persisted row but the wrong headcount.
+   * Empty for every flight nothing has edited since generation (the
+   * overwhelmingly common case).
+   */
+  missingRequirements: LiveOpsStaleRequirement[];
 }
 
 /**
@@ -218,12 +269,82 @@ export interface LiveOpsView {
   workforce: LiveOpsWorkforceSummary;
 }
 
+/**
+ * Roles the "Staffing Rule"/"Destination Classification" honest-gap
+ * placeholder (operation-rules.ts's missingOperationRuleRequirement)
+ * carries — never a real duty, so never compared here.
+ */
+const PLACEHOLDER_REQUIREMENT_ROLES = new Set(["Staffing Rule", "Destination Classification"]);
+
+/**
+ * Pure per-flight stale-requirement detection — see
+ * LiveOpsRequirementView.staleRequirement's own doc comment for the full
+ * rationale. Re-runs classifyFlightRequirements against the flight's
+ * CURRENT attributes (never the ones it had at generation time) and
+ * diffs the result, by role, against what's actually persisted:
+ *  - a persisted role whose fresh headcount differs (including "no
+ *    longer required at all", freshTotalRequirement: 0) surfaces against
+ *    that EXISTING requirement id (staleByRequirementId);
+ *  - a role a fresh classification would now require that has NO
+ *    persisted row at all surfaces separately (missing), since there is
+ *    no existing requirement id to attach it to.
+ * Never mutates or re-persists anything — purely a read-time diff, same
+ * spirit as findInvalidatedAssignments just above.
+ */
+export function detectStaleRequirements(
+  flight: Flight,
+  config: Config,
+  persisted: StaffingRequirement[]
+): { staleByRequirementId: Map<string, LiveOpsStaleRequirement>; missing: LiveOpsStaleRequirement[] } {
+  const fresh = classifyFlightRequirements(flight, config).filter((r) => !PLACEHOLDER_REQUIREMENT_ROLES.has(r.role));
+  const persistedReal = persisted.filter((r) => !PLACEHOLDER_REQUIREMENT_ROLES.has(r.role));
+
+  const staleByRequirementId = new Map<string, LiveOpsStaleRequirement>();
+  for (const p of persistedReal) {
+    const freshMatch = fresh.find((f) => f.role === p.role);
+    const freshTotal = freshMatch?.total_requirement ?? 0;
+    if (freshTotal === p.total_requirement) continue; // still in sync -- the overwhelmingly common case
+    staleByRequirementId.set(p.id, {
+      role: p.role,
+      freshTotalRequirement: freshTotal,
+      reason: freshMatch
+        ? `${flight.flight_number}'s aircraft/destination changed since this plan was generated — a fresh classification now needs ${freshTotal} ${p.role} (was ${p.total_requirement}).`
+        : `${flight.flight_number}'s aircraft/destination changed since this plan was generated — ${p.role} no longer applies at all (was ${p.total_requirement}).`,
+    });
+  }
+
+  const missing: LiveOpsStaleRequirement[] = fresh
+    .filter((f) => !persistedReal.some((p) => p.role === f.role))
+    .map((f) => ({
+      role: f.role,
+      freshTotalRequirement: f.total_requirement,
+      reason: `${flight.flight_number}'s aircraft/destination changed since this plan was generated — a fresh classification now requires a ${f.role} duty this plan never generated at all.`,
+    }));
+
+  return { staleByRequirementId, missing };
+}
+
 export async function loadLiveOpsView(supabase: SupabaseClient, date: string): Promise<LiveOpsView> {
   const weekStart = weekStartFor(date);
   const view = await loadPersistedPlanView(supabase, weekStart, DAYS_ORDER);
 
   if (!view) {
     return { date, weekStart, plan: null, flights: [], workforce: { workingToday: 0, assignedToday: 0, availableToday: 0 } };
+  }
+
+  // STALE-REQUIREMENT DETECTION (2026-10-27) — secondary, best-effort
+  // signal, same documented fail-safe pattern as the weekly-view route's
+  // own staleness check (app/api/planning/weekly-view/route.ts): if the
+  // CURRENT resolved config can't be loaded (most likely a missing Labor
+  // Rules migration), Live Operations still returns the real, already-
+  // loaded board — it just skips this one secondary signal rather than
+  // failing the whole page for it.
+  let currentConfig: Config | undefined;
+  try {
+    currentConfig = await resolveEffectiveConfig(supabase);
+  } catch (err) {
+    console.error("live-ops: could not resolve current config for stale-requirement detection:", err);
+    currentConfig = undefined;
   }
 
   // Latest "replaced" modification per requirement, scoped to the plan's
@@ -358,6 +479,11 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
 
   const flights: LiveOpsFlightView[] = await Promise.all(
     dayFlights.map(async (flight) => {
+      const persistedRequirementsForFlight = view.roster.filter((r) => r.flight.id === flight.id).map((r) => r.requirement);
+      const stale = currentConfig
+        ? detectStaleRequirements(flight, currentConfig, persistedRequirementsForFlight)
+        : { staleByRequirementId: new Map<string, LiveOpsStaleRequirement>(), missing: [] as LiveOpsStaleRequirement[] };
+
       const requirements: LiveOpsRequirementView[] = await Promise.all(
         view.roster
           .filter((r) => r.flight.id === flight.id)
@@ -446,10 +572,11 @@ export async function loadLiveOpsView(supabase: SupabaseClient, date: string): P
               modification,
               gapResolution,
               invalidatedAssignments,
+              staleRequirement: stale.staleByRequirementId.get(r.requirement.id),
             };
           })
       );
-      return { flight, effectiveDeparture: effectiveDeparture(flight), requirements };
+      return { flight, effectiveDeparture: effectiveDeparture(flight), requirements, missingRequirements: stale.missing };
     })
   );
 

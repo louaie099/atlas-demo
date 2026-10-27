@@ -89,6 +89,7 @@ function makeView(overrides: Partial<LiveOpsFlightView> = {}): LiveOpsFlightView
     flight,
     effectiveDeparture: flight.scheduled_departure,
     requirements: [],
+    missingRequirements: [],
     ...overrides,
   };
 }
@@ -189,6 +190,74 @@ describe("reconcileAlerts — detection", () => {
     const nowMinutes = 8 * 60; // hours before departure
     const alerts = reconcileAlerts([], [view], nowMinutes);
     expect(alerts[0].severity).toBe("info");
+  });
+});
+
+describe("reconcileAlerts — stale requirement (aircraft-change) detection (2026-10-27)", () => {
+  it("emits a 'stale_requirement' alert when a requirement's fresh headcount is higher than what was persisted, with no ordinary gap present", () => {
+    const view = makeView({
+      requirements: [
+        makeRequirementView({
+          coverageStatus: "assigned",
+          gap: 0,
+          staleRequirement: { role: "Gate", freshTotalRequirement: 2, reason: "AT815's aircraft/destination changed since this plan was generated — a fresh classification now needs 2 Gate (was 1)." },
+        }),
+      ],
+    });
+    const alerts = reconcileAlerts([], [view], null);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe("stale_requirement");
+    expect(alerts[0].severity).toBe("warning");
+    expect(alerts[0].detail).toContain("now needs 2 Gate");
+  });
+
+  it("emits a 'stale_requirement' alert for a duty the current aircraft/destination requires that was never persisted at all", () => {
+    const view = makeView({
+      requirements: [makeRequirementView({ coverageStatus: "assigned", gap: 0 })],
+      missingRequirements: [{ role: "Profiling", freshTotalRequirement: 1, reason: "AT815's aircraft/destination changed since this plan was generated — a fresh classification now requires a Profiling duty this plan never generated at all." }],
+    });
+    const alerts = reconcileAlerts([], [view], null);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe("stale_requirement");
+    expect(alerts[0].detail).toContain("Profiling duty this plan never generated");
+  });
+
+  it("folds a stale-requirement note into the SAME alert as an existing ordinary shortage, rather than minting a second one", () => {
+    const view = makeView({
+      requirements: [
+        makeRequirementView({
+          requirement: makeRequirement({ id: "r-boarding", role: "Boarding" }),
+          coverageStatus: "gap",
+          gap: 1,
+          gapResolution: { eligible: true, candidates: [] },
+        }),
+        makeRequirementView({
+          requirement: makeRequirement({ id: "r-gate", role: "Gate" }),
+          coverageStatus: "assigned",
+          gap: 0,
+          staleRequirement: { role: "Gate", freshTotalRequirement: 2, reason: "AT815's aircraft/destination changed since this plan was generated — a fresh classification now needs 2 Gate (was 1)." },
+        }),
+      ],
+    });
+    const alerts = reconcileAlerts([], [view], null);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe("shortage");
+    expect(alerts[0].detail).toContain("Boarding:");
+    expect(alerts[0].detail).toContain("now needs 2 Gate");
+  });
+
+  it("does not flag a stale requirement that reads lower than what was persisted (no actionable under-coverage)", () => {
+    const view = makeView({
+      requirements: [
+        makeRequirementView({
+          coverageStatus: "assigned",
+          gap: 0,
+          staleRequirement: { role: "Gate", freshTotalRequirement: 0, reason: "AT815's aircraft/destination changed since this plan was generated — Gate no longer applies at all (was 1)." },
+        }),
+      ],
+    });
+    const alerts = reconcileAlerts([], [view], null);
+    expect(alerts).toHaveLength(0);
   });
 });
 
