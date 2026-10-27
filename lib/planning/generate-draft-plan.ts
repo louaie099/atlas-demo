@@ -6,7 +6,7 @@ import { planPreferredOffWindows, Stage6OffWindowContext, windowIncludesDayZero,
 import { OFF_WINDOW_STRUCTURE_BIAS_ENABLED } from "./stage6-score-tiers";
 import { BoundaryContextProvenance } from "./rotation-context";
 import { generateProfilingMesureShifts, generateForeignCompanyShifts, DemandConflict, SpecializedOffDayRules } from "./specialized-team-generation";
-import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext } from "./roster-generation";
+import { generateObligationToppedUpShifts, computeFlexibleEmployeeTopUp, FlexibleTopUpContext, buildRemainingT1ZoneGaps } from "./roster-generation";
 import { generateDutiesForDay, GeneratedDuty, effectiveShiftForDay, resolvePlanRosterEntry } from "./duty-generation";
 import { enforceHardRulesOnGeneratedRoster } from "./hard-rule-gate";
 import { validateWeeklyPlan, collectConfigurationIssues, auditAverageWeeklyHoursFeasibility, auditStaticShiftRestFeasibility, PlanIssue, ConfigurationIssue } from "./validation";
@@ -557,6 +557,19 @@ export function generateDraftWeeklyPlan(
     // false reproduces the pre-fix output (tests compare before/after). The
     // flexible pool (Stage 6) never reads it.
     specializedCapPacing?: boolean;
+    // T1 CHECK-IN TOP-UP COVERAGE BIAS (2026-10-27 — see roster-generation.ts's
+    // T1ZoneWindowGap doc comment): when the continuous-roster-generation
+    // (Stage 6.5) top-up has a real choice among equally rest-legal catalog
+    // codes for a flexible-pool, Check-in-eligible employee's day, prefer
+    // one whose window still fully covers a real T1 Check-in zone/window
+    // gap (net of Stage 6 + hard-cap repair's own real result), ahead of
+    // the existing single-peak-minute bias. A pure ordering preference —
+    // never adds a day beyond the normal roster obligation, never widens
+    // legality, never claims actual coverage (checkin-capacity-timeline.ts
+    // stays the sole authoritative Required/Available/Gap source). Defaults
+    // to true; false reproduces the pre-feature output exactly (tests
+    // compare with/without).
+    t1TopUpCoverageBias?: boolean;
   } = {}
 ): DraftWeeklyPlan {
   const requirements = computeWeeklyStaffingRequirements(flights, config);
@@ -623,6 +636,83 @@ export function generateDraftWeeklyPlan(
     // Same semantics as before (bucket with the highest total, ties toward
     // earlier) — see zone-demand-aggregation.ts's own doc comment.
     t1PeakDemandMinuteByDay[day] = peakAggregateT1DemandMinuteForDay(day, dayFlights, config.zone_checkin_demand_policy);
+  }
+
+  // T1 CHECK-IN ZONE MODEL -- ZONE DEMAND ONLY (2026-09-23 architecture
+  // refactor; HOISTED 2026-10-27, pure move, same output, no behavior
+  // change — see the 2026-10-27 doc note at this block's new call site
+  // below). This block used to ALSO run a "default placement" stage
+  // here (computeDefaultCheckinZonePlacement) and persist its output as
+  // discrete checkin_zone_assignments rows. That is exactly the
+  // architecture the product owner's audit found responsible for the live
+  // "Required 4 / Assigned 75" bug (a broad placement-duty window
+  // mis-linked to the wrong zone-requirement row by weekly-plan-service.ts's
+  // now-removed findZoneRequirementIdFor). Per the owner's explicit
+  // instruction, default T1 Check-in coverage is no longer generated or
+  // persisted as a duty at all -- it is DERIVED at read time from the
+  // roster + real specific-duty intervals already persisted here (see
+  // lib/planning/checkin-capacity-timeline.ts, used by
+  // persisted-plan-view.ts). This block therefore only computes and
+  // returns DEMAND (zoneRequirementsByDay) -- the real aggregated workload
+  // each zone needs, from this week's RAM flight program alone
+  // (aggregateAllZonesDailyDemand/zoneDemandClusters), entirely
+  // independent of how many employees happen to be free. It is still
+  // persisted (checkin_zone_requirements) because it is genuinely useful,
+  // real, and unaffected by the bug -- only the discrete-assignment side
+  // was wrong.
+  //
+  // 2026-10-27: moved up from right before `rosterEntries` (its original
+  // position, preserved byte-for-byte below in spirit) to right here,
+  // because it has ZERO roster dependency (only `flights`/`config`/
+  // `daysOrder`, all already available) and the T1 top-up coverage bias
+  // (see planningOptions.t1TopUpCoverageBias) needs this same DEMAND data
+  // BEFORE the top-up runs, which is itself well before this block's old
+  // position. `zoneRequirementsByDay`'s own VALUES are unchanged by this
+  // move -- only computed earlier, still returned in DraftWeeklyPlan
+  // exactly as before.
+  const zoneRequirementsByDay: Record<string, ZoneRequirementDraft[]> = {};
+
+  // Scoped once, outside the loop: aggregateZoneDailyDemand/
+  // aggregateAllZonesDailyDemand filter by day_of_week INTERNALLY (for
+  // both `day` and the new optional `nextDayOfWeek` below), so the
+  // existing atlas_managed scoping has to live in the array passed in,
+  // not in a per-day pre-filter, or the cross-midnight spillover lookup
+  // below would silently pick up non-atlas_managed flights it never did
+  // before.
+  const atlasManagedFlights = flights.filter((f) => f.operator_type === "atlas_managed");
+
+  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
+    const day = daysOrder[dayIndex];
+    // CROSS-MIDNIGHT DEMAND (2026-10-10, Phase 1): the day immediately
+    // after `day` -- cyclic within THIS SAME displayed week (for the
+    // week's last day, this wraps to the week's own first day, which is
+    // already in `flights` -- no cross-week fetch is needed on the
+    // DEMAND side; only the overnight-employee-AVAILABILITY side has a
+    // real week-boundary case, handled separately in
+    // persisted-plan-view.ts). aggregateAllZonesDailyDemand only ever
+    // uses this to fold in an early-morning next-day flight's Check-in
+    // spillover into THIS day's own tail-end buckets -- see that
+    // function's own doc comment for why this can never double-count.
+    const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
+    const zoneDemandByZone = aggregateAllZonesDailyDemand(day, atlasManagedFlights, config.zone_checkin_demand_policy, nextDayOfWeek);
+
+    const zoneRequirements: ZoneRequirementDraft[] = [];
+    for (const zone of CHECKIN_ZONE_IDS) {
+      const clusters = zoneDemandClusters(zoneDemandByZone[zone]);
+      for (const cluster of clusters) {
+        zoneRequirements.push({
+          zone,
+          day_of_week: day,
+          window_start: cluster.start,
+          window_end: cluster.end,
+          required_headcount: cluster.peak,
+          source: "automatic",
+          reasoning: `Aggregate T1 Check-in demand for ${cluster.start}–${cluster.end} across ${cluster.contributingFlightIds.length} flight(s) sharing this zone (prototype/configurable demand policy, not yet confirmed management policy -- see lib/planning/checkin-zone-demand.ts).`,
+          contributingFlightIds: cluster.contributingFlightIds,
+        });
+      }
+    }
+    zoneRequirementsByDay[day] = zoneRequirements;
   }
 
   // OFF/OFF STRUCTURE BIAS (2026-09-24, fatigue-aware roster planning
@@ -825,6 +915,27 @@ export function generateDraftWeeklyPlan(
     hardCapRepairs.push(...repair.repairs);
   }
 
+  // T1 CHECK-IN TOP-UP COVERAGE BIAS (2026-10-27 — see planningOptions.t1TopUpCoverageBias
+  // and roster-generation.ts's T1ZoneWindowGap doc comment): the starting
+  // "still remaining" headcount per zone/window, built from the REAL zone
+  // demand (zoneRequirementsByDay, computed from the flight schedule alone,
+  // hoisted above) net of whoever is ALREADY committed to a shift this day
+  // from Stage 6 + hard-cap repair's own real, demand-driven result (the
+  // only other shifts decided before this stage runs — see
+  // buildRemainingT1ZoneGaps's own doc comment on why this is necessarily a
+  // pre-Stage-9 approximation, never a claim of final coverage). Mutated in
+  // place by generateObligationToppedUpShifts below as each eligible
+  // employee is topped up.
+  const t1TopUpCoverageBiasEnabled = planningOptions.t1TopUpCoverageBias !== false;
+  const remainingT1ZoneGapsByDay = t1TopUpCoverageBiasEnabled
+    ? Object.fromEntries(
+        daysOrder.map((day) => [
+          day,
+          buildRemainingT1ZoneGaps(weekStart, day, zoneRequirementsByDay[day] ?? [], repairedDemandDrivenShiftsByDay[day] ?? [], employees),
+        ])
+      )
+    : undefined;
+
   const obligationToppedUpByDay = generateObligationToppedUpShifts(
     daysOrder,
     employees,
@@ -836,7 +947,8 @@ export function generateDraftWeeklyPlan(
     t1PeakDemandMinuteByDay,
     preferredOffDaysByEmployee,
     fatigueConfig,
-    { ...stageHardCaps, exclusionsOut: hardCapExclusions }
+    { ...stageHardCaps, exclusionsOut: hardCapExclusions },
+    remainingT1ZoneGapsByDay
   );
   const generatedShiftsByDay: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) {
@@ -1092,71 +1204,6 @@ export function generateDraftWeeklyPlan(
     );
     dutiesByDay[day] = duties;
     allUnfilled.push(...unfilled);
-  }
-
-  // T1 CHECK-IN ZONE MODEL -- ZONE DEMAND ONLY (2026-09-23 architecture
-  // refactor). This block used to ALSO run a "default placement" stage
-  // here (computeDefaultCheckinZonePlacement) and persist its output as
-  // discrete checkin_zone_assignments rows. That is exactly the
-  // architecture the product owner's audit found responsible for the live
-  // "Required 4 / Assigned 75" bug (a broad placement-duty window
-  // mis-linked to the wrong zone-requirement row by weekly-plan-service.ts's
-  // now-removed findZoneRequirementIdFor). Per the owner's explicit
-  // instruction, default T1 Check-in coverage is no longer generated or
-  // persisted as a duty at all -- it is DERIVED at read time from the
-  // roster + real specific-duty intervals already persisted here (see
-  // lib/planning/checkin-capacity-timeline.ts, used by
-  // persisted-plan-view.ts). This block therefore only computes and
-  // returns DEMAND (zoneRequirementsByDay) -- the real aggregated workload
-  // each zone needs, from this week's RAM flight program alone
-  // (aggregateAllZonesDailyDemand/zoneDemandClusters), entirely
-  // independent of how many employees happen to be free. It is still
-  // persisted (checkin_zone_requirements) because it is genuinely useful,
-  // real, and unaffected by the bug -- only the discrete-assignment side
-  // was wrong.
-  const zoneRequirementsByDay: Record<string, ZoneRequirementDraft[]> = {};
-
-  // Scoped once, outside the loop: aggregateZoneDailyDemand/
-  // aggregateAllZonesDailyDemand filter by day_of_week INTERNALLY (for
-  // both `day` and the new optional `nextDayOfWeek` below), so the
-  // existing atlas_managed scoping has to live in the array passed in,
-  // not in a per-day pre-filter, or the cross-midnight spillover lookup
-  // below would silently pick up non-atlas_managed flights it never did
-  // before.
-  const atlasManagedFlights = flights.filter((f) => f.operator_type === "atlas_managed");
-
-  for (let dayIndex = 0; dayIndex < daysOrder.length; dayIndex++) {
-    const day = daysOrder[dayIndex];
-    // CROSS-MIDNIGHT DEMAND (2026-10-10, Phase 1): the day immediately
-    // after `day` -- cyclic within THIS SAME displayed week (for the
-    // week's last day, this wraps to the week's own first day, which is
-    // already in `flights` -- no cross-week fetch is needed on the
-    // DEMAND side; only the overnight-employee-AVAILABILITY side has a
-    // real week-boundary case, handled separately in
-    // persisted-plan-view.ts). aggregateAllZonesDailyDemand only ever
-    // uses this to fold in an early-morning next-day flight's Check-in
-    // spillover into THIS day's own tail-end buckets -- see that
-    // function's own doc comment for why this can never double-count.
-    const nextDayOfWeek = daysOrder[(dayIndex + 1) % daysOrder.length];
-    const zoneDemandByZone = aggregateAllZonesDailyDemand(day, atlasManagedFlights, config.zone_checkin_demand_policy, nextDayOfWeek);
-
-    const zoneRequirements: ZoneRequirementDraft[] = [];
-    for (const zone of CHECKIN_ZONE_IDS) {
-      const clusters = zoneDemandClusters(zoneDemandByZone[zone]);
-      for (const cluster of clusters) {
-        zoneRequirements.push({
-          zone,
-          day_of_week: day,
-          window_start: cluster.start,
-          window_end: cluster.end,
-          required_headcount: cluster.peak,
-          source: "automatic",
-          reasoning: `Aggregate T1 Check-in demand for ${cluster.start}–${cluster.end} across ${cluster.contributingFlightIds.length} flight(s) sharing this zone (prototype/configurable demand policy, not yet confirmed management policy -- see lib/planning/checkin-zone-demand.ts).`,
-          contributingFlightIds: cluster.contributingFlightIds,
-        });
-      }
-    }
-    zoneRequirementsByDay[day] = zoneRequirements;
   }
 
   const rosterEntries: PlanRosterEntryDraft[] = [];

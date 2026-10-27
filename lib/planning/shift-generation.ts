@@ -73,6 +73,20 @@ export interface GeneratedShiftAssignment {
    * repair is byte-identical to before.
    */
   hardCapRepairReason?: string;
+  /**
+   * T1 CHECK-IN ZONE/WINDOW COVERAGE EXPLAINABILITY (2026-10-27 — see
+   * roster-generation.ts's T1ZoneWindowGap doc comment): present ONLY on a
+   * continuous-roster-generation (Stage 6.5) top-up addition that was
+   * chosen because its window still fully covers a real T1 Check-in zone
+   * demand gap, in plain words naming the zone(s)/window(s) closed — never
+   * a raw score. This is a candidate-ORDERING explanation only: it never
+   * claims actual T1 coverage (checkin-capacity-timeline.ts, computed from
+   * the real final roster and real duty allocation, remains the sole
+   * authoritative Required/Available/Gap source). Absent (not even the
+   * key) on every other assignment, so output without this bias enabled is
+   * byte-identical to before.
+   */
+  t1CoverageReason?: string;
 }
 
 function timeToMinutes(t: string): number {

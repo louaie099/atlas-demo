@@ -1,6 +1,7 @@
 import { Employee, Config } from "../types";
 import { GeneratedShiftAssignment, PriorDayShiftMap } from "./shift-generation";
 import { isFlexibleGeneralPool } from "./workforce-pools";
+import { isEligibleForDefaultCheckinPlacement } from "./checkin-zone-placement";
 import { getShiftTimesAs, getShiftDurationHours, shiftCatalogForDate } from "../shift-templates";
 import { restHoursBetween } from "../roster-generation";
 import { flightDateFor } from "../flight-date";
@@ -278,6 +279,130 @@ function shiftWindowCoversMinute(entreeMin: number, sortieMin: number, minute: n
 }
 
 /**
+ * T1 CHECK-IN TOP-UP COVERAGE BIAS (2026-10-27) — a SECOND, zone-and-window
+ * -aware T1 preference, layered alongside (never replacing) the single
+ * aggregate-peak-minute bias above. One `T1ZoneWindowGap` is one zone's one
+ * demand window (the exact shape zoneRequirementsByDay/checkin-capacity-
+ * timeline.ts already use) still short of its required headcount once
+ * Stage 6 + hard-cap repair's own real, demand-driven shifts are accounted
+ * for — see buildRemainingT1ZoneGaps below for how the starting `remaining`
+ * values are computed, and generate-draft-plan.ts for where that baseline
+ * is built, BEFORE this stage runs.
+ *
+ * `remaining` is intentionally mutable and SHARED BY REFERENCE across every
+ * employee this generation pass tops up (see generateObligationToppedUpShifts):
+ * each employee's chosen top-up code decrements the windows it fully covers,
+ * so the NEXT employee's search sees the updated picture instead of every
+ * candidate independently chasing the same single biggest gap. This is a
+ * greedy, order-dependent allocation — the same documented trade-off
+ * checkin-capacity-timeline.ts's own per-instant greedy split already
+ * accepts (see that module's "HONEST LIMITATION" paragraph): it never
+ * double-books a window below zero and never claims more credit than a
+ * window's real remaining headcount, but it cannot jointly optimize across
+ * every employee and every window at once.
+ *
+ * FULL-WINDOW COVERAGE ONLY (never partial): see windowFullyCovered below —
+ * a shift must contain a zone window's ENTIRE [windowStart, windowEnd] to
+ * earn any credit toward it. A zone window that itself wraps past midnight
+ * (windowEnd minutes <= windowStart minutes) can never be credited here —
+ * no top-up code is ever overnight (shortestFirstCatalogCodes filters those
+ * out entirely), so crediting it would always be dishonest; it is simply
+ * left out of scoring; the real, authoritative Required/Available/Gap
+ * report for every window (including overnight ones) remains entirely
+ * checkin-capacity-timeline.ts's job, computed later from the REAL final
+ * roster and real specific-duty intervals — this bias never claims
+ * coverage itself, it only steers which already-legal catalog code the
+ * top-up picks.
+ */
+export interface T1ZoneWindowGap {
+  zone: string;
+  windowStart: string;
+  windowEnd: string;
+  /** Still-needed headcount for this window, net of everyone already committed before this pass and everyone this pass has committed so far. Mutated in place — see this interface's own doc comment. */
+  remaining: number;
+}
+
+/**
+ * Per-employee, per-generation-pass T1 coverage context (see
+ * T1ZoneWindowGap's doc comment). Entirely optional and additive: omitted
+ * (the default for every existing caller/test) reproduces
+ * computeEmployeeDayCountTopUp's prior candidate ordering byte-for-byte —
+ * the T1-peak-minute bias above is the only T1 signal that applies then,
+ * exactly as before.
+ */
+export interface TopUpT1CoverageOptions {
+  /** Per-day remaining T1 Check-in zone/window gaps — see T1ZoneWindowGap. Shared by reference and mutated across this whole generation pass. */
+  remainingByDay: Record<string, T1ZoneWindowGap[]>;
+  /** Whether THIS employee is Check-in eligible at all (checkin-zone-placement.ts's isEligibleForDefaultCheckinPlacement). An ineligible employee never gets this preference and never touches the shared state — avoids crediting (or double-crediting) an employee who could never actually be placed on T1 Check-in. */
+  employeeEligible: boolean;
+}
+
+/** Whether [entreeMin, sortieMin) (a non-overnight top-up shift) fully contains a zone window's entire [windowStart, windowEnd) — partial overlap is never credited (see T1ZoneWindowGap's doc comment). */
+function windowFullyCovered(entreeMin: number, sortieMin: number, windowStart: string, windowEnd: string): boolean {
+  const wStart = timeToMinutes(windowStart);
+  const wEnd = timeToMinutes(windowEnd);
+  if (wEnd <= wStart) return false; // cross-midnight zone window — no top-up code (always non-overnight) can ever honestly cover this
+  return entreeMin <= wStart && sortieMin >= wEnd;
+}
+
+/**
+ * Builds the STARTING `remaining` values for one day's T1ZoneWindowGap list
+ * — the real zone demand (`zoneRequirements`, computed from the flight
+ * schedule alone, entirely independent of the roster) minus whoever is
+ * ALREADY committed to a shift that day that fully covers a given window,
+ * among `committedShifts` (Stage 6 + hard-cap-repair's real, demand-driven
+ * result for the flexible pool — the only other shifts decided before this
+ * stage runs).
+ *
+ * HONEST, DOCUMENTED LIMITATION (consistent with this stage's own position
+ * in the pipeline — see roster-generation.ts's module doc comment and
+ * generate-draft-plan.ts's execution order): this counts an eligible,
+ * already-shifted employee as covering a window they OVERLAP, without
+ * knowing whether Stage 9 (duty-generation.ts, which runs LATER) will
+ * actually place them on Gate/Boarding/Profiling duty instead that day —
+ * that per-flight allocation genuinely does not exist yet at this point in
+ * the pipeline. It intentionally does NOT exclude employees who may end up
+ * on Gate/Boarding duty (impossible to know yet), only employees who can
+ * never be placed on T1 Check-in at all regardless of the day (Profiling/
+ * Mesure-assigned, non-redeployable foreign-company, no Check-in skill,
+ * etc. — isEligibleForDefaultCheckinPlacement, the SAME real eligibility
+ * rule checkin-capacity-timeline.ts itself uses). This can under-count real
+ * remaining demand in a tight week; it can never OVER-claim it (never
+ * credits more than `required_headcount`, never goes negative) — a
+ * conservative-toward-over-rostering, never conservative-toward-leaving-a-
+ * gap-unaddressed bias, appropriate for a tie-break that only ever ADDS
+ * weight toward covering T1, never removes a legal candidate or claims
+ * actual coverage (see T1ZoneWindowGap's own doc comment — the real,
+ * authoritative Required/Available/Gap report stays entirely
+ * checkin-capacity-timeline.ts's job, computed later from Stage 9's real
+ * result).
+ */
+export function buildRemainingT1ZoneGaps(
+  weekStart: string,
+  day: string,
+  zoneRequirements: { zone: string; window_start: string; window_end: string; required_headcount: number }[],
+  committedShifts: GeneratedShiftAssignment[],
+  employees: readonly Employee[]
+): T1ZoneWindowGap[] {
+  if (zoneRequirements.length === 0) return [];
+  const eligibleIds = new Set(employees.filter(isEligibleForDefaultCheckinPlacement).map((e) => e.id));
+  const date = flightDateFor(weekStart, day);
+  const committedWindows: { entreeMin: number; sortieMin: number }[] = [];
+  for (const g of committedShifts) {
+    if (!eligibleIds.has(g.employeeId)) continue;
+    const times = getShiftTimesAs(g.shiftCode, date);
+    const entreeMin = timeToMinutes(times.shift_start);
+    const sortieMinRaw = timeToMinutes(times.shift_end);
+    const sortieMin = sortieMinRaw > entreeMin ? sortieMinRaw : sortieMinRaw + 24 * 60; // normalize a real overnight committed shift (e.g. a prior-day carryover) so containment comparisons below stay correct; top-up codes themselves are never overnight
+    committedWindows.push({ entreeMin, sortieMin });
+  }
+  return zoneRequirements.map((req) => {
+    const covering = committedWindows.filter((w) => windowFullyCovered(w.entreeMin, w.sortieMin, req.window_start, req.window_end)).length;
+    return { zone: req.zone, windowStart: req.window_start, windowEnd: req.window_end, remaining: Math.max(0, req.required_headcount - covering) };
+  });
+}
+
+/**
  * SHARED PER-EMPLOYEE DAY-COUNT/HOURS TOP-UP CORE (factored out 2026-09-22
  * — see docs/known-limitations/roster-planning-vs-duty-allocation.md's
  * "foreign-company employees get a normal RAM weekly roster" fix). This is
@@ -340,9 +465,80 @@ export function computeEmployeeDayCountTopUp(
   // legalCodesAt, the SAME gate as the 15h rest check, so every code the
   // walk, the backtracking search, the neighbour-feasibility preference and
   // pass 2 ever see is already cap-legal. Omitted = no cap filtering.
-  hardCaps?: TopUpHardCaps
+  hardCaps?: TopUpHardCaps,
+  // T1 CHECK-IN ZONE/WINDOW COVERAGE BIAS (2026-10-27) — see
+  // TopUpT1CoverageOptions. A SECOND, zone-and-window-aware T1 preference,
+  // applied at the exact same tier as the existing single-peak-minute bias
+  // above (see orderedCandidates — it takes priority when it has a real
+  // positive-score candidate, falling back to the peak-minute bias
+  // otherwise). Omitted, or `employeeEligible: false` — reproduces the
+  // prior ordering byte-for-byte; every existing caller/test keeps working
+  // unchanged.
+  t1Coverage?: TopUpT1CoverageOptions,
+  /** Output: day -> explanation, for each day this call's FINAL chosen code was picked because it plugged a real T1 Check-in gap (vs. the code the ordering would have preferred without this bias) — mirrors `fatigue.reasonsOut`'s own convention. Only ever set when `t1Coverage` is supplied and eligible. */
+  t1CoverageReasonsOut?: Map<string, string>,
+  /**
+   * Output: day -> exactly the T1ZoneWindowGap entries THIS call's final,
+   * kept commit for that day decremented (empty/absent day = nothing
+   * decremented). Lets a caller that later decides to DROP one of this
+   * call's additions (computeFlexibleEmployeeTopUp's own
+   * normal_off_days_consecutive guard is the one real case) reverse
+   * EXACTLY the right credit, by the SAME precise-reversal rule
+   * t1UndoCommit itself uses internally — recomputing "what would this
+   * code cover now" after the fact would be wrong (see this function's own
+   * t1UndoCommit doc comment). Only ever populated when `t1Coverage` is
+   * supplied and the employee is eligible; omitted = not populated, no
+   * behavior change for any caller that doesn't ask for it.
+   */
+  t1DecrementedByDayOut?: Map<string, T1ZoneWindowGap[]>
 ): Map<string, string> {
   const additional = new Map<string, string>(); // day -> shiftCode, this employee only
+  const t1Active = t1Coverage?.employeeEligible === true;
+  // Which T1ZoneWindowGap entries THIS call's currently-open commit (per
+  // day) actually decremented — recorded at commit time so uncommit can
+  // reverse EXACTLY those, never a value recomputed after the decrement
+  // (see T1ZoneWindowGap's own doc comment on why that would be unsafe).
+  // At most one open commit per day at a time (the DFS below is strictly
+  // LIFO per day index), so a plain Map keyed by day is sufficient.
+  const t1DecrementedByDay = new Map<string, T1ZoneWindowGap[]>();
+  function t1CodeTimes(day: string, code: string): { entreeMin: number; sortieMin: number } {
+    const times = getShiftTimesAs(code, flightDateFor(weekStart, day));
+    return { entreeMin: timeToMinutes(times.shift_start), sortieMin: timeToMinutes(times.shift_end) };
+  }
+  /** Read-only: total still-needed headcount across every T1 window `code` would fully cover on `day`, among windows that still have real remaining demand. Never mutates. */
+  function t1CoverageScore(day: string, code: string): number {
+    if (!t1Active) return 0;
+    const windows = t1Coverage!.remainingByDay[day];
+    if (!windows || windows.length === 0) return 0;
+    const { entreeMin, sortieMin } = t1CodeTimes(day, code);
+    let score = 0;
+    for (const w of windows) if (w.remaining > 0 && windowFullyCovered(entreeMin, sortieMin, w.windowStart, w.windowEnd)) score += w.remaining;
+    return score;
+  }
+  /** Decrements (by 1, floor 0) every T1 window `code` fully covers on `day`, recording exactly which ones so a matching t1UndoCommit can reverse it precisely. */
+  function t1ApplyCommit(day: string, code: string): void {
+    if (!t1Active) return;
+    const windows = t1Coverage!.remainingByDay[day];
+    if (!windows || windows.length === 0) return;
+    const { entreeMin, sortieMin } = t1CodeTimes(day, code);
+    const decremented: T1ZoneWindowGap[] = [];
+    for (const w of windows) {
+      if (w.remaining > 0 && windowFullyCovered(entreeMin, sortieMin, w.windowStart, w.windowEnd)) {
+        w.remaining -= 1;
+        decremented.push(w);
+      }
+    }
+    if (decremented.length > 0) t1DecrementedByDay.set(day, decremented);
+    else t1DecrementedByDay.delete(day);
+  }
+  /** Reverses exactly what the matching t1ApplyCommit(day, ...) decremented — never a recomputation (see T1ZoneWindowGap's doc comment). */
+  function t1UndoCommit(day: string): void {
+    if (!t1Active) return;
+    const decremented = t1DecrementedByDay.get(day);
+    if (!decremented) return;
+    for (const w of decremented) w.remaining += 1;
+    t1DecrementedByDay.delete(day);
+  }
 
   const scheduledDays = new Set<string>(initialScheduledDays);
   let shortfallHours = targetHoursThisWindow === null ? 0 : Math.max(0, targetHoursThisWindow - initialScheduledHours);
@@ -519,25 +715,46 @@ export function computeEmployeeDayCountTopUp(
     // order. `t1PeakDemandMinuteByDay` omitted/day missing/null -> exact
     // prior behavior (first catalog-order candidate).
     const peakMinute = t1PeakDemandMinuteByDay?.[day];
+    /**
+     * Picks the preferred candidate from `list` (already fatigue-ordered
+     * when fatigue is active, else in preferredCandidates/shortest-first
+     * order). T1 ZONE/WINDOW COVERAGE (2026-10-27) takes priority when it
+     * finds a real (score > 0) gap-covering candidate — among ties on that
+     * score, prefer one that ALSO covers the aggregate peak-demand minute,
+     * else keep the first (list-order) top scorer. Falls back to the
+     * EXISTING single-peak-minute search untouched whenever t1Active is
+     * false or no candidate scores above 0 — byte-identical to the prior
+     * behavior in that case.
+     */
+    function pickFirst(list: CatalogCode[]): CatalogCode {
+      if (t1Active && list.length > 1) {
+        let bestScore = -1;
+        for (const c of list) {
+          const s = t1CoverageScore(day, c.code);
+          if (s > bestScore) bestScore = s;
+        }
+        if (bestScore > 0) {
+          const topScorers = list.filter((c) => t1CoverageScore(day, c.code) === bestScore);
+          const peakAndTopScore = peakMinute != null ? topScorers.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) : undefined;
+          return peakAndTopScore ?? topScorers[0];
+        }
+      }
+      return peakMinute != null && list.length > 1 ? list.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? list[0] : list[0];
+    }
     if (useFatigue) {
       // Same structure as below, with each preference group re-ordered by
       // lower fatigue burden (stable — ties keep shortest-first order). The
-      // T1-peak and neighbour-feasibility preferences still come first.
+      // T1 (zone/window, then peak-minute) and neighbour-feasibility
+      // preferences still come first.
       const preferredByFatigue = byFatigue(i, preferredCandidates);
-      const firstByFatigue =
-        peakMinute != null && preferredByFatigue.length > 1
-          ? preferredByFatigue.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? preferredByFatigue[0]
-          : preferredByFatigue[0];
+      const firstByFatigue = pickFirst(preferredByFatigue);
       return [
         firstByFatigue,
         ...preferredByFatigue.filter((c) => c !== firstByFatigue),
         ...byFatigue(i, legalCandidates.filter((c) => !preferredCandidates.includes(c))),
       ];
     }
-    const first =
-      peakMinute != null && preferredCandidates.length > 1
-        ? preferredCandidates.find((c) => shiftWindowCoversMinute(c.entreeMin, c.sortieMin, peakMinute)) ?? preferredCandidates[0]
-        : preferredCandidates[0];
+    const first = pickFirst(preferredCandidates);
     return [first, ...preferredCandidates.filter((c) => c !== first), ...legalCandidates.filter((c) => !preferredCandidates.includes(c))];
   }
 
@@ -547,6 +764,7 @@ export function computeEmployeeDayCountTopUp(
     scheduledDays.add(day);
     freeDays.delete(day);
     shortfallHours -= getShiftDurationHours(code, flightDateFor(weekStart, day));
+    t1ApplyCommit(day, code);
   }
   function uncommit(i: number, code: string): void {
     const day = daysOrder[i];
@@ -554,6 +772,7 @@ export function computeEmployeeDayCountTopUp(
     scheduledDays.delete(day);
     freeDays.add(day);
     shortfallHours += getShiftDurationHours(code, flightDateFor(weekStart, day));
+    t1UndoCommit(day);
   }
 
   function attemptDay(i: number, allowReserved: boolean): boolean {
@@ -699,8 +918,19 @@ export function computeEmployeeDayCountTopUp(
       if (wrapRest < minimumRestHours) {
         const lastIsTopUp = additional.has(lastDay) && !getExistingShift(lastDay);
         const firstIsTopUp = additional.has(firstDay) && !getExistingShift(firstDay);
-        if (lastIsTopUp) additional.delete(lastDay);
-        else if (firstIsTopUp) additional.delete(firstDay);
+        // This bypasses commit/uncommit's own bookkeeping (scheduledDays/
+        // freeDays/shortfallHours go stale here too, same as before this
+        // change — nothing below re-reads them), so the T1 decrement this
+        // dropped day applied must be undone here too, or the shared
+        // remaining-gap state would stay wrongly decremented for every
+        // later employee this generation pass still has to process.
+        if (lastIsTopUp) {
+          additional.delete(lastDay);
+          t1UndoCommit(lastDay);
+        } else if (firstIsTopUp) {
+          additional.delete(firstDay);
+          t1UndoCommit(firstDay);
+        }
       }
     }
   }
@@ -718,6 +948,28 @@ export function computeEmployeeDayCountTopUp(
         displaced && displaced.code !== code ? explainFatigueChoice(projectCode(i, code), projectCode(i, displaced.code), fatigue!.config) : []
       );
     }
+  }
+
+  // T1 COVERAGE EXPLAINABILITY (2026-10-27): for each FINAL added day whose
+  // chosen code still fully covers a real (post-decrement) T1 gap, a plain-
+  // words note — never a raw score, same convention as fatigue above.
+  // Re-checks against the CURRENT (already-decremented-by-this-employee's-
+  // own-other-days) state, so the note reflects what this code actually
+  // still closes in the final result, not a stale pre-walk snapshot.
+  if (t1Active && t1CoverageReasonsOut) {
+    for (const day of additional.keys()) {
+      // t1DecrementedByDay already holds exactly the windows THIS day's
+      // live, final commit decremented (see t1ApplyCommit/t1UndoCommit) —
+      // no need to recompute coverage here.
+      const justClosed = t1DecrementedByDay.get(day);
+      if (justClosed && justClosed.length > 0) {
+        const parts = justClosed.map((w) => `${w.zone} (${w.windowStart}–${w.windowEnd})`);
+        t1CoverageReasonsOut.set(day, `Covers T1 Check-in demand still short on ${parts.join(", ")}, in addition to the normal roster obligation.`);
+      }
+    }
+  }
+  if (t1Active && t1DecrementedByDayOut) {
+    for (const [day, windows] of t1DecrementedByDay) t1DecrementedByDayOut.set(day, windows);
   }
 
   return additional;
@@ -741,12 +993,22 @@ export interface FlexibleTopUpContext {
   preferredOffDaysByEmployee?: ReadonlyMap<string, ReadonlySet<string>>;
   fatigueConfig?: FatigueConfig;
   hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number> };
+  // T1 CHECK-IN ZONE/WINDOW COVERAGE BIAS (2026-10-27) — see
+  // TopUpT1CoverageOptions. Deliberately OMITTED from the FlexibleTopUpContext
+  // hard-cap-repair.ts builds for its own simulateTopUp callback (see
+  // generate-draft-plan.ts) — that simulation runs BEFORE the real top-up and
+  // must never permanently decrement the SAME shared remaining-gap state the
+  // real top-up relies on later. generate-draft-plan.ts is the one real
+  // caller that supplies this, for the real (not simulated) top-up only.
+  remainingT1ZoneGapsByDay?: Record<string, T1ZoneWindowGap[]>;
 }
 
 export interface FlexibleEmployeeTopUpResult {
   additions: Map<string, string>;
   fatigueReasons?: Map<string, string[]>;
   shortfall: { day: string; reason: HardCapExclusionReason }[];
+  /** day -> plain-words T1 coverage explanation — see computeEmployeeDayCountTopUp's t1CoverageReasonsOut. Only present when this employee is T1-eligible and ctx.remainingT1ZoneGapsByDay was supplied. */
+  t1CoverageReasons?: Map<string, string>;
 }
 
 /**
@@ -787,7 +1049,14 @@ export interface FlexibleEmployeeTopUpResult {
 export function computeFlexibleEmployeeTopUp(
   employeeId: string,
   demandDrivenShiftsByDay: Record<string, GeneratedShiftAssignment[]>,
-  ctx: FlexibleTopUpContext
+  ctx: FlexibleTopUpContext,
+  // T1 CHECK-IN ZONE/WINDOW COVERAGE BIAS (2026-10-27) — whether THIS
+  // employee is Check-in eligible at all (see TopUpT1CoverageOptions).
+  // Irrelevant (and never consulted) when ctx.remainingT1ZoneGapsByDay is
+  // omitted. The caller (generateObligationToppedUpShifts) computes this
+  // once per employee via isEligibleForDefaultCheckinPlacement; omitted
+  // here = treated as ineligible = no change from before this feature.
+  employeeT1Eligible = false
 ): FlexibleEmployeeTopUpResult {
   const { daysOrder, config, weekStart, hardCaps, fatigueConfig } = ctx;
   const targetWorkDays = Math.max(0, daysOrder.length - config.normal_weekly_off_days);
@@ -805,6 +1074,9 @@ export function computeFlexibleEmployeeTopUp(
   const fatigueReasons = fatigueConfig?.enabled ? new Map<string, string[]>() : undefined;
   const shortfall: { day: string; reason: HardCapExclusionReason }[] = [];
   const preferredStart = preferredWindowStart(daysOrder, ctx.preferredOffDaysByEmployee?.get(employeeId), offWindowLength);
+  const t1Active = Boolean(ctx.remainingT1ZoneGapsByDay) && employeeT1Eligible;
+  const t1CoverageReasons = t1Active ? new Map<string, string>() : undefined;
+  const t1Decremented = t1Active ? new Map<string, T1ZoneWindowGap[]>() : undefined;
   const additions = computeEmployeeDayCountTopUp(
     employeeId,
     daysOrder,
@@ -822,7 +1094,10 @@ export function computeFlexibleEmployeeTopUp(
     fatigueReasons ? { config: fatigueConfig!, reasonsOut: fatigueReasons } : undefined,
     hardCaps
       ? { caps: hardCaps.caps, incomingStreak: hardCaps.incomingStreakByEmployee.get(employeeId) ?? 0, shortfallOut: shortfall, maxConsecutiveOffDays: config.max_consecutive_off_days }
-      : undefined
+      : undefined,
+    t1Active ? { remainingByDay: ctx.remainingT1ZoneGapsByDay!, employeeEligible: true } : undefined,
+    t1CoverageReasons,
+    t1Decremented
   );
 
   let finalAdditions = additions;
@@ -830,6 +1105,7 @@ export function computeFlexibleEmployeeTopUp(
     const freeDays = new Set(daysOrder.filter((d) => !scheduledDays.has(d)));
     const reserved = chooseTopUpReservedOffDays(daysOrder, freeDays, offWindowLength, preferredStart);
     if (reserved.size > 0) {
+      const dropped = [...additions].filter(([day]) => reserved.has(day));
       const kept = new Map([...additions].filter(([day]) => !reserved.has(day)));
       // SAFETY (x2): dropping the reserved-window addition can only ever ADD
       // an OFF day (never remove one), so it must earn its place by actually
@@ -857,12 +1133,26 @@ export function computeFlexibleEmployeeTopUp(
         const keptRun = runFor(kept);
         const keptOffCount = offCountFor(kept);
         const isOneCleanBlock = keptRun <= config.max_consecutive_off_days && (keptOffCount === 0 || keptRun === keptOffCount);
-        if (isOneCleanBlock) finalAdditions = kept;
+        if (isOneCleanBlock) {
+          finalAdditions = kept;
+          // T1 CORRECTNESS (2026-10-27): a dropped day's T1 credit was
+          // already applied (permanently, inside the computeEmployeeDayCountTopUp
+          // call above) to the SHARED remainingByDay state — reverse exactly
+          // what that day decremented (t1Decremented, never a recomputation;
+          // see T1ZoneWindowGap's own doc comment) so later employees in this
+          // same pass see the correct, un-double-counted picture.
+          if (t1Active && t1Decremented) {
+            for (const [day] of dropped) {
+              for (const w of t1Decremented.get(day) ?? []) w.remaining += 1;
+              t1CoverageReasons?.delete(day);
+            }
+          }
+        }
       }
     }
   }
 
-  return { additions: finalAdditions, fatigueReasons, shortfall };
+  return { additions: finalAdditions, fatigueReasons, shortfall, t1CoverageReasons };
 }
 
 /**
@@ -912,7 +1202,16 @@ export function generateObligationToppedUpShifts(
   // is responsible for disclosing unknown history). `exclusionsOut` receives
   // one record per day a cap kept an employee below the day-count target.
   // Omitted = no cap filtering.
-  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number>; exclusionsOut?: HardCapExclusion[] }
+  hardCaps?: { caps: HardWorkCaps; incomingStreakByEmployee: ReadonlyMap<string, number>; exclusionsOut?: HardCapExclusion[] },
+  // T1 CHECK-IN ZONE/WINDOW COVERAGE BIAS (2026-10-27) — see
+  // TopUpT1CoverageOptions and buildRemainingT1ZoneGaps. Per-day remaining
+  // T1 Check-in zone/window gaps, already net of Stage 6 + hard-cap
+  // repair's real demand-driven result (generate-draft-plan.ts builds this
+  // right before calling this function). Mutated in place as each eligible
+  // employee processed below is topped up — see T1ZoneWindowGap's own doc
+  // comment. Optional; omitted reproduces the prior output byte-for-byte —
+  // every existing caller/test keeps working unchanged.
+  remainingT1ZoneGapsByDay?: Record<string, T1ZoneWindowGap[]>
 ): Record<string, GeneratedShiftAssignment[]> {
   const additional: Record<string, GeneratedShiftAssignment[]> = {};
   for (const day of daysOrder) additional[day] = [];
@@ -927,6 +1226,7 @@ export function generateObligationToppedUpShifts(
     preferredOffDaysByEmployee,
     fatigueConfig,
     hardCaps: hardCaps ? { caps: hardCaps.caps, incomingStreakByEmployee: hardCaps.incomingStreakByEmployee } : undefined,
+    remainingT1ZoneGapsByDay,
   };
 
   // Never schedule below the employee's OFF-day entitlement for this
@@ -934,7 +1234,13 @@ export function generateObligationToppedUpShifts(
   // or cap-aware, target) governs both, so an hours top-up can never push
   // an employee past the roster shape objective 1 establishes.
   for (const employee of employees.filter(isFlexibleGeneralPool)) {
-    const { additions, fatigueReasons, shortfall } = computeFlexibleEmployeeTopUp(employee.id, demandDrivenShiftsByDay, ctx);
+    const employeeT1Eligible = Boolean(remainingT1ZoneGapsByDay) && isEligibleForDefaultCheckinPlacement(employee);
+    const { additions, fatigueReasons, shortfall, t1CoverageReasons } = computeFlexibleEmployeeTopUp(
+      employee.id,
+      demandDrivenShiftsByDay,
+      ctx,
+      employeeT1Eligible
+    );
     for (const { day, reason } of shortfall) {
       hardCaps?.exclusionsOut?.push({ employeeId: employee.id, dayOfWeek: day, population: "flexible_pool_top_up", reason });
     }
@@ -942,6 +1248,8 @@ export function generateObligationToppedUpShifts(
     for (const [day, shiftCode] of additions) {
       const g: GeneratedShiftAssignment = { employeeId: employee.id, dayOfWeek: day, shiftCode, coversRoles: [] };
       if (fatigueReasons) g.fatigueReason = fatigueReasons.get(day) ?? [];
+      const t1Reason = t1CoverageReasons?.get(day);
+      if (t1Reason) g.t1CoverageReason = t1Reason;
       additional[day].push(g);
     }
   }
